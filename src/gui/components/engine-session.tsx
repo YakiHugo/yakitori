@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react"
+import { discardDraftAttachments } from "../composer-attachments.ts"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../../shared/acp-execution-view.ts"
 import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
@@ -7,6 +8,7 @@ import {
   answerEnginePermission,
   cancelEngineTurn,
   chooseNewEngine,
+  configureEngineSession,
   selectEngineSession,
   sendEngineInput,
   useEngineStore,
@@ -110,6 +112,9 @@ export function EngineConversation() {
     [state.snapshot],
   )
   const [permissionBusy, setPermissionBusy] = useState<string>()
+  const [configuring, setConfiguring] = useState(false)
+  const promptCapabilities =
+    view?.chrome.prompt ?? descriptor?.capabilities.prompt
   const scroll = useRef<HTMLElement>(null)
   const pinned = useRef(true)
   // biome-ignore lint/correctness/useExhaustiveDependencies: new observed output changes the scroll height.
@@ -246,30 +251,94 @@ export function EngineConversation() {
         removePromptExcerpt={() => {}}
         updatePromptExcerpt={() => {}}
         onSubmit={(draft) => {
-          if (!view?.activeTurnId && !uncertain)
-            void sendEngineInput(inputContentText(inputContent(draft)))
+          if (!view?.activeTurnId && !uncertain) {
+            const content = inputContent(draft)
+            void sendEngineInput(
+              inputContentText(content),
+              content.attachments.length > 0 ? content : undefined,
+            )
+          }
         }}
         onCancel={() => {
           if (view?.activeTurnId) void cancelEngineTurn(view.activeTurnId)
         }}
         modelControls={
-          <span className="text-xs text-muted-foreground">
-            {descriptor?.label ?? state.engineId} · Engine-managed model
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {view?.chrome.controls.length ? (
+              view.chrome.controls.map((control) => (
+                <Select
+                  key={control.id}
+                  size="sm"
+                  variant="ghost"
+                  aria-label={control.label}
+                  value={control.value}
+                  options={[...control.options]}
+                  disabled={
+                    configuring || uncertain || view.activeTurnId !== undefined
+                  }
+                  onValueChange={(value) => {
+                    setConfiguring(true)
+                    void configureEngineSession(control.id, value).finally(() =>
+                      setConfiguring(false),
+                    )
+                  }}
+                />
+              ))
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                {descriptor?.label ?? state.engineId} · Engine-managed model
+              </span>
+            )}
+            {view?.chrome.usage === undefined ? null : (
+              <span
+                className="text-xs text-muted-foreground"
+                title="Engine context usage"
+              >
+                {view.chrome.usage.used.toLocaleString()} /{" "}
+                {view.chrome.usage.size.toLocaleString()} tokens
+              </span>
+            )}
+          </div>
         }
-        importAttachments={async () => {
-          useEngineStore.setState({
-            error: "This engine connection currently accepts text only.",
-          })
-          return undefined
+        importAttachments={async (prepare, validate) => {
+          if (
+            !promptCapabilities?.image &&
+            !promptCapabilities?.embeddedContext
+          )
+            return
+          validate?.()
+          const prepared = await prepare()
+          if (prepared === undefined) return
+          try {
+            const attachments = await prepared.collect(state.sessionId)
+            const unsupported = attachments.filter((attachment) =>
+              attachment.mediaType === "application/pdf"
+                ? !promptCapabilities.embeddedContext
+                : !promptCapabilities.image,
+            )
+            if (unsupported.length > 0) {
+              await discardDraftAttachments(attachments, apiBase)
+              throw new Error(
+                "An attachment type is unavailable in this engine.",
+              )
+            }
+            return attachments
+          } finally {
+            await prepared.cleanup?.()
+          }
         }}
         readingAttachments={false}
         onAttachmentError={(error) => useEngineStore.setState({ error })}
         allowCommands={false}
-        allowAttachments={false}
-        supportsImages={false}
+        engineCommands={view?.chrome.commands}
+        allowAttachments={
+          promptCapabilities?.image === true ||
+          promptCapabilities?.embeddedContext === true
+        }
+        supportsImages={promptCapabilities?.image === true}
         busy={
           state.loading ||
+          configuring ||
           uncertain ||
           descriptor?.available === false ||
           view?.activeTurnId !== undefined

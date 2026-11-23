@@ -4,7 +4,7 @@ import type {
   EngineSessionSnapshot,
   EngineSessionSummary,
 } from "../../protocol/engine.ts"
-import type { InputDraft } from "../../protocol/user-input.ts"
+import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../../shared/acp-execution-view.ts"
 import {
   hasInputDraft,
@@ -81,6 +81,22 @@ export function chooseNewEngine(engineId: string) {
     engineId: engineId || undefined,
     draft: state.drafts[draftKey(engineId)] ?? textInputDraft(""),
   }))
+  if (engineId !== "") void inspectEngine(engineId)
+}
+
+async function inspectEngine(engineId: string): Promise<void> {
+  const captured = revision
+  try {
+    const descriptor = await client().request("engine/inspect", { engineId })
+    if (descriptor?.id === engineId)
+      useEngineStore.setState((state) => ({
+        engines: state.engines.map((engine) =>
+          engine.id === engineId ? descriptor : engine,
+        ),
+      }))
+  } catch (error) {
+    if (revision === captured) useEngineStore.setState({ error: String(error) })
+  }
 }
 
 export function startNewEngineSession(): void {
@@ -151,7 +167,10 @@ async function refreshEngineSelection() {
               loading: false,
               pendingRequestId: resolved ? undefined : current.pendingRequestId,
               draft:
-                accepted && current.draft.text.trim() === receipt.input.text
+                accepted &&
+                (receipt.input.content === undefined
+                  ? current.draft.text.trim() === receipt.input.text
+                  : sameInputDraft(current.draft, receipt.input.content))
                   ? textInputDraft("")
                   : current.draft,
               stopping,
@@ -208,7 +227,7 @@ export async function initializeEngineSessions() {
   }
 }
 
-export async function sendEngineInput(text: string) {
+export async function sendEngineInput(text: string, content?: InputContent) {
   const state = useEngineStore.getState()
   const view =
     state.snapshot === undefined
@@ -220,7 +239,9 @@ export async function sendEngineInput(text: string) {
     state.pendingRequestId ||
     view?.activeTurnId ||
     view?.uncertain.length ||
-    !text.trim()
+    (!text.trim() &&
+      !content?.attachments.length &&
+      !content?.references?.length)
   )
     return
   const engineId = state.engineId
@@ -263,6 +284,7 @@ export async function sendEngineInput(text: string) {
       sessionId,
       requestId,
       text,
+      ...(content === undefined ? {} : { content }),
     })
     if (localStorage.getItem(pendingKey(sessionId)) === requestId)
       localStorage.removeItem(pendingKey(sessionId))
@@ -364,6 +386,23 @@ export async function answerEnginePermission(
     if (!accepted)
       throw new Error("This permission request is no longer pending.")
     await refreshEngineSelection()
+  } catch (error) {
+    if (revision === captured) useEngineStore.setState({ error: String(error) })
+  }
+}
+
+export async function configureEngineSession(configId: string, value: string) {
+  const sessionId = useEngineStore.getState().sessionId
+  if (sessionId === undefined) return
+  const captured = revision
+  try {
+    const accepted = await client().request("engineSession/configure", {
+      sessionId,
+      configId,
+      value,
+    })
+    if (!accepted) throw new Error("The engine did not accept this setting.")
+    if (revision === captured) await refreshEngineSelection()
   } catch (error) {
     if (revision === captured) useEngineStore.setState({ error: String(error) })
   }

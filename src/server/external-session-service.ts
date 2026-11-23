@@ -3,6 +3,9 @@ import { existsSync, mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { isDeepStrictEqual } from "node:util"
+import type { PreparedAttachments } from "../core/rollout-assets.ts"
+import type { UserAttachment } from "../protocol/asset-types.ts"
+import type { InputContent } from "../protocol/user-input.ts"
 import type {
   EngineAdapter,
   EngineBinding,
@@ -30,6 +33,7 @@ export type ObservedEngineEvent = Readonly<{
         requestId: string
         turnId: string
         text: string
+        content?: InputContent
       }>
     | Readonly<{
         type: "permission.resolved"
@@ -51,6 +55,11 @@ export type ExternalSessionRead = Readonly<{
   requests: readonly ExternalRequest[]
   history: "observed"
 }>
+type PrepareEngineAttachments = (
+  sessionId: string,
+  requestId: string,
+  attachments: readonly UserAttachment[],
+) => Promise<PreparedAttachments>
 
 // This is an app display/index store for external engines, never their context
 // database. Native Yakitori sessions continue to use their canonical rollout.
@@ -58,6 +67,7 @@ export class ExternalSessionService {
   readonly #changed: ((sessionId: string) => void) | undefined
   readonly #engine: EngineAdapter
   readonly #database: DatabaseSync
+  readonly #prepareAttachments: PrepareEngineAttachments | undefined
   readonly #bound = new Map<string, Promise<EngineBinding>>()
   readonly #unsubscribe = new Map<string, () => void>()
   readonly #listeners = new Map<
@@ -74,9 +84,11 @@ export class ExternalSessionService {
     engine: EngineAdapter
     databasePath: string
     changed?: (sessionId: string) => void
+    prepareAttachments?: PrepareEngineAttachments
   }) {
     this.#changed = options.changed
     this.#engine = options.engine
+    this.#prepareAttachments = options.prepareAttachments
     if (options.databasePath !== ":memory:")
       mkdirSync(dirname(options.databasePath), { recursive: true })
     this.#database = new DatabaseSync(options.databasePath)
@@ -177,6 +189,11 @@ export class ExternalSessionService {
     }
   }
 
+  hasSession(id: string): boolean {
+    this.#checkOpen()
+    return this.#session(id) !== undefined
+  }
+
   send(id: string, input: EngineInput): Promise<EngineSendResult> {
     return this.#run(() => this.#admit(id, input))
   }
@@ -221,11 +238,41 @@ export class ExternalSessionService {
   }
 
   async #send(id: string, input: EngineInput): Promise<EngineSendResult> {
+    let prepared: PreparedAttachments | undefined
     try {
       const binding = await this.#bind(id)
       this.#checkAccepting()
-      const result = await this.#engine.send(binding, input)
+      let content = input.content
+      if (content !== undefined && content.attachments.length > 0) {
+        try {
+          prepared = await this.#prepareAttachments?.(
+            id,
+            input.requestId,
+            content.attachments,
+          )
+          if (prepared === undefined)
+            throw new Error("Engine attachments are unavailable.")
+        } catch (error) {
+          const reason =
+            error instanceof Error
+              ? error.message
+              : "Could not prepare engine attachments."
+          this.#saveRequest(id, {
+            requestId: input.requestId,
+            input,
+            status: "rejected",
+            reason,
+          })
+          return { status: "rejected", reason }
+        }
+        content = { ...content, attachments: prepared.attachments }
+      }
+      const result = await this.#engine.send(binding, {
+        ...input,
+        ...(content === undefined ? {} : { content }),
+      })
       if (result.status === "rejected") {
+        await prepared?.rollback()
         this.#saveRequest(id, {
           requestId: input.requestId,
           input,
@@ -259,6 +306,7 @@ export class ExternalSessionService {
         requestId: input.requestId,
         turnId: result.turnId,
         text: input.text,
+        ...(content === undefined ? {} : { content }),
       })
       return result
     } catch (error) {
@@ -277,6 +325,14 @@ export class ExternalSessionService {
       const binding = await this.#bind(id)
       this.#checkAccepting()
       return this.#engine.cancel(binding, turnId, reason)
+    })
+  }
+
+  configure(id: string, configId: string, value: string): Promise<boolean> {
+    return this.#run(async () => {
+      const binding = await this.#bind(id)
+      this.#checkAccepting()
+      return (await this.#engine.configure?.(binding, configId, value)) ?? false
     })
   }
 

@@ -8,6 +8,7 @@ export type EngineCapabilities = Readonly<{
   steer: boolean
   queue: boolean
   subagents: boolean
+  prompt?: EnginePromptCapabilities
 }>
 
 export type EngineDescriptor = Readonly<{
@@ -67,6 +68,7 @@ export type EngineEvent =
       requestId: string
       turnId: string
       text: string
+      content?: InputContent
     }>
   | Readonly<{
       type: "permission.resolved"
@@ -94,7 +96,7 @@ export type EngineSessionSnapshot = Readonly<{
   history: "observed"
   requests: readonly Readonly<{
     requestId: string
-    input: Readonly<{ requestId: string; text: string }>
+    input: Readonly<{ requestId: string; text: string; content?: InputContent }>
     status: "pending" | "accepted" | "rejected" | "terminal" | "unknown"
     turnId?: string
     reason?: string
@@ -103,6 +105,7 @@ export type EngineSessionSnapshot = Readonly<{
 
 export type EngineRpcParams = {
   "engine/list": Record<string, never>
+  "engine/inspect": { engineId: string }
   "engineSession/create": {
     engineId: string
     cwd?: string
@@ -111,8 +114,18 @@ export type EngineRpcParams = {
   }
   "engineSession/list": Record<string, never>
   "engineSession/read": { sessionId: string }
-  "engineSession/send": { sessionId: string; requestId: string; text: string }
+  "engineSession/send": {
+    sessionId: string
+    requestId: string
+    text: string
+    content?: InputContent
+  }
   "engineSession/cancel": { sessionId: string; turnId: string }
+  "engineSession/configure": {
+    sessionId: string
+    configId: string
+    value: string
+  }
   "engineSession/respondPermission": {
     sessionId: string
     requestId: string
@@ -123,10 +136,18 @@ export type EngineRpcParams = {
 
 export type EngineRpcResponses = {
   "engine/list": { engines: readonly EngineDescriptor[] }
+  "engine/inspect": EngineDescriptor
   "engineSession/create": EngineSessionSnapshot
   "engineSession/list": { sessions: readonly EngineSessionSummary[] }
   "engineSession/read": EngineSessionSnapshot
   "engineSession/send": EngineSendResult
   "engineSession/cancel": { status: "requested" | "not_running" }
+  "engineSession/configure": boolean
   "engineSession/respondPermission": boolean
 }
+import type { InputContent } from "./user-input.ts"
+
+export type EnginePromptCapabilities = Readonly<{
+  image?: true
+  embeddedContext?: true
+}>

@@ -604,19 +604,22 @@ describe("external engine workspace", () => {
 
   it("does not send after an asynchronous create returns to an abandoned draft", async () => {
     let complete: ((value: EngineSessionSnapshot) => void) | undefined
-    request.mockImplementation(
-      () =>
-        new Promise<EngineSessionSnapshot>((resolve) => {
-          complete = resolve
-        }),
+    request.mockImplementation((method) =>
+      method === "engine/inspect"
+        ? Promise.resolve(engine)
+        : new Promise<EngineSessionSnapshot>((resolve) => {
+            complete = resolve
+          }),
     )
     chooseNewEngine("external")
     const pending = sendEngineInput("hello")
     chooseNewEngine("")
     complete?.(snapshot())
     await pending
-    expect(request).toHaveBeenCalledTimes(1)
-    expect(request.mock.calls[0]?.[0]).toBe("engineSession/create")
+    expect(request.mock.calls.map(([method]) => method)).toEqual([
+      "engine/inspect",
+      "engineSession/create",
+    ])
     expect(useEngineStore.getState().engineId).toBeUndefined()
   })
 

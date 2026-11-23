@@ -141,6 +141,33 @@ describe("external ACP v1 process boundary", () => {
     )
   })
 
+  it("spells configuration changes with the advertised ID and waits for the agent state", async () => {
+    const { adapter, binding, events } = await setup("config")
+    await expect(
+      adapter.configure(binding, "not-advertised", "deep"),
+    ).resolves.toBe(false)
+    await expect(
+      adapter.configure(binding, "thought_level", "unknown"),
+    ).resolves.toBe(false)
+    await expect(
+      adapter.configure(binding, "thought_level", "deep"),
+    ).resolves.toBe(true)
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "session.update",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            expect.objectContaining({
+              id: "thought_level",
+              currentValue: "deep",
+            }),
+          ],
+        },
+      }),
+    )
+  })
+
   it.each([
     "cancel",
     "cancel-permission",

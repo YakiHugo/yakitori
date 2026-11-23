@@ -1,4 +1,8 @@
-import type { EngineEvent, EngineSessionSnapshot } from "../protocol/engine.ts"
+import type {
+  EngineEvent,
+  EnginePromptCapabilities,
+  EngineSessionSnapshot,
+} from "../protocol/engine.ts"
 import type {
   ExecutionEntry,
   ExecutionView,
@@ -30,6 +34,52 @@ type Turn = {
 }
 
 export function projectEngineSession(snapshot: EngineSessionSnapshot) {
+  let controls: readonly AcpConfigControl[] = []
+  let commands: { name: string; description: string }[] = []
+  let usage: { used: number; size: number } | undefined
+  let prompt: EnginePromptCapabilities | undefined
+  for (const { event } of snapshot.events) {
+    if (event.type !== "session.update") continue
+    const { update } = event
+    controls = applyAcpConfig(controls, update)
+    if (
+      update.sessionUpdate === "session_initialized" &&
+      update.promptCapabilities !== undefined
+    ) {
+      const capabilities = acpRecord(update.promptCapabilities)
+      prompt = {
+        ...(capabilities.image === true ? { image: true } : {}),
+        ...(capabilities.embeddedContext === true
+          ? { embeddedContext: true }
+          : {}),
+      }
+    }
+    if (
+      update.sessionUpdate === "available_commands_update" &&
+      Array.isArray(update.availableCommands)
+    )
+      commands = update.availableCommands.flatMap((command) => {
+        const { name, description } = acpRecord(command)
+        return typeof name === "string" && /^[\p{L}\p{N}_-]+$/u.test(name)
+          ? [
+              {
+                name: `/${name}`,
+                description: typeof description === "string" ? description : "",
+              },
+            ]
+          : []
+      })
+    if (
+      update.sessionUpdate === "usage_update" &&
+      typeof update.used === "number" &&
+      Number.isSafeInteger(update.used) &&
+      update.used >= 0 &&
+      typeof update.size === "number" &&
+      Number.isSafeInteger(update.size) &&
+      update.size > 0
+    )
+      usage = { used: update.used, size: update.size }
+  }
   const observed = projectObserved(
     snapshot.events.filter(
       ({ event }) => event.type !== "session.update" || !event.replayed,
@@ -96,6 +146,7 @@ export function projectEngineSession(snapshot: EngineSessionSnapshot) {
   }
   return {
     executionView,
+    chrome: { controls, commands, usage, prompt },
     activeTurnId: observed.activeTurnId,
     permissions: [...observed.permissions.values()].map((permission) => ({
       ...permission,
@@ -297,7 +348,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
         inputId: event.requestId,
         requestId: event.requestId,
         text: event.text,
-        content: createUserInput(event.text),
+        content: event.content ?? createUserInput(event.text),
         at,
       }
     } else if (event.type === "permission.requested") {
@@ -352,3 +403,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
     if (replay) turn.completedAt = turn.startedAt
   return { turns, tools, permissions, activeTurnId }
 }
+import {
+  applyAcpConfig,
+  type AcpConfigControl,
+} from "../protocol/acp-config.ts"

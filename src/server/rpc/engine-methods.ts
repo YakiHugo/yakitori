@@ -3,6 +3,7 @@ import { EngineRegistryError, type EngineRegistry } from "../engine-registry.ts"
 import { INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
 import { type RpcMethodDefinition, RpcMethodError } from "./methods.ts"
 import type { EngineRpcParams } from "../../protocol/engine.ts"
+import { inputContentText, isInputContent } from "../../protocol/user-input.ts"
 
 function string(params: Record<string, unknown>, key: string): string {
   const value = params[key]
@@ -63,6 +64,9 @@ function entry(
 
 export const engineMethods: readonly RpcMethodDefinition[] = [
   entry("engine/list", (registry) => ({ engines: registry.engines() })),
+  entry("engine/inspect", (registry, params) =>
+    registry.inspect(string(params, "engineId")),
+  ),
   entry("engineSession/list", (registry) => ({ sessions: registry.list() })),
   entry("engineSession/create", async (registry, params) => {
     const cwd = optional(params, "cwd")
@@ -95,17 +99,36 @@ export const engineMethods: readonly RpcMethodDefinition[] = [
   entry("engineSession/read", (registry, params) =>
     registry.read(string(params, "sessionId")),
   ),
-  entry("engineSession/send", (registry, params) =>
-    registry.send({
+  entry("engineSession/send", (registry, params) => {
+    const content = params.content
+    if (content !== undefined && !isInputContent(content))
+      throw new EngineRegistryError("Invalid engine prompt content.")
+    if (
+      typeof params.text !== "string" ||
+      (content !== undefined && inputContentText(content) !== params.text) ||
+      (params.text.trim().length === 0 &&
+        !content?.attachments.length &&
+        !content?.references?.length)
+    )
+      throw new EngineRegistryError("Invalid engine prompt text.")
+    return registry.send({
       sessionId: string(params, "sessionId"),
       requestId: string(params, "requestId"),
-      text: string(params, "text"),
-    }),
-  ),
+      text: params.text,
+      ...(content === undefined ? {} : { content }),
+    })
+  }),
   entry("engineSession/cancel", (registry, params) =>
     registry.cancel({
       sessionId: string(params, "sessionId"),
       turnId: string(params, "turnId"),
+    }),
+  ),
+  entry("engineSession/configure", (registry, params) =>
+    registry.configure({
+      sessionId: string(params, "sessionId"),
+      configId: string(params, "configId"),
+      value: string(params, "value"),
     }),
   ),
   entry("engineSession/respondPermission", (registry, params) => {

@@ -1497,6 +1497,84 @@ test("external engines render observed activity and permissions through reloads"
   }
 })
 
+test("ACP negotiates image input, configuration and available commands", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  const start = (port: string) =>
+    spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: {
+        ...environment.env,
+        PORT: port,
+        YAKITORI_GUI_DIR: resolve("dist/gui"),
+        YAKITORI_ACP_ENGINES: JSON.stringify([
+          {
+            id: "config-acp",
+            label: "Configured ACP",
+            command: process.execPath,
+            args: [resolve("test/fixtures/acp/agent.mjs"), "config"],
+          },
+        ]),
+      },
+    })
+  try {
+    server = await start("0")
+    await page.goto(server.url)
+    await page.getByRole("combobox", { name: "New session engine" }).click()
+    await page
+      .getByRole("option", { name: "Configured ACP", exact: true })
+      .click()
+    const composer = page.getByRole("textbox", { name: "Message the Mate" })
+    await composer.fill("Check the image")
+    await page.getByRole("button", { name: "Add context" }).click()
+    const chooser = page.waitForEvent("filechooser")
+    await page.getByRole("option", { name: "Add images or PDFs" }).click()
+    await (await chooser).setFiles(
+      join(environment.root, "workspace", "smoke.png"),
+    )
+    await expect(
+      page.getByRole("button", { name: "Preview smoke.png", exact: true }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page.getByText("Engine received the image.", { exact: true }),
+    ).toBeVisible()
+    const control = page.getByRole("combobox", {
+      name: "Reasoning level",
+      exact: true,
+    })
+    await control.click()
+    await page.getByRole("option", { name: "Deep", exact: true }).click()
+    await expect(control).toContainText("Deep")
+    await composer.fill("/")
+    await expect(
+      page.getByRole("option", { name: /Show engine status/ }),
+    ).toBeVisible()
+    const port = new URL(server.url).port
+    await server.stop()
+    server = await start(port)
+    await page.reload()
+    await expect(
+      page.getByText("Engine received the image.", { exact: true }),
+    ).toBeVisible()
+    const image = page.getByRole("img", { name: "smoke.png", exact: true })
+    await expect(image).toBeVisible()
+    await expect
+      .poll(() =>
+        image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(0)
+    await expect(control).toContainText("Deep")
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
+
 test("expired side chats dismiss excerpt actions and leave main chat quoting available", async ({
   page,
 }, testInfo) => {
