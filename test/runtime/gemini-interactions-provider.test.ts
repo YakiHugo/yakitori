@@ -354,7 +354,7 @@ describe("Gemini Interactions wire boundary", () => {
       kind: "protocol_error",
     },
     {
-      name: "unsupported generated media",
+      name: "invalid generated image bytes",
       events: closedStep({
         type: "model_output",
         content: [{ type: "image", data: "image" }],
@@ -376,6 +376,54 @@ describe("Gemini Interactions wire boundary", () => {
       ),
     ).toEqual([])
     expect(events.at(-1)).toMatchObject({ type: "failure", failure: { kind } })
+  })
+
+  it("keeps generated images between text parts using the displayed text indexes", async () => {
+    const image = {
+      type: "image",
+      mime_type: "image/png",
+      data: pngImageBase64,
+    }
+    const events = await collect(
+      provider([
+        created,
+        { event_type: "step.start", index: 0, step: { type: "model_output" } },
+        {
+          event_type: "step.delta",
+          index: 0,
+          delta: { type: "text", text: "Before." },
+        },
+        { event_type: "step.delta", index: 0, delta: image },
+        {
+          event_type: "step.delta",
+          index: 0,
+          delta: { type: "text", text: "After." },
+        },
+        { event_type: "step.stop", index: 0 },
+        complete("completed"),
+      ])(request()),
+    )
+    expect(events.filter((event) => event.type === "delta")).toMatchObject([
+      { text: "Before.", partIndex: 0 },
+      { text: "After.", partIndex: 1 },
+    ])
+    expect(events.at(-1)).toMatchObject({
+      type: "response",
+      response: {
+        content: [
+          { type: "text", text: "Before." },
+          {
+            type: "image_output",
+            image: {
+              type: "image",
+              mediaType: "image/png",
+              data: pngImageBase64,
+            },
+          },
+          { type: "text", text: "After." },
+        ],
+      },
+    })
   })
 
   it("requires valid SSE framing after completion before committing a closed call", async () => {

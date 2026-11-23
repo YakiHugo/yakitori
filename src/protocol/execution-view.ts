@@ -1,4 +1,8 @@
-import type { CitationRange, ModelToolContentBlock } from "./conversation.ts"
+import type {
+  CitationRange,
+  ModelImageBlock,
+  ModelToolContentBlock,
+} from "./conversation.ts"
 import type {
   TokenUsage,
   ToolExecutionItem,
@@ -26,6 +30,12 @@ export type CitationSource = Readonly<{
 }>
 
 export type ExecutionEntry =
+  | Readonly<{
+      kind: "image_output"
+      itemId: string
+      turnId: string
+      image: ModelImageBlock
+    }>
   | Readonly<{
       kind: "hosted_tool"
       itemId: string

@@ -69,6 +69,11 @@ export type ModelDocumentBlock = Readonly<{
   data?: string
 }>
 
+export type ModelImageOutputBlock = Readonly<{
+  type: "image_output"
+  image: ModelImageBlock
+}>
+
 // Tool content is data, not an assistant continuation or a host/UI metadata channel.
 export type ModelToolContentBlock =
   | Readonly<{

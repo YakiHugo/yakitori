@@ -309,6 +309,11 @@ export type HostedToolExecutionItem = Readonly<{
   itemId: string
   tool: HostedToolBlock
 }>
+export type ImageOutputExecutionItem = Readonly<{
+  type: "image_output"
+  itemId: string
+  image: Extract<ModelImageBlock, { file: AssetSource }>
+}>
 export type ToolExecutionItemBase = Readonly<{
   itemId: string
   toolCallId: string
@@ -399,6 +404,7 @@ export type CompletedExecutionItem =
   | ReasoningExecutionItem
   | ContextCompactionCompletedItem
   | HostedToolExecutionItem
+  | ImageOutputExecutionItem
   | (ToolExecutionItem &
       Readonly<{
         resultItemId: string
@@ -442,3 +448,5 @@ export type AppSessionEventEnvelope =
         data: Readonly<Record<string, never>>
       }>)
 import type { HostedToolBlock } from "./hosted-tool.ts"
+import type { ModelImageBlock } from "./conversation.ts"
+import type { AssetSource } from "./asset-types.ts"

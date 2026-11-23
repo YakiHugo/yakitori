@@ -511,10 +511,10 @@ describe("native Gemini provider", () => {
       "protocol_error",
     ],
     [
-      "generated image",
+      "unsupported inline audio",
       [
         chunk(
-          [{ inlineData: { mimeType: "image/png", data: pngImageBase64 } }],
+          [{ inlineData: { mimeType: "audio/wav", data: pngImageBase64 } }],
           "STOP",
         ),
       ],
@@ -537,6 +537,33 @@ describe("native Gemini provider", () => {
               event.type === "output_item" || event.type === "response",
           ),
         ).toBe(false)
+      },
+    )
+  })
+
+  it("projects generated image bytes without altering provider replay", async () => {
+    const part = { inlineData: { mimeType: "image/png", data: pngImageBase64 } }
+    await withServer(
+      (_incoming, outgoing) => send(outgoing, [chunk([part], "STOP")]),
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(request({ streamOutputItems: true })),
+        )
+        const image = {
+          type: "image_output",
+          image: {
+            type: "image",
+            mediaType: "image/png",
+            data: pngImageBase64,
+          },
+        }
+        expect(terminal(events)).toMatchObject({
+          content: [image],
+          native: [{ value: part }],
+        })
+        expect(
+          events.find((event) => event.type === "output_item"),
+        ).toMatchObject({ content: [image] })
       },
     )
   })

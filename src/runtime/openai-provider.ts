@@ -64,6 +64,7 @@ import {
 } from "./model-failure.ts"
 import { openAICitations } from "./model-citations.ts"
 import { cleanModelTextStream } from "./model-control-tokens.ts"
+import { modelImageOutput } from "./model-image-output.ts"
 import {
   ModelHistoryScopeError,
   modelNativeItems,
@@ -2076,6 +2077,12 @@ function fromOpenAIOutput(
     const hosted = responsesHostedTool(item)
     if (hosted !== undefined) {
       content.push(hosted)
+      if (
+        item.type === "image_generation_call" &&
+        item.status === "completed" &&
+        item.result
+      )
+        content.push(modelImageOutput(OpenAIProtocolError, item.result))
       continue
     }
     if (item.type === "tool_search_output") continue

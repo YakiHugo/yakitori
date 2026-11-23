@@ -445,6 +445,14 @@ function isCompletedExecutionItem(
   if (value.type === "agent_message") return isAgentMessageItem(value)
   if (value.type === "reasoning") return isReasoningItem(value)
   if (value.type === "hosted_tool") return isStartedExecutionItem(value)
+  if (value.type === "image_output")
+    return (
+      onlyKeys(value, ["type", "itemId", "image"]) &&
+      isString(value.itemId) &&
+      isRecord(value.image) &&
+      value.image.data === undefined &&
+      isModelImageBlock(value.image)
+    )
   if (value.type === "context_compaction") {
     return (
       onlyKeys(value, ["type", "itemId", "status", "error"]) &&
@@ -931,6 +939,8 @@ function isFileObservationRange(
 function isModelContentBlock(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.type)) return false
   if (value.type === "hosted_tool") return isHostedToolBlock(value)
+  if (value.type === "image_output")
+    return onlyKeys(value, ["type", "image"]) && isModelImageBlock(value.image)
   if (value.type === "text") {
     const { text } = value
     return (

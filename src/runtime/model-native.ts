@@ -116,9 +116,12 @@ export function modelNativeResponseMetadata(
 // same opaque state through a second, less strict path.
 export function portableModelContent(
   message: ModelAssistantMessage,
-): readonly Exclude<ModelContentBlock, { type: "hosted_tool" }>[] {
+): readonly Exclude<
+  ModelContentBlock,
+  { type: "hosted_tool" | "image_output" }
+>[] {
   const content = message.content.filter(
-    (block) => block.type !== "hosted_tool",
+    (block) => block.type !== "hosted_tool" && block.type !== "image_output",
   )
   if (message.native === undefined) return content
   return content.map((block) => {

@@ -22,6 +22,7 @@ import {
   modelNativeItems,
   modelNativeResponseMetadata,
 } from "./model-native.ts"
+import { modelImageOutput } from "./model-image-output.ts"
 
 type StreamStep = {
   value: Record<string, JsonValue>
@@ -270,7 +271,7 @@ export function createGeminiInteractionOutput(
       ) {
         const content = contentArray(value.content)
         let part = content.at(-1)
-        if (part === undefined) {
+        if (part === undefined || part.type === "image") {
           part = { type: "text", text: "" }
           content.push(part)
         }
@@ -295,10 +296,26 @@ export function createGeminiInteractionOutput(
           {
             type: "delta",
             text: delta.text,
-            partIndex: step.partIndex ?? 0,
+            partIndex:
+              steps
+                .slice(0, index + 1)
+                .reduce(
+                  (count, candidate) =>
+                    count +
+                    (candidate.value.type === "model_output"
+                      ? interactionTextGroups(
+                          contentArray(candidate.value.content),
+                        )
+                      : 0),
+                  0,
+                ) - 1,
             ...(request.streamOutputItems ? { itemId } : {}),
           },
         ]
+      }
+      if (value.type === "model_output" && delta.type === "image") {
+        value.content = [...contentArray(value.content), delta]
+        return []
       }
       if (
         hostedSteps.includes(String(value.type)) &&
@@ -349,15 +366,15 @@ export function createGeminiInteractionOutput(
           const parts = contentArray(
             value.type === "thought" ? value.summary : value.content,
           )
-          if (
-            parts.some(
-              (part) => part.type !== "text" || typeof part.text !== "string",
-            )
-          )
-            throw new GeminiProtocolError(
-              "Unsupported Interactions generated content.",
-            )
           if (value.type === "thought") {
+            if (
+              parts.some(
+                (part) => part.type !== "text" || typeof part.text !== "string",
+              )
+            )
+              throw new GeminiProtocolError(
+                "Unsupported Interactions thought summary.",
+              )
             if (
               value.signature !== undefined &&
               typeof value.signature !== "string"
@@ -371,12 +388,34 @@ export function createGeminiInteractionOutput(
               representation: "summary",
             })
           } else {
-            const annotations = geminiInteractionCitations(parts)
-            content.push({
-              type: "text",
-              text: parts.map((part) => part.text).join(""),
-              ...(annotations.length === 0 ? {} : { annotations }),
-            })
+            let textParts: JsonObject[] = []
+            const flushText = () => {
+              const annotations = geminiInteractionCitations(textParts)
+              content.push({
+                type: "text",
+                text: textParts.map((part) => part.text).join(""),
+                ...(annotations.length === 0 ? {} : { annotations }),
+              })
+              textParts = []
+            }
+            for (const part of parts) {
+              if (part.type === "text" && typeof part.text === "string")
+                textParts.push(part)
+              else if (part.type === "image") {
+                if (textParts.length > 0) flushText()
+                content.push(
+                  modelImageOutput(
+                    GeminiProtocolError,
+                    part.data,
+                    part.mime_type,
+                  ),
+                )
+              } else
+                throw new GeminiProtocolError(
+                  "Unsupported Interactions generated content.",
+                )
+            }
+            if (textParts.length > 0 || parts.length === 0) flushText()
           }
         } else if (value.type === "function_call") {
           if (
@@ -566,6 +605,13 @@ function contentArray(value: unknown): Record<string, JsonValue>[] {
   if (!Array.isArray(value) || !value.every(isJsonObject))
     throw new GeminiProtocolError("Invalid Interactions content array.")
   return value
+}
+
+function interactionTextGroups(parts: readonly JsonObject[]): number {
+  if (parts.length === 0) return 1
+  return parts.filter(
+    (part, index) => part.type === "text" && parts[index - 1]?.type !== "text",
+  ).length
 }
 
 function completedStep(step: StreamStep): JsonObject {
