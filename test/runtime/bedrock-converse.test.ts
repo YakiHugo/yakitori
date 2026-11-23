@@ -3,6 +3,7 @@ import { createServer } from "node:http"
 import sharp from "sharp"
 import { Response as BedrockResponse, fetch as bedrockFetch } from "undici"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { JsonObject } from "../../src/kernel/index.ts"
 import { createBedrockConverseProvider } from "../../src/runtime/bedrock-converse-provider.ts"
 import type {
   ModelImageBlock,
@@ -19,6 +20,7 @@ import {
   requireProviderConfiguration,
 } from "../../src/server/provider-configuration.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
+import { bedrockEvent, bedrockReply } from "../fixtures/bedrock-eventstream.ts"
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>()
@@ -52,14 +54,19 @@ async function collect(stream: StreamFn, input = request()) {
   return events
 }
 function reply(
-  content: unknown[] = [{ text: "Hello!" }],
+  content: readonly JsonObject[] = [{ text: "Hello!" }],
   stopReason = "end_turn",
 ) {
-  return Response.json({
-    output: { message: { role: "assistant", content } },
-    stopReason,
-    usage: { inputTokens: 240, outputTokens: 10, totalTokens: 250 },
-  })
+  return new Response(
+    bedrockReply(content, stopReason, {
+      inputTokens: 240,
+      outputTokens: 10,
+      totalTokens: 250,
+    }),
+    {
+      headers: { "content-type": "application/vnd.amazon.eventstream" },
+    },
+  )
 }
 async function image(
   format: "png" | "jpeg" | "webp" | "gif" = "png",
@@ -106,7 +113,7 @@ describe("Bedrock Converse native adapter", () => {
     if (!firstCall) throw new Error("Missing request")
     const [url, init] = firstCall
     expect(url).toBe(
-      "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.amazon.nova-2-lite-v1%3A0/converse",
+      "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.amazon.nova-2-lite-v1%3A0/converse-stream",
     )
     expect(init).toMatchObject({
       redirect: "error",
@@ -125,6 +132,7 @@ describe("Bedrock Converse native adapter", () => {
       ],
     })
     expect(events).toMatchObject([
+      { type: "delta", text: "Hello!", partIndex: 0 },
       {
         type: "response",
         response: {
@@ -134,7 +142,7 @@ describe("Bedrock Converse native adapter", () => {
         },
       },
     ])
-    expect(events[0]).toHaveProperty(
+    expect(events.at(-1)).toHaveProperty(
       "response.native.0.wireApi",
       "bedrock_converse",
     )
@@ -200,7 +208,10 @@ describe("Bedrock Converse native adapter", () => {
       ],
     })
     const snapshot = structuredClone(input.messages)
-    expect((await collect(stream, input))[0]).toHaveProperty("type", "response")
+    expect((await collect(stream, input)).at(-1)).toHaveProperty(
+      "type",
+      "response",
+    )
     expect(input.messages).toEqual(snapshot)
     const body = JSON.parse(fetchFn.mock.calls[1]?.[1]?.body as string)
     expect(body.messages[1].content[0]).toEqual({
@@ -372,7 +383,7 @@ describe("Bedrock Converse native adapter", () => {
     }
     expect(fetchFn).not.toHaveBeenCalled()
   })
-  it("cancels a pending buffered request and releases the iterator", async () => {
+  it("cancels a pending request and releases the iterator", async () => {
     const controller = new AbortController()
     const fetchFn = vi.fn<typeof fetch>().mockImplementation(
       async (_url, init) =>
@@ -436,14 +447,19 @@ describe("Bedrock Converse native adapter", () => {
   it("wires configured providers and static catalog without making discovery a credential check", async () => {
     const fetch = vi.mocked(bedrockFetch)
     fetch.mockClear()
-    fetch.mockResolvedValueOnce(new BedrockResponse(await reply().text()))
+    fetch.mockResolvedValueOnce(
+      new BedrockResponse(await reply().arrayBuffer()),
+    )
     const models = await discoverProviderModels(config, "fixture-only")
     expect(models.map((item) => item.id)).toEqual([model])
     expect(fetch).not.toHaveBeenCalled()
     const provider = createConfiguredProvider("nova", config, "fixture-only")
     expect(provider.info.streamIdleTimeoutMs).toBe(3_600_000)
     const turn = provider.startTurn()
-    expect((await collect(turn.stream))[0]).toHaveProperty("type", "response")
+    expect((await collect(turn.stream)).at(-1)).toHaveProperty(
+      "type",
+      "response",
+    )
     await turn.close()
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(providerPresets.some((preset) => preset.id === "amazon-nova")).toBe(
@@ -476,8 +492,12 @@ describe("Bedrock Converse native adapter", () => {
       if (redirect)
         outgoing.writeHead(307, { location: "/credential-target" }).end()
       else if (partialBody) {
-        outgoing.writeHead(200, { "Content-Type": "application/json" })
-        outgoing.write('{"output":')
+        outgoing.writeHead(200, {
+          "Content-Type": "application/vnd.amazon.eventstream",
+        })
+        outgoing.write(
+          bedrockEvent("messageStart", { role: "assistant" }).subarray(0, 5),
+        )
       }
     })
     server.listen(0, "127.0.0.1")
@@ -557,7 +577,7 @@ describe("Bedrock Converse native adapter", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
   it("projects readable and encrypted Bedrock reasoning while retaining the signed wire blocks", async () => {
-    const native = [
+    const native: JsonObject[] = [
       {
         reasoningContent: {
           reasoningText: { text: "Bedrock reasoning.", signature: "private" },
@@ -567,9 +587,14 @@ describe("Bedrock Converse native adapter", () => {
       { text: "Done." },
     ]
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(reply(native))
-    const [event] = await collect(
+    const events = await collect(
       createBedrockConverseProvider({ ...options, fetchFn }),
     )
+    expect(events.slice(0, -1)).toMatchObject([
+      { type: "reasoning_delta", text: "Bedrock reasoning.", partIndex: 0 },
+      { type: "delta", text: "Done.", partIndex: 0 },
+    ])
+    const event = events.at(-1)
     if (event?.type !== "response") throw new Error("Missing response")
     expect(event.response.content).toEqual([
       { type: "reasoning", text: "Bedrock reasoning.", format: "raw" },
@@ -619,7 +644,7 @@ describe("Bedrock Converse native adapter", () => {
       new Response(
         new ReadableStream({
           pull(controller) {
-            controller.enqueue(new Uint8Array(8_000_001))
+            controller.enqueue(new Uint8Array(16_000_001))
           },
           cancel() {
             cancelled = true
@@ -638,6 +663,46 @@ describe("Bedrock Converse native adapter", () => {
       },
     })
     expect(cancelled).toBe(true)
+  })
+  it("emits text before the final frame and rejects a corrupt continuation", async () => {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
+    const writer = writable.getWriter()
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(readable))
+    const stream = createBedrockConverseProvider({ ...options, fetchFn })(
+      request(),
+    )[Symbol.asyncIterator]()
+    const next = stream.next()
+    const start = bedrockEvent("messageStart", { role: "assistant" })
+    const delta = bedrockEvent("contentBlockDelta", {
+      contentBlockIndex: 0,
+      delta: { text: "visible" },
+    })
+    await writer.write(start.subarray(0, 5))
+    await writer.write(
+      Buffer.concat([start.subarray(5), delta.subarray(0, -3)]),
+    )
+    await writer.write(delta.subarray(-3))
+    expect(await next).toMatchObject({
+      done: false,
+      value: { type: "delta", text: "visible" },
+    })
+    const terminal = stream.next()
+    const corrupt = bedrockEvent("contentBlockStop", { contentBlockIndex: 0 })
+    corrupt[corrupt.length - 1] = 255 - (corrupt.at(-1) ?? 0)
+    await writer.write(corrupt)
+    expect(await terminal).toMatchObject({
+      done: false,
+      value: {
+        type: "failure",
+        failure: {
+          kind: "protocol_error",
+          message: expect.stringContaining("checksum"),
+        },
+      },
+    })
+    expect(await stream.next()).toMatchObject({ done: true })
   })
   it("rejects hosted server tool responses rather than executing them locally", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(

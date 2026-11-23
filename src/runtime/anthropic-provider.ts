@@ -46,6 +46,7 @@ import {
   type StreamFn,
 } from "./model.ts"
 import { anthropicCitations } from "./model-citations.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -112,18 +113,20 @@ export function createAnthropicTurnTransport(
         )
       : undefined
   const stream: StreamFn = (request) =>
-    streamAnthropic(
-      client,
-      options.model,
-      request,
-      options.baseURL ?? "https://api.anthropic.com",
-      upload,
-      options.profile ??
-        (URL.parse(
-          client.baseURL ?? options.baseURL ?? "https://api.anthropic.com",
-        )?.origin === "https://api.anthropic.com"
-          ? "anthropic"
-          : "generic"),
+    cleanModelTextStream(
+      streamAnthropic(
+        client,
+        options.model,
+        request,
+        options.baseURL ?? "https://api.anthropic.com",
+        upload,
+        options.profile ??
+          (URL.parse(
+            client.baseURL ?? options.baseURL ?? "https://api.anthropic.com",
+          )?.origin === "https://api.anthropic.com"
+            ? "anthropic"
+            : "generic"),
+      ),
     )
   return {
     stream,

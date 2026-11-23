@@ -22,6 +22,7 @@ export type HostedToolBlock = Readonly<{
   status: (typeof hostedToolStatuses)[number]
   label?: string
   detail?: string
+  sourceCode?: string
 }>
 
 export function isHostedToolBlock(value: unknown): value is HostedToolBlock {
@@ -42,8 +43,19 @@ export function isHostedToolBlock(value: unknown): value is HostedToolBlock {
     hostedToolStatuses.some((status) => status === value.status) &&
     (!("label" in value) || typeof value.label === "string") &&
     (!("detail" in value) || typeof value.detail === "string") &&
+    (!("sourceCode" in value) ||
+      (value.kind === "code_execution" &&
+        typeof value.sourceCode === "string")) &&
     Object.keys(value).every((key) =>
-      ["type", "id", "kind", "status", "label", "detail"].includes(key),
+      [
+        "type",
+        "id",
+        "kind",
+        "status",
+        "label",
+        "detail",
+        "sourceCode",
+      ].includes(key),
     )
   )
 }

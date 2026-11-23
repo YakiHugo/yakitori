@@ -140,6 +140,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           text: "Historical attachment contents",
         },
       })
+      update(m.params.sessionId, {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Reasoning from history." },
+      })
       text(m.params.sessionId, "Replayed reply")
     } else process.exit(14)
     reply(m.id, {})

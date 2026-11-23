@@ -223,7 +223,7 @@ export function ConversationMessages({
     for (const [turnId, turn] of turns) {
       const timing = view.turnTimings[turnId]
       if (
-        timing?.completedAt === undefined ||
+        (timing?.completedAt === undefined && timing?.outcome === undefined) ||
         view.activeTurnId === turnId ||
         turn.failed
       )
@@ -448,7 +448,9 @@ const TurnBlock = memo(
     }, [sourceNavigation])
     const contentId = useId()
     const labelId = useId()
-    const completed = !active && timing?.completedAt !== undefined
+    const completed =
+      !active &&
+      (timing?.completedAt !== undefined || timing?.outcome !== undefined)
     const livePieces = useMemo(() => {
       if (!presentLiveAnswer) return []
       const assistants = entries.filter(
@@ -873,7 +875,7 @@ function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
         />
       )
     case "hosted_tool":
-      return <HostedToolCell tool={entry.tool} />
+      return <HostedToolCell entry={entry} />
     case "image_output":
       return (
         <ImageOutputCell

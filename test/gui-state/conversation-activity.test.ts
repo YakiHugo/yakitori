@@ -32,6 +32,37 @@ function tool(
 }
 
 describe("conversation activity", () => {
+  it("keeps hosted tools in order within contiguous reasoning and local work", () => {
+    const thought: ExecutionEntry = {
+      kind: "reasoning",
+      itemId: "thought",
+      turnId: "turn_1",
+      at,
+      text: "Look for sources.",
+      status: "completed",
+    }
+    const hosted: ExecutionEntry = {
+      kind: "hosted_tool",
+      itemId: "hosted",
+      turnId: "turn_1",
+      provider: "fixture",
+      tool: {
+        type: "hosted_tool",
+        kind: "web_search",
+        id: "search",
+        status: "completed",
+      },
+    }
+    const entries = [
+      thought,
+      hosted,
+      { ...thought, itemId: "later", text: "Read the matching file." },
+      tool("read"),
+    ]
+    expect(groupConversationActivity(entries)).toMatchObject([
+      { kind: "batch", entries },
+    ])
+  })
   it.each([
     "shared",
     "distinct",

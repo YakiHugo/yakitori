@@ -3,6 +3,7 @@ import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { HistoryLocation } from "../protocol/application.ts"
 import { answerTextParts } from "../protocol/model-output.ts"
+import { parseSessionPlan } from "../protocol/user-interaction.ts"
 import type { DisplayWindow, RolloutRecordLocation } from "./display-window.ts"
 import type {
   StoredRolloutItem,
@@ -92,7 +93,7 @@ type OccurrenceCursor = Readonly<{
 
 // Status, compact display history and checkpoints share a disposable projection,
 // so a schema reset rebuilds them consistently from authoritative JSONL.
-const schemaVersion = 12
+const schemaVersion = 13
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -654,9 +655,37 @@ function applyEntries(
   for (const record of entries) {
     if (
       record.item.type === "item_completed" &&
+      record.item.item.type === "hosted_tool"
+    ) {
+      const { item, turnId } = record.item
+      const { kind, label, detail } = item.tool
+      insertMessage(
+        database,
+        threadId,
+        record.seq,
+        turnId,
+        item.itemId,
+        "tool",
+        [
+          label,
+          kind === "web_search" || kind === "web_fetch" ? detail : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      )
+      continue
+    }
+    if (
+      record.item.type === "item_completed" &&
       "resultItemId" in record.item.item
     ) {
       const { item, turnId } = record.item
+      const plan =
+        item.name === "update_plan" &&
+        item.error === undefined &&
+        "output" in item
+          ? parseSessionPlan(item.output)
+          : undefined
       const paths =
         item.type === "file_change"
           ? item.request.paths
@@ -670,8 +699,16 @@ function applyEntries(
         turnId,
         item.itemId,
         "tool",
-        [item.name, ...paths, item.error?.code].filter(Boolean).join("\n"),
-        item.resultItemId,
+        [
+          item.name,
+          ...paths,
+          item.error?.code,
+          plan?.explanation,
+          ...(plan?.plan.map(({ step }) => step) ?? []),
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        plan === undefined ? item.resultItemId : null,
       )
       continue
     }

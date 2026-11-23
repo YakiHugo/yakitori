@@ -80,28 +80,35 @@ it("uses the first matching replacement and preserves declared decoration order"
 it("restores the built-in entry when a matched presenter fails", () => {
   const error = vi.spyOn(console, "error").mockImplementation(() => {})
   try {
-    render(
-      <TranscriptPresenters.Provider
-        value={{
-          entry: [
-            {
-              id: "broken",
-              matches: () => true,
-              replace: () => {
-                throw new Error("fixture")
-              },
-            },
-          ],
-        }}
-      >
+    const registry: TranscriptPresenterRegistry = {
+      entry: [
+        {
+          id: "broken",
+          matches: () => true,
+          replace: ({ context }) => {
+            if (
+              context.entry.kind === "assistant" &&
+              context.entry.text === entry.text
+            )
+              throw new Error("fixture")
+            return <span>Enhanced updated answer</span>
+          },
+        },
+      ],
+    }
+    const slot = (value: typeof entry) => (
+      <TranscriptPresenters.Provider value={registry}>
         <TranscriptPresenterSlot
           name="entry"
-          context={{ entry }}
-          fallback={<span>{entry.text}</span>}
+          context={{ entry: value }}
+          fallback={<span>{value.text}</span>}
         />
-      </TranscriptPresenters.Provider>,
+      </TranscriptPresenters.Provider>
     )
+    const { rerender } = render(slot(entry))
     expect(screen.getByText(entry.text)).toBeDefined()
+    rerender(slot({ ...entry, text: "Updated answer" }))
+    expect(screen.getByText("Enhanced updated answer")).toBeDefined()
   } finally {
     error.mockRestore()
   }

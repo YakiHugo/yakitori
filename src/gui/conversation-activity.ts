@@ -3,7 +3,7 @@ import { type ExecutionEntry, executionEntryKey } from "./execution-view.ts"
 type ToolEntry = Extract<ExecutionEntry, { kind: "tool" }>
 export type ActivityBatchEntry = Extract<
   ExecutionEntry,
-  { kind: "reasoning" | "tool" }
+  { kind: "reasoning" | "tool" | "hosted_tool" }
 >
 
 export type ConversationActivity =
@@ -34,6 +34,7 @@ export function groupConversationActivity(
   for (const entry of entries) {
     if (
       entry.kind === "reasoning" ||
+      entry.kind === "hosted_tool" ||
       (entry.kind === "tool" &&
         entry.execution.type !== "collaboration_tool_call" &&
         entry.execution.name !== "request_user_input_async" &&

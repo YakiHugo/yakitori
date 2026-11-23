@@ -233,8 +233,13 @@ for (const output of ["search", "image", "chart"] as const) {
         if (output === "search") {
           await completed.getByText(label).click()
           await expect(
-            completed.getByText(source, { exact: true }),
-          ).toBeVisible()
+            completed.getByRole("link", { name: source, exact: true }),
+          ).toHaveAttribute("href", source)
+        } else if (output === "chart") {
+          await completed.getByText(label).click()
+          await expect(
+            completed.getByRole("table", { name: "Source code for hosted.py" }),
+          ).toContainText("draw_fixture()")
         }
         await expect(
           completed.getByText("Hosted", { exact: true }),

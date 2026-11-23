@@ -4,10 +4,11 @@ import {
   createContext,
   type ReactNode,
   useContext,
+  useMemo,
 } from "react"
 import type { ExecutionEntry } from "../execution-view.ts"
 import type { ToolPresentation } from "../tool-presentation.ts"
-import { transcriptPresenterRegistry } from "../transcript-presenter-registry.ts"
+import { transcriptPresenterRegistry } from "../transcript-presenter-registry.tsx"
 import { ConversationScopeContext } from "./conversation-scope.tsx"
 
 type SlotContexts = {
@@ -29,6 +30,7 @@ type PresenterProps<Name extends SlotName> = Readonly<{
 }>
 type Presenter<Name extends SlotName> = Readonly<{
   id: string
+  entryKind?: Name extends "entry" ? ExecutionEntry["kind"] : never
   matches(context: PresenterProps<Name>["context"]): boolean
   before?: ComponentType<PresenterProps<Name>>
   replace?: ComponentType<PresenterProps<Name>>
@@ -47,17 +49,46 @@ export function TranscriptPresenterSlot<Name extends SlotName>({
   context,
   fallback,
 }: Readonly<{ name: Name; context: SlotContexts[Name]; fallback: ReactNode }>) {
-  const presenters: readonly Presenter<Name>[] | undefined =
+  const registered: readonly Presenter<Name>[] | undefined =
     useContext(TranscriptPresenters)[name]
   const engineId = useContext(ConversationScopeContext)?.engineId
-  if (presenters === undefined || presenters.length === 0) return fallback
-  const scope: PresenterProps<Name>["context"] = Object.assign(
-    {},
-    context,
-    engineId === undefined ? {} : { engineId },
+  const {
+    entry,
+    presentation,
+    entries,
+    active,
+    turnId,
+  }: Partial<
+    SlotContexts["entry"] &
+      SlotContexts["turn_activity"] &
+      Pick<SlotContexts["tool_detail"], "presentation">
+  > = context
+  const entryKind = entry?.kind
+  const presenters = useMemo(
+    () =>
+      registered?.filter(
+        (presenter) =>
+          presenter.entryKind === undefined ||
+          presenter.entryKind === entryKind,
+      ),
+    [registered, entryKind],
   )
+  const scope = useMemo(
+    () =>
+      ({
+        ...(entry === undefined ? { entries, active, turnId } : { entry }),
+        ...(presentation === undefined ? {} : { presentation }),
+        ...(engineId === undefined ? {} : { engineId }),
+      }) as PresenterProps<Name>["context"],
+    [entry, presentation, entries, active, turnId, engineId],
+  )
+  if (presenters === undefined || presenters.length === 0) return fallback
   return (
-    <PresenterBoundary fallback={fallback}>
+    <PresenterBoundary
+      fallback={fallback}
+      context={scope}
+      presenters={presenters}
+    >
       <Presenters presenters={presenters} context={scope} fallback={fallback} />
     </PresenterBoundary>
   )
@@ -69,8 +100,14 @@ function Presenters<Name extends SlotName>({
   presenters,
 }: PresenterProps<Name> &
   Readonly<{ presenters: readonly Presenter<Name>[] }>) {
-  const snapshot = freezeSnapshot(structuredClone(context))
-  const matches = presenters.filter((presenter) => presenter.matches(snapshot))
+  const snapshot = useMemo(
+    () => freezeSnapshot(structuredClone(context)),
+    [context],
+  )
+  const matches = useMemo(
+    () => presenters.filter((presenter) => presenter.matches(snapshot)),
+    [presenters, snapshot],
+  )
   const Replace = matches.find(
     (presenter) => presenter.replace !== undefined,
   )?.replace
@@ -103,11 +140,33 @@ function freezeSnapshot<Value extends object>(value: Value): Value {
   return value
 }
 
-class PresenterBoundary extends Component<
-  Readonly<{ fallback: ReactNode; children: ReactNode }>,
+type PresenterBoundaryInput = Readonly<{
+  context: object
+  presenters: readonly unknown[]
+}>
+type PresenterBoundaryState = PresenterBoundaryInput &
   Readonly<{ failed: boolean }>
+
+class PresenterBoundary extends Component<
+  PresenterBoundaryInput &
+    Readonly<{ fallback: ReactNode; children: ReactNode }>,
+  PresenterBoundaryState
 > {
-  override state = { failed: false }
+  override state = {
+    failed: false,
+    context: this.props.context,
+    presenters: this.props.presenters,
+  }
+
+  static getDerivedStateFromProps(
+    props: PresenterBoundaryInput,
+    state: PresenterBoundaryState,
+  ) {
+    return props.context === state.context &&
+      props.presenters === state.presenters
+      ? null
+      : { failed: false, context: props.context, presenters: props.presenters }
+  }
 
   static getDerivedStateFromError() {
     return { failed: true }

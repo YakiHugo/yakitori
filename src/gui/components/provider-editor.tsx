@@ -208,9 +208,10 @@ export function ProviderEditor({
           <FieldGroup>
             {draft.configuration.wireApi === "bedrock_converse" ? (
               <p className="provider-field-hint">
-                Nova 2 Lite only: static catalog, buffered responses, reasoning
+                Nova 2 Lite only: static catalog, streamed responses, reasoning
                 off. Requires a Bedrock bearer API key for us-east-1 (not an AWS
-                access key). No IAM/SigV4 or automatic key refresh. The US
+                access key) with bedrock:InvokeModelWithResponseStream
+                permission. No IAM/SigV4 or automatic key refresh. The US
                 inference profile can process data across US regions. Keys
                 expire; refresh them yourself. Requests can take up to 60
                 minutes and are not automatically retried. Catalog loading does

@@ -33,6 +33,7 @@ import {
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -92,7 +93,7 @@ class GeminiInlineRequestSizeError extends Error {
 // returned part intact: signatures can be attached even to an empty text part.
 // https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
 export function createGeminiProvider(options: GeminiProviderOptions): StreamFn {
-  return (request) => streamGemini(options, request)
+  return (request) => cleanModelTextStream(streamGemini(options, request))
 }
 
 async function* streamGemini(
@@ -541,7 +542,7 @@ async function* streamGemini(
                 kind: "code_execution",
                 status: "running",
                 ...(typeof code === "string" && code !== ""
-                  ? { detail: code }
+                  ? { sourceCode: code }
                   : {}),
               }
               content.push(tool)
@@ -552,12 +553,12 @@ async function* streamGemini(
                 (block) =>
                   block.type === "hosted_tool" && block.id === codeToolId,
               )
-              const detail = [
-                previous?.type === "hosted_tool" ? previous.detail : undefined,
-                typeof result.output === "string" ? result.output : undefined,
-              ]
-                .filter(Boolean)
-                .join("\n\n")
+              const sourceCode =
+                previous?.type === "hosted_tool"
+                  ? previous.sourceCode
+                  : undefined
+              const detail =
+                typeof result.output === "string" ? result.output : undefined
               const tool: HostedToolBlock = {
                 type: "hosted_tool",
                 id: codeToolId ?? `code-${nativeParts.length}`,
@@ -568,6 +569,7 @@ async function* streamGemini(
                     ? "failed"
                     : "completed",
                 ...(detail ? { detail } : {}),
+                ...(sourceCode ? { sourceCode } : {}),
               }
               codeToolId = undefined
               content.push(tool)

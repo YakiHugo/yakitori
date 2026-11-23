@@ -1798,6 +1798,7 @@ function responsesHostedTool(
   let kind: HostedToolBlock["kind"]
   let label: string | null | undefined
   let detail: string | null | undefined
+  let sourceCode: string | null | undefined
   const rawStatus = "status" in item ? item.status : undefined
   let status: HostedToolBlock["status"] =
     rawStatus === undefined || rawStatus === "completed"
@@ -1828,13 +1829,9 @@ function responsesHostedTool(
       break
     case "code_interpreter_call":
       kind = "code_execution"
-      detail = [
-        item.code,
-        ...(item.outputs ?? []).flatMap((output) =>
-          output.type === "logs" ? [output.logs] : [],
-        ),
-      ]
-        .filter(Boolean)
+      sourceCode = item.code
+      detail = (item.outputs ?? [])
+        .flatMap((output) => (output.type === "logs" ? [output.logs] : []))
         .join("\n\n")
       break
     case "image_generation_call":
@@ -1868,6 +1865,7 @@ function responsesHostedTool(
     status,
     ...(label ? { label } : {}),
     ...(detail ? { detail } : {}),
+    ...(sourceCode ? { sourceCode } : {}),
   }
 }
 

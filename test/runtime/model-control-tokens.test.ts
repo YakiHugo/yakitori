@@ -1,16 +1,54 @@
 import { expect, it } from "vitest"
-import { cleanModelTextStream } from "../../src/runtime/model-control-tokens.ts"
 import {
   ModelStopReason,
   type ModelStreamEvent,
 } from "../../src/runtime/model.ts"
+import { cleanModelTextStream } from "../../src/runtime/model-control-tokens.ts"
 
 it("emits the same visible text for every split of supported control tokens", async () => {
-  const raw = "A\uE200cite\uE202turn0search0\uE201B <|eos|> example<|eos|>"
+  const raw =
+    "A\uE200cite\uE202turn0search0\uE201B <|eos|> example<|eos|><|endoftext|><|im_end|><|eot_id|>"
   for (let split = 0; split <= raw.length; split += 1) {
     const events = await cleanDeltas([raw.slice(0, split), raw.slice(split)])
     expect(events).toBe("AB <|eos|> example")
   }
+})
+
+it("flushes literal prefixes on EOF and before a part completes without text", async () => {
+  expect(await cleanDeltas(["a ", "<"])).toBe("a <")
+  expect(await cleanDeltas(["literal ", "<|im_"])).toBe("literal <|im_")
+  const delta = {
+    type: "delta",
+    itemId: "message",
+    partIndex: 3,
+    purpose: "commentary",
+  } as const
+  const completed = {
+    type: "output_item",
+    itemId: "message",
+    content: [],
+  } as const
+  async function* input(): AsyncGenerator<ModelStreamEvent> {
+    yield { ...delta, text: "a <" }
+    yield completed
+  }
+  expect(await Array.fromAsync(cleanModelTextStream(input()))).toEqual([
+    { ...delta, text: "a " },
+    { ...delta, text: "<" },
+    completed,
+  ])
+})
+
+it("flushes visible text before propagating a thrown upstream failure", async () => {
+  const error = new Error("transport ended")
+  async function* input(): AsyncGenerator<ModelStreamEvent> {
+    yield { type: "delta", text: "a <" }
+    throw error
+  }
+  const stream = cleanModelTextStream(input())
+  expect((await stream.next()).value).toEqual({ type: "delta", text: "a " })
+  expect((await stream.next()).value).toEqual({ type: "delta", text: "<" })
+  await expect(stream.next()).rejects.toBe(error)
 })
 
 it("does not hold another part behind an unfinished private marker", async () => {

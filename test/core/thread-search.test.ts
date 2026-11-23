@@ -18,6 +18,74 @@ afterEach(async () => {
 })
 
 describe("persisted thread search", () => {
+  it("indexes hosted web results and plan steps only in tool activity search", async () => {
+    const { root, store } = await setup()
+    const threadId = "session_search_activity"
+    const turnId = "turn_activity"
+    const hostedUrl = "https://example.test/hosted-needle"
+    const step = "Check the plan needle"
+    await save(store, threadId, [
+      { type: "turn_started", turnId, inputItemId: "input_activity" },
+      {
+        type: "item_completed",
+        turnId,
+        item: {
+          type: "hosted_tool",
+          itemId: "item_hosted",
+          provider: "fixture",
+          tool: {
+            type: "hosted_tool",
+            id: "search",
+            kind: "web_search",
+            status: "completed",
+            detail: hostedUrl,
+          },
+        },
+      },
+      {
+        type: "item_completed",
+        turnId,
+        item: {
+          type: "dynamic_tool_call",
+          itemId: "item_plan",
+          toolCallId: "call_plan",
+          name: "update_plan",
+          input: {},
+          requiresPermission: false,
+          resultItemId: "result_plan",
+          content: { kind: "text", text: "Plan updated" },
+          output: { plan: [{ step, status: "pending" }] },
+        },
+      },
+      completed(turnId),
+    ])
+    const reopened = new JsonlThreadStore({ root })
+    for (const [searchTerm, itemId] of [
+      [hostedUrl, "item_hosted"],
+      [step, "item_plan"],
+    ] as const) {
+      const input = { searchTerm, limit: 5 }
+      expect((await reopened.searchThreads(input)).matches).toEqual([])
+      const { matches } = await reopened.searchThreads({
+        ...input,
+        toolActivity: true,
+      })
+      expect(matches.map(({ location }) => location)).toEqual([
+        { rolloutId: threadId, turnId, itemId },
+      ])
+      const target = await reopened.readDisplayLocation(
+        threadId,
+        { rolloutId: threadId, turnId, itemId },
+        {},
+      )
+      expect(
+        target?.records.some(
+          ({ item }) =>
+            item.type === "item_completed" && item.item.itemId === itemId,
+        ),
+      ).toBe(true)
+    }
+  })
   it("finds tool metadata and opens its activity or exact result", async () => {
     const { root, store } = await setup()
     const threadId = "session_tool_history"

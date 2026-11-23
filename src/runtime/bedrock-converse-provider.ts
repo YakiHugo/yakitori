@@ -7,6 +7,10 @@ import {
   type JsonValue,
 } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
+import {
+  BedrockProtocolError,
+  readBedrockConverseStream,
+} from "./bedrock-converse-stream.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
 import {
   flattenModelSystem,
@@ -19,6 +23,7 @@ import {
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -43,9 +48,7 @@ const MAX_BODY_BYTES = 25_000_000
 // Converse Message restricts each image to 3.75 MB and 8000px per edge.
 // https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Message.html
 const MAX_IMAGE_BYTES = 3_750_000
-class BedrockProtocolError extends Error {}
-
-type BufferedResponse = Response | Awaited<ReturnType<typeof bedrockFetch>>
+type BedrockResponse = Response | Awaited<ReturnType<typeof bedrockFetch>>
 type Options = Readonly<{
   apiKey: string
   baseURL: string
@@ -60,14 +63,12 @@ type Options = Readonly<{
       redirect: "error"
       dispatcher: Agent
     },
-  ) => Promise<BufferedResponse>
+  ) => Promise<BedrockResponse>
 }>
 type Message = { role: "user" | "assistant"; content: JsonObject[] }
 
-// Intentionally buffered Converse, not SSE or AWS binary EventStream. The
-// harness owns tools, cancellation and retries; no AWS credentials are read.
 export function createBedrockConverseProvider(options: Options): StreamFn {
-  return (request) => streamBedrock(options, request)
+  return (request) => cleanModelTextStream(streamBedrock(options, request))
 }
 
 async function* streamBedrock(
@@ -76,7 +77,7 @@ async function* streamBedrock(
 ): AsyncGenerator<ModelStreamEvent> {
   let stage: "request_build" | "connect" | "response_body" = "request_build"
   let usage: ModelUsage | undefined
-  let response: BufferedResponse | undefined
+  let response: BedrockResponse | undefined
   let dispatcher: Agent | undefined
   try {
     request.signal?.throwIfAborted()
@@ -240,6 +241,7 @@ async function* streamBedrock(
       method: "POST" as const,
       headers: {
         "Content-Type": "application/json",
+        Accept: "application/vnd.amazon.eventstream",
         Authorization: `Bearer ${options.apiKey}`,
       },
       body: JSON.stringify(body),
@@ -248,7 +250,7 @@ async function* streamBedrock(
       dispatcher,
     }
     response = await (options.fetchFn ?? bedrockFetch)(
-      `${ENDPOINT}/model/${encodeURIComponent(model)}/converse`,
+      `${ENDPOINT}/model/${encodeURIComponent(model)}/converse-stream`,
       init,
     )
     stage = "response_body"
@@ -270,39 +272,14 @@ async function* streamBedrock(
     }
     if (!response.body)
       throw new BedrockProtocolError("Missing Bedrock response body.")
-    const reader = response.body.getReader()
-    const chunks: Buffer[] = []
-    let responseBytes = 0
-    try {
-      for (;;) {
-        const chunk = await reader.read()
-        if (chunk.done) break
-        request.signal?.throwIfAborted()
-        if (!chunk.value)
-          throw new BedrockProtocolError("Invalid Bedrock response chunk.")
-        responseBytes += chunk.value.byteLength
-        // Local memory safety bound, not an AWS output quota. Buffered output
-        // must not allocate an unbounded response before validating its schema.
-        if (responseBytes > 16_000_000)
-          throw new BedrockProtocolError(
-            "Bedrock response exceeds Yakitori's 16 MB buffered response safety limit.",
-          )
-        chunks.push(Buffer.from(chunk.value))
-      }
-    } finally {
-      reader.releaseLock()
-    }
-    const result: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"))
-    request.signal?.throwIfAborted()
-    if (
-      !isJsonObject(result) ||
-      !isJsonObject(result.output) ||
-      !isJsonObject(result.output.message) ||
-      result.output.message.role !== "assistant" ||
-      !Array.isArray(result.output.message.content) ||
-      !result.output.message.content.every(isJsonObject)
+    const {
+      content: native,
+      metadata: result,
+      stopReason: rawStopReason,
+    } = yield* readBedrockConverseStream(
+      response.body.getReader(),
+      request.signal,
     )
-      throw new BedrockProtocolError("Invalid Bedrock response envelope.")
     if (isJsonObject(result.usage)) {
       const u = result.usage
       for (const key of [
@@ -332,9 +309,7 @@ async function* streamBedrock(
       }
       request.onUsageSnapshot?.(usage)
     }
-    const rawStopReason = result.stopReason
     if (
-      typeof rawStopReason !== "string" ||
       ![
         "end_turn",
         "tool_use",
@@ -345,7 +320,6 @@ async function* streamBedrock(
       ].includes(rawStopReason)
     )
       throw new BedrockProtocolError("Unsupported Bedrock stop reason.")
-    const native = result.output.message.content
     const content = parseContent(native, customKeys)
     const calls = content.filter((block) => block.type === "tool_call")
     if (
@@ -388,10 +362,7 @@ async function* streamBedrock(
             ? native.filter((block) => block.toolUse === undefined)
             : native,
         ),
-        nativeMetadata: modelNativeResponseMetadata(request, WIRE, {
-          ...result,
-          output: undefined,
-        }),
+        nativeMetadata: modelNativeResponseMetadata(request, WIRE, result),
         ...(usage === undefined ? {} : { usage }),
         ...(stopReason === ModelStopReason.Length
           ? { lengthReason: "output" }

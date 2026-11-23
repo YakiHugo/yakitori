@@ -1,5 +1,8 @@
 import { ChevronRight, Cloud, LoaderCircle } from "lucide-react"
+import type { ReactNode } from "react"
 import type { HostedToolBlock } from "../../../protocol/hosted-tool.ts"
+import type { ExecutionEntry } from "../../execution-view.ts"
+import { openUrlTarget } from "../../lib/open-resource.ts"
 
 const toolLabels: Record<HostedToolBlock["kind"], string> = {
   web_search: "Search web",
@@ -11,7 +14,30 @@ const toolLabels: Record<HostedToolBlock["kind"], string> = {
   lookup: "Look up information",
 }
 
-export function HostedToolCell({ tool }: Readonly<{ tool: HostedToolBlock }>) {
+export function HostedToolCell({
+  entry,
+  code,
+}: Readonly<{
+  entry: Extract<ExecutionEntry, { kind: "hosted_tool" }>
+  code?: ReactNode
+}>) {
+  const { tool, provider } = entry
+  const web = tool.kind === "web_search" || tool.kind === "web_fetch"
+  const resultLines = web
+    ? [
+        ...new Set([
+          ...(tool.kind === "web_fetch" &&
+          tool.label !== undefined &&
+          webUrl(tool.label) !== undefined
+            ? [tool.label]
+            : []),
+          ...(tool.detail
+            ?.split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean) ?? []),
+        ]),
+      ]
+    : []
   const Icon = tool.status === "running" ? LoaderCircle : Cloud
   const title = (
     <>
@@ -28,12 +54,15 @@ export function HostedToolCell({ tool }: Readonly<{ tool: HostedToolBlock }>) {
         {tool.label ? ` · ${tool.label}` : ""}
       </span>
       <span className="shrink-0 text-caption">Hosted</span>
+      {provider === undefined ? null : (
+        <span className="min-w-0 truncate text-caption">{provider}</span>
+      )}
       {tool.status === "completed" ? null : (
         <span className="shrink-0 text-caption capitalize">{tool.status}</span>
       )}
     </>
   )
-  if (!tool.detail)
+  if (!tool.detail && tool.sourceCode === undefined && resultLines.length === 0)
     return (
       <div className="flex min-w-0 items-center gap-2 text-detail text-muted-foreground">
         {title}
@@ -48,7 +77,55 @@ export function HostedToolCell({ tool }: Readonly<{ tool: HostedToolBlock }>) {
           className="size-3 shrink-0 group-open/hosted:rotate-90"
         />
       </summary>
-      <pre className="tool-output mt-2 max-h-64">{tool.detail}</pre>
+      {tool.sourceCode === undefined
+        ? null
+        : (code ?? (
+            <pre className="tool-output mt-2 max-h-64">{tool.sourceCode}</pre>
+          ))}
+      {resultLines.length > 0 ? (
+        <ul
+          className="mt-2 max-h-64 space-y-1 overflow-auto text-detail"
+          aria-label="Hosted web results"
+        >
+          {resultLines.map((line) => {
+            const url = webUrl(line)
+            return (
+              <li key={line} className="break-all">
+                {url === undefined ? (
+                  line
+                ) : (
+                  <a
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                    onClick={(event) => {
+                      if (window.yakitoriDesktop === undefined) return
+                      event.preventDefault()
+                      void openUrlTarget({ kind: "url", url })
+                    }}
+                  >
+                    {line}
+                  </a>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      ) : tool.detail ? (
+        <pre className="tool-output mt-2 max-h-64">{tool.detail}</pre>
+      ) : null}
     </details>
   )
+}
+
+function webUrl(text: string): string | undefined {
+  if (/\s/u.test(text)) return undefined
+  const url = URL.parse(text)
+  return url !== null &&
+    (url.protocol === "https:" || url.protocol === "http:") &&
+    !url.username &&
+    !url.password
+    ? url.href
+    : undefined
 }
