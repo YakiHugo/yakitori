@@ -560,7 +560,7 @@ describe("external engine workspace", () => {
     )
     expect(
       executionView.entries
-        .filter(({ kind }) => kind === "user_input")
+        .filter((entry) => entry.kind === "user_input")
         .map(({ inputId }) => inputId),
     ).toEqual(["observed", expect.stringMatching(/^acp:replay:/u)])
   })
