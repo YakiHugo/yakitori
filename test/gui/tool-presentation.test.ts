@@ -26,6 +26,43 @@ type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 
 describe("tool presentation", () => {
   it.each([
+    ["pnpm test:contracts", undefined, "Run", "tests", "text"],
+    ["npm run build", undefined, "Build", "project", "text"],
+    ["git diff --stat", undefined, "View", "Git changes", "text"],
+    ["yarn install", undefined, "Install", "dependencies", "text"],
+    [
+      "git diff",
+      "Review changes to the UI",
+      "Run",
+      "Review changes to the UI",
+      "text",
+    ],
+    [
+      "pnpm test && git diff",
+      undefined,
+      "Run",
+      "pnpm test && git diff",
+      "code",
+    ],
+  ] as const)("presents the intent of %s without dropping the exact command", (command, description, verb, subject, subjectTone) => {
+    expect(
+      presentTool(
+        entry("run_command", {
+          input: {
+            command,
+            ...(description === undefined ? {} : { description }),
+          },
+        }),
+      ),
+    ).toMatchObject({
+      verb,
+      subject,
+      subjectTone,
+      detail: { kind: "command", command },
+    })
+  })
+
+  it.each([
     ["spawn", "Spawn agent", "Spawning agent"],
     ["send_message", "Message agent", "Messaging agent"],
     ["follow_up", "Follow up", "Following up"],

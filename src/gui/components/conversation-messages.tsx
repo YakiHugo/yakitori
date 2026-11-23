@@ -28,6 +28,7 @@ import { AgentMessageCell } from "./cells/agent-message-cell.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
+import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
@@ -192,7 +193,8 @@ export function ConversationMessages({
         turn.failed = ["failed", "cancelled", "interrupted"].includes(
           entry.state,
         )
-      } else if (entry.kind !== "permission") turn.last = entry
+      } else if (entry.kind !== "permission" && entry.kind !== "compaction")
+        turn.last = entry
       if (entry.kind === "assistant") {
         const id = entry.source?.itemId ?? entry.itemId
         assistants.set(id, [...(assistants.get(id) ?? []), entry])
@@ -448,6 +450,7 @@ const TurnBlock = memo(
           return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
         }
         return entry.kind === "turn_terminal" ||
+          entry.kind === "compaction" ||
           (entry.kind === "permission" && entry.state !== "resolved") ||
           (entry.kind === "tool" &&
             entry.execution.name === "request_user_input_async" &&
@@ -703,6 +706,10 @@ const EntryCell = memo(function EntryCell({
           apiBase={apiBase}
         />
       )
+    case "plan":
+      return <PlanCell plan={entry.plan} />
+    case "compaction":
+      return <CompactionCell entry={entry} />
     case "tool":
       return (
         <ToolCell

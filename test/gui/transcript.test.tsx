@@ -621,6 +621,28 @@ it("collapses completed process output and keeps the final answer visible", () =
   expect(screen.getByText("Final answer")).toBeDefined()
 })
 
+it("retains the completed compaction boundary when process activity is collapsed", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, -1),
+        {
+          kind: "compaction",
+          status: "completed",
+          itemId: "compact",
+          turnId: "turn_1",
+        },
+        ...entries.slice(-1),
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(screen.getByText("Context compacted").closest("ol")).toBeNull()
+  expect(screen.getByText("Final answer")).toBeDefined()
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+})
+
 it("groups adjacent tool actions behind a deterministic collapsed summary", () => {
   useAppStore.setState({
     execution: {

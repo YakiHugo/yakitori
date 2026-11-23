@@ -25,6 +25,66 @@ import { inputParts } from "../gui/input-fixtures.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("projects completed plan and compaction items in time order after a replay", () => {
+    const turnId = "turn_work"
+    const plan = { plan: [{ step: "Check the result", status: "in_progress" }] }
+    const start = {
+      itemId: "plan_item",
+      toolCallId: "plan_call",
+      turnId,
+      name: "update_plan",
+      input: plan,
+      requiresPermission: false,
+    }
+    const makeEvents = (includeStart: boolean) =>
+      [
+        ...(includeStart ? [toolStarted(start)] : []),
+        {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId,
+            item: {
+              ...toolStartedItem(start),
+              resultItemId: "plan_result",
+              output: plan,
+              content: { kind: "text", text: "Plan updated" },
+            },
+          },
+        },
+        {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId,
+            item: {
+              type: "context_compaction",
+              itemId: "compact_item",
+              status: "completed",
+            },
+          },
+        },
+        agentCompleted({ itemId: "reply_item", turnId, text: "Done" }),
+      ] satisfies KernelEvent[]
+    for (const includeStart of [true, false]) {
+      const state = makeEvents(includeStart).reduce(
+        (state, event, index) =>
+          reduceExecutionView(state, {
+            type: "durable",
+            event: createExecutionEnvelope({
+              sessionId,
+              seq: index + 1,
+              event,
+            }),
+          }),
+        createExecutionViewState(),
+      )
+      expect(projectExecutionView(state).entries).toMatchObject([
+        { kind: "plan", itemId: "plan_item", plan: { ...plan, kind: "plan" } },
+        { kind: "compaction", itemId: "compact_item", status: "completed" },
+        { kind: "assistant", itemId: "reply_item", text: "Done" },
+      ])
+    }
+  })
+
   describe("pending async questions", () => {
     const question = (
       toolCallId: string,

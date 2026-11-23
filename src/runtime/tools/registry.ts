@@ -13,6 +13,7 @@ import { createMultiAgentTools, createSpawnAgentTool } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
 import { createRunScriptTool } from "./run-script.ts"
+import { createSessionPlanTool } from "./session-plan.ts"
 import {
   createThreadCollaborationTools,
   createThreadTool,
@@ -861,6 +862,7 @@ export function createDefaultTools(
     createWebFetchTool(),
     createWebSearchTool(),
     createUserQuestionsTool(),
+    createSessionPlanTool(),
     ...(input.goalService === undefined
       ? []
       : createGoalTools(input.goalService)),

@@ -11,7 +11,9 @@ import type {
   UserQuestions,
 } from "../../../protocol/user-interaction.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
+import type { ExecutionEntry } from "../../execution-view.ts"
 import { ApiRequestError, getAppRpcClient } from "../../lib/rpc-client.ts"
+import { cn } from "../../lib/utils.ts"
 import { questionAnswerMemory } from "../../question-answer-memory.ts"
 import { selectCurrentThreadId, useAppStore } from "../../store/app-store.ts"
 import { useThreadScopeState } from "../../store/thread-scope-store.ts"
@@ -226,6 +228,28 @@ export function UserQuestionsCell({
         </div>
       ) : null}
     </form>
+  )
+}
+
+export function CompactionCell({
+  entry,
+}: Readonly<{ entry: Extract<ExecutionEntry, { kind: "compaction" }> }>) {
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 text-caption",
+        entry.status === "failed"
+          ? "text-destructive"
+          : "text-muted-foreground",
+      )}
+      title={entry.errorMessage}
+    >
+      <span aria-hidden="true" className="grow border-t" />
+      {entry.status === "completed"
+        ? "Context compacted"
+        : "Context compaction failed"}
+      <span aria-hidden="true" className="grow border-t" />
+    </div>
   )
 }
 

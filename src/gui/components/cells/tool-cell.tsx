@@ -16,10 +16,7 @@ import {
   Wrench,
 } from "lucide-react"
 import { useEffect, useId, useState } from "react"
-import {
-  parseSessionPlan,
-  parseUserQuestions,
-} from "../../../protocol/user-interaction.ts"
+import { parseUserQuestions } from "../../../protocol/user-interaction.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import {
   fileActionLabel,
@@ -33,7 +30,7 @@ import { presentTool, type ToolTarget } from "../../tool-presentation.ts"
 import { useConversationScope } from "../conversation-scope.tsx"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
-import { PlanCell, UserQuestionsCell } from "./session-progress-cell.tsx"
+import { UserQuestionsCell } from "./session-progress-cell.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
 import { ToolResultParts } from "./tool-result-parts.tsx"
 import "../activity-timeline.css"
@@ -130,10 +127,6 @@ export function ToolCell({
           />
         )
     }
-    if (entry.execution.name === "update_plan") {
-      const plan = parseSessionPlan(entry.output)
-      if (plan) return <PlanCell plan={plan} />
-    }
   }
 
   return (
@@ -151,6 +144,7 @@ export function ToolCell({
       data-status={
         failed ? "failed" : interrupted ? "interrupted" : entry.state
       }
+      data-origin={entry.origin ?? "local"}
       data-notice={
         presentation.meta.some(
           (part) => part === "partial" || part === "timed out",
