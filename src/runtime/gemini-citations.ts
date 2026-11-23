@@ -1,11 +1,14 @@
 import { isJsonObject, type JsonObject } from "../kernel/index.ts"
-import type { CitationRange, ModelCitation } from "../protocol/conversation.ts"
+import type {
+  CanonicalAnnotation,
+  CitationRange,
+} from "../protocol/conversation.ts"
 import type { ModelContentBlock } from "./model.ts"
 
 export function geminiInteractionCitations(
   parts: readonly JsonObject[],
-): ModelCitation[] {
-  const citations: ModelCitation[] = []
+): CanonicalAnnotation[] {
+  const citations: CanonicalAnnotation[] = []
   let offset = 0
   for (const part of parts) {
     if (typeof part.text !== "string") continue
@@ -53,7 +56,7 @@ export function geminiInteractionCitations(
 }
 
 export function createGeminiGrounding() {
-  const sources: (ModelCitation | undefined)[] = []
+  const sources: (CanonicalAnnotation | undefined)[] = []
   const supports: {
     support: JsonObject
     firstPart: number
@@ -102,7 +105,7 @@ export function createGeminiGrounding() {
       if (sources.length === 0) return
       const lastText = content.findLastIndex((block) => block.type === "text")
       if (lastText < 0) return
-      const annotations = new Map<number, ModelCitation[]>()
+      const annotations = new Map<number, CanonicalAnnotation[]>()
       for (const { support, firstPart, partCount } of supports) {
         if (!Array.isArray(support.groundingChunkIndices)) continue
         const segment = isJsonObject(support.segment)
@@ -195,11 +198,11 @@ function matchGroundingSegment(
 }
 
 function citationSource(
-  kind: ModelCitation["kind"],
+  kind: CanonicalAnnotation["kind"],
   title: unknown,
   url: unknown,
   retrievedText?: unknown,
-): ModelCitation | undefined {
+): CanonicalAnnotation | undefined {
   const label = typeof title === "string" && title.trim() ? title : undefined
   const uri = typeof url === "string" && url.trim() ? url : undefined
   const citedText =

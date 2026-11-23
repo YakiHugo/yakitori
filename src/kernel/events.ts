@@ -964,7 +964,7 @@ function isModelContentBlock(value: unknown): boolean {
       (value.annotations === undefined ||
         (Array.isArray(value.annotations) &&
           value.annotations.every((annotation) =>
-            isModelCitation(annotation, text.length),
+            isCanonicalAnnotation(annotation, text.length),
           )))
     )
   }
@@ -1034,7 +1034,7 @@ function isReasoningText(text: string, representation: unknown): boolean {
   )
 }
 
-function isModelCitation(value: unknown, textLength: number): boolean {
+function isCanonicalAnnotation(value: unknown, textLength: number): boolean {
   return (
     isRecord(value) &&
     onlyKeys(value, [

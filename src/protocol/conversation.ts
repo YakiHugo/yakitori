@@ -18,7 +18,7 @@ export type ModelAssistantTextBlock = ModelTextBlock &
   Readonly<{
     purpose?: AssistantTextPurpose
     refusal?: true
-    annotations?: readonly ModelCitation[]
+    annotations?: readonly CanonicalAnnotation[]
   }>
 
 export type CitationRange = Readonly<{
@@ -26,7 +26,7 @@ export type CitationRange = Readonly<{
   end: number
 }>
 
-export type ModelCitation = Readonly<{
+export type CanonicalAnnotation = Readonly<{
   kind: "url" | "file" | "document"
   title?: string
   url?: string

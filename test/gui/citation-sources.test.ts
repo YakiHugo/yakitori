@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { citationSources } from "../../src/gui/citation-sources.ts"
 import type {
+  CanonicalAnnotation,
   ModelAssistantTextBlock,
-  ModelCitation,
 } from "../../src/protocol/conversation.ts"
 
 describe("citation sources", () => {
@@ -29,6 +29,7 @@ describe("citation sources", () => {
       {
         label: "Shared source",
         url: "https://example.com/source",
+        citedTexts: ["Quoted from source"],
         mentions: [
           { responseSpan: { start: 0, end: 4 } },
           { responseSpan: { start: 4, end: 10 } },
@@ -115,6 +116,7 @@ describe("citation sources", () => {
           kind: "document",
           title: "Report",
           sourceLocation: { unit: "character", start: 100, end: 200 },
+          citedText: "Excerpt from the report",
         },
         { kind: "document" },
       ]),
@@ -123,8 +125,12 @@ describe("citation sources", () => {
       { label: "report.pdf" },
       { label: "notes.txt" },
       { label: "File source" },
-      { label: "Report", location: "from page 2" },
-      { label: "Report" },
+      { label: "Report", location: "pages 2–4" },
+      {
+        label: "Report",
+        location: "source characters 100–200",
+        citedTexts: ["Excerpt from the report"],
+      },
       { label: "Document source" },
     ])
   })
@@ -132,7 +138,7 @@ describe("citation sources", () => {
 
 function answer(
   text: string,
-  annotations: readonly ModelCitation[],
+  annotations: readonly CanonicalAnnotation[],
 ): ModelAssistantTextBlock {
   return { type: "text", text, annotations }
 }
