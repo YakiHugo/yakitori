@@ -46,6 +46,16 @@ it("admits exactly equivalent text-native history without changing its envelope"
   expect(planned.request.messages).toEqual([before])
 })
 
+it("admits plain native text with an end token removed from the saved answer", () => {
+  const value = { role: "assistant", content: `${answer}<|eos|>` }
+  expect(isPortableChatOnlyNative(content, [{ ...native, value }])).toBe(true)
+  expect(
+    isPortableChatOnlyNative(content, [
+      { ...native, value: { ...value, tool_calls: [] } },
+    ]),
+  ).toBe(false)
+})
+
 it.each([
   { role: "assistant", content: "different text" },
   { role: "system", content: answer },
