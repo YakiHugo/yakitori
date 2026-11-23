@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
 import { cleanup, render, screen } from "@testing-library/react"
 import { afterEach, expect, it, vi } from "vitest"
-import {
-  TranscriptPresenters,
-  TranscriptPresenterSlot,
-  type TranscriptPresenterRegistry,
-} from "../../src/gui/components/transcript-presenters.tsx"
 import { ConversationScopeContext } from "../../src/gui/components/conversation-scope.tsx"
+import {
+  type TranscriptPresenterRegistry,
+  TranscriptPresenterSlot,
+  TranscriptPresenters,
+} from "../../src/gui/components/transcript-presenters.tsx"
 
 const entry = {
   kind: "assistant" as const,
@@ -34,7 +34,11 @@ it("uses the first matching replacement and preserves declared decoration order"
           context.engineId === "test-engine" &&
           context.entry.kind === "assistant" &&
           context.entry.source?.provider === "example",
-        before: () => <span>Before</span>,
+        before: ({ context }) => {
+          expect(Object.isFrozen(context.entry)).toBe(true)
+          expect(context.entry).not.toBe(entry)
+          return <span>Before</span>
+        },
         replace: ({ fallback }) => <span>Enhanced {fallback}</span>,
         after: () => <span>After</span>,
       },

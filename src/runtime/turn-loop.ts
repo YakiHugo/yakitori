@@ -2555,6 +2555,9 @@ async function consumeModelStream(input: {
             type: "hosted_tool",
             itemId,
             tool: event.tool,
+            ...(attempt === undefined
+              ? {}
+              : { provider: attempt.origin.provider }),
           })
         }
         continue
@@ -3136,7 +3139,12 @@ function completedResponseItems(
     displayOutputParts(response.id, response.item.content, requestItemId),
     ({ block, itemId }): CompletedExecutionItem => {
       if (block.type === "hosted_tool")
-        return { type: "hosted_tool", itemId, tool: block }
+        return {
+          type: "hosted_tool",
+          itemId,
+          tool: block,
+          ...(source === undefined ? {} : { provider: source.provider }),
+        }
       if (block.type === "image_output") {
         if (block.image.file === undefined)
           throw new Error(

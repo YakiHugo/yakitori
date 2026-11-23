@@ -40,6 +40,7 @@ export type ExecutionEntry =
       kind: "hosted_tool"
       itemId: string
       turnId: string
+      provider?: string
       tool: HostedToolBlock
     }>
   | Readonly<{
@@ -209,4 +210,5 @@ export type ExecutionView = Readonly<{
   activeActivity?: ActiveTurnActivity
   activeRetry?: ActiveModelRetry
 }>
+
 import type { HostedToolBlock } from "./hosted-tool.ts"

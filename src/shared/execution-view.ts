@@ -1189,10 +1189,14 @@ function upsertHostedTool(
 ): ExecutionViewState {
   const index = state.itemEntryIndexes[item.itemId]
   const prior = index === undefined ? undefined : state.entries[index]
+  const provider =
+    item.provider ??
+    (prior?.kind === "hosted_tool" ? prior.provider : undefined)
   return replaceItemEntry(state, item.itemId, {
     kind: "hosted_tool",
     itemId: item.itemId,
     turnId,
+    ...(provider === undefined ? {} : { provider }),
     tool:
       prior?.kind === "hosted_tool"
         ? { ...prior.tool, ...item.tool }
