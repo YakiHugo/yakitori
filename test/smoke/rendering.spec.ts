@@ -1949,6 +1949,36 @@ test("keeps an ordinary answer outside activity through streaming and completion
   ).toBe(true)
 })
 
+test("keeps a visible unmarked preamble in place when a tool arrives", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "Begin with a preamble and call a tool later"
+  const preamble = "I will check the fixture."
+  await renderingApp.send(prompt)
+  await renderingApp.append(prompt, preamble)
+  const live = page.getByRole("region", { name: "Current response" })
+  const text = live.getByText(preamble, { exact: true })
+  await expect(text).toBeVisible()
+  await expect(live.getByRole("list", { name: "Agent activity" })).toHaveCount(
+    0,
+  )
+  const paragraph = await text.elementHandle()
+
+  await renderingApp.callTool(prompt, "read_file", { path: "README.md" })
+  await expect(live.getByRole("button", { name: /Read.*README/ })).toBeVisible()
+  expect(
+    await text.evaluate((node, previous) => node === previous, paragraph),
+  ).toBe(true)
+  await renderingApp.append(prompt, "The fixture has been checked.")
+  await renderingApp.finish(prompt)
+  const completed = page.getByRole("region", { name: "Response", exact: true })
+  await expect(
+    completed.getByText("The fixture has been checked."),
+  ).toBeVisible()
+  await expect(completed.getByText(preamble, { exact: true })).toBeHidden()
+})
+
 test("shows a native plan live and after reopening the session", async ({
   page,
   renderingApp,
@@ -2227,6 +2257,7 @@ test("keeps tool media visible and unique when activity collapses and history re
   const live = page.getByRole("region", { name: "Current response" })
   const media = live.getByRole("region", { name: "Tool attachments" })
   await expect(media.getByRole("img")).toBeVisible()
+  await renderingApp.callTool(prompt, "read_file", { path: "README.md" })
   await renderingApp.append(prompt, "The image is ready.")
   await renderingApp.finish(prompt)
 
@@ -2241,6 +2272,25 @@ test("keeps tool media visible and unique when activity collapses and history re
   const activity = history.getByRole("button", { name: /^Worked for/ })
   await expect(activity).toHaveAttribute("aria-expanded", "false")
   await activity.click()
+  const read = history.getByRole("button", { name: /Read.*README\.md/ })
+  await expect(read).toBeVisible()
+  expect(
+    await image.evaluate((node) => {
+      const region = node.closest(".conversation-response")
+      const read = [...(region?.querySelectorAll("button") ?? [])].find(
+        (button) =>
+          (button.getAttribute("aria-label") ?? button.textContent)?.includes(
+            "README.md",
+          ),
+      )
+      return (
+        read !== undefined &&
+        (node.compareDocumentPosition(read) &
+          Node.DOCUMENT_POSITION_FOLLOWING) !==
+          0
+      )
+    }),
+  ).toBe(true)
   await history.getByRole("button", { name: /View image/ }).click()
   await expect(history.getByRole("img")).toHaveCount(1)
   await renderingApp.reopen()
