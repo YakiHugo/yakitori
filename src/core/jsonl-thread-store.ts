@@ -3106,9 +3106,35 @@ function eventsFromRecords(
 function normalizeStoredModelContent(value: unknown): unknown {
   if (!isRecord(value) || !isRecord(value.item)) return value
   const rollout = value.item
+  const normalizeReasoning = (block: unknown): unknown => {
+    if (
+      !isRecord(block) ||
+      block.type !== "reasoning" ||
+      !("representation" in block)
+    )
+      return block
+    const { representation, ...reasoning } = block
+    return { ...reasoning, format: reasoning.format ?? representation }
+  }
+  if (
+    rollout.type === "item_completed" &&
+    isRecord(rollout.item) &&
+    rollout.item.type === "reasoning"
+  ) {
+    return {
+      ...value,
+      item: { ...rollout, item: normalizeReasoning(rollout.item) },
+    }
+  }
   const normalize = (envelope: unknown): unknown => {
     if (!isRecord(envelope) || !isRecord(envelope.item)) return envelope
     const message = envelope.item
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      return {
+        ...envelope,
+        item: { ...message, content: message.content.map(normalizeReasoning) },
+      }
+    }
     if (message.role === "tool" && typeof message.content === "string") {
       const { images, documents, ...tool } = message
       if (

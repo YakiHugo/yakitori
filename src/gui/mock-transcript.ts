@@ -334,7 +334,7 @@ function entries(): ExecutionEntry[] {
       source: { callId: "mock_verify", itemId: "item_reason_verify" },
       turnId: "turn_1",
       text: "**检查排版变更与参考资料**",
-      representation: "summary",
+      format: "summary",
       status: "completed",
       at: at("11:01:00"),
     },

@@ -1,10 +1,10 @@
 import { isDeepStrictEqual } from "node:util"
-import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
 import {
   isJsonObject,
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
 import { geminiInteractionCitations } from "./gemini-citations.ts"
 import {
   GeminiIncompleteStreamError,
@@ -18,11 +18,11 @@ import {
   type ModelStreamEvent,
   type ModelUsage,
 } from "./model.ts"
+import { modelImageOutput } from "./model-image-output.ts"
 import {
   modelNativeItems,
   modelNativeResponseMetadata,
 } from "./model-native.ts"
-import { modelImageOutput } from "./model-image-output.ts"
 
 type StreamStep = {
   value: Record<string, JsonValue>
@@ -259,7 +259,7 @@ export function createGeminiInteractionOutput(
           {
             type: "reasoning_delta",
             text: delta.content.text,
-            representation: "summary",
+            format: "summary",
             partIndex: step.partIndex ?? 0,
             ...(request.streamOutputItems ? { itemId } : {}),
           },
@@ -385,7 +385,7 @@ export function createGeminiInteractionOutput(
             content.push({
               type: "reasoning",
               text: parts.map((part) => part.text).join(""),
-              representation: "summary",
+              format: "summary",
             })
           } else {
             let textParts: JsonObject[] = []

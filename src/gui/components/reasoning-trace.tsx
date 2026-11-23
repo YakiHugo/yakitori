@@ -65,16 +65,29 @@ export function ReasoningTrace({
     <div className="reasoning-trace text-detail text-muted-foreground">
       {entries.map((entry) => {
         if (!entry.text.trim() && !entry.incomplete) return null
+        const sections =
+          entry.format === "summary"
+            ? reasoningSections(entry.text)
+            : [{ line: 0, summary: undefined, body: entry.text }]
         return (
           <div key={entry.itemId} className="reasoning-entry">
             <LiveTextNotice entry={entry} />
-            <MarkdownView
-              text={entry.text}
-              streaming={active && entry.status === "streaming"}
-              className="markdown-compact"
-              workspaceRoot={workspaceRoot}
-              apiBase={apiBase}
-            />
+            {sections.map(({ line, summary, body }) => (
+              <section key={line} className="reasoning-entry">
+                {summary === undefined ? null : (
+                  <h4 className="font-medium">{summary}</h4>
+                )}
+                {body.trim() ? (
+                  <MarkdownView
+                    text={body}
+                    streaming={active && entry.status === "streaming"}
+                    className="markdown-compact"
+                    workspaceRoot={workspaceRoot}
+                    apiBase={apiBase}
+                  />
+                ) : null}
+              </section>
+            ))}
           </div>
         )
       })}

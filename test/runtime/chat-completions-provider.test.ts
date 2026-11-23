@@ -1,4 +1,3 @@
-import { pngImageBase64, secondPngImageBase64 } from "../fixtures/images.ts"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import {
   createServer,
@@ -31,6 +30,7 @@ import {
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { pngImageBase64, secondPngImageBase64 } from "../fixtures/images.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 describe("Chat Completions provider", () => {
@@ -1553,15 +1553,15 @@ describe("Chat Completions provider", () => {
         expect(
           events.filter((event) => event.type === "reasoning_delta"),
         ).toMatchObject([
-          { text: "Summary.", representation: "summary" },
-          { text: "Raw ", representation: "raw" },
-          { text: "", representation: "redacted" },
-          { text: "details.", representation: "raw" },
+          { text: "Summary.", format: "summary" },
+          { text: "Raw ", format: "raw" },
+          { text: "", format: "redacted" },
+          { text: "details.", format: "raw" },
         ])
         const projected = [
-          { type: "reasoning", text: "Summary.", representation: "summary" },
-          { type: "reasoning", text: "Raw details.", representation: "raw" },
-          { type: "reasoning", text: "", representation: "redacted" },
+          { type: "reasoning", text: "Summary.", format: "summary" },
+          { type: "reasoning", text: "Raw details.", format: "raw" },
+          { type: "reasoning", text: "", format: "redacted" },
           { type: "text", text: "Answer." },
         ]
         expect(terminal(events).content).toEqual(projected)

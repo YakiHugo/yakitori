@@ -229,7 +229,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       status:
         replay || turn.completedAt !== undefined ? "completed" : "streaming",
       at,
-      ...(kind === "reasoning" ? { representation: "raw" } : {}),
+      ...(kind === "reasoning" ? { format: "raw" } : {}),
       ...(source === undefined ? {} : { sources: [source] }),
     })
   }

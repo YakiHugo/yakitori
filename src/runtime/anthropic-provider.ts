@@ -45,11 +45,11 @@ import {
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import { anthropicCitations } from "./model-citations.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
 } from "./model-failure.ts"
-import { anthropicCitations } from "./model-citations.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
   ModelHistoryScopeError,
@@ -632,7 +632,7 @@ async function* streamAnthropic(
           yield {
             type: "reasoning_delta",
             text: "",
-            representation: "redacted",
+            format: "redacted",
             ...(request.streamOutputItems
               ? { itemId: `${message.id}_block_${event.index}` }
               : {}),
@@ -681,7 +681,7 @@ async function* streamAnthropic(
             ...(thinkingDisplay === "updates"
               ? { purpose: "commentary" as const }
               : {
-                  representation:
+                  format:
                     thinkingDisplay === "summarized"
                       ? ("summary" as const)
                       : ("raw" as const),
@@ -1271,7 +1271,7 @@ export function fromAnthropicMessage(
           ? ({ type: "text", purpose: "commentary" } as const)
           : ({
               type: "reasoning",
-              representation: redacted
+              format: redacted
                 ? "redacted"
                 : thinkingDisplay === "summarized"
                   ? "summary"
@@ -1300,7 +1300,7 @@ export function fromAnthropicMessage(
       content.push({
         type: "reasoning",
         text: "",
-        representation: "redacted",
+        format: "redacted",
         providerMetadata: {
           anthropic: {
             provider,
@@ -1699,4 +1699,5 @@ function validateAnthropicModelRequest(
       `${model} maxOutputTokens must be between 1 and ${contract.configuration.maxOutputTokens}.`,
     )
 }
+
 import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

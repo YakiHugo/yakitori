@@ -143,7 +143,7 @@ it.each([
           item: expect.objectContaining({
             type: "reasoning",
             text: reasoning,
-            representation: reasoning ? "raw" : "redacted",
+            format: reasoning ? "raw" : "redacted",
           }),
         }),
       }),

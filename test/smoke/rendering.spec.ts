@@ -1862,10 +1862,7 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
     await expect(toggle).toBeVisible()
     await expect(panel.locator("ol")).toHaveCount(0)
     await toggle.click()
-    const reasoning = response.getByRole("button", {
-      name: "Reasoning",
-      exact: true,
-    })
+    const reasoning = panel.getByRole("button", { name: /^Thought for / })
     await reasoning.click()
     const details = response.locator(
       `[id="${await reasoning.getAttribute("aria-controls")}"]`,
@@ -2053,7 +2050,7 @@ test("shows summary, raw and encrypted reasoning live and after reopening persis
     if ((await summary.getAttribute("aria-expanded")) === "false")
       await summary.click()
     await expect(
-      details.getByText("Summary heading", { exact: true }),
+      details.getByRole("heading", { name: "Summary heading", exact: true }),
     ).toBeVisible()
     await expect(
       details.getByText("Summary body.", { exact: true }),
@@ -2124,11 +2121,11 @@ test("preserves streamed reasoning and the final answer through completion and r
   await page.getByRole("button", { name: /^Worked for/ }).click()
   await expect(response.getByText(interimText, { exact: true })).toHaveCount(1)
   await expect(response.getByText(interimText, { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^Thought for / })).toHaveCount(
+    1,
+  )
   await expect(
-    page.getByRole("button", { name: "Reasoning", exact: true }),
-  ).toHaveCount(1)
-  await expect(
-    page.getByRole("button", { name: "Reasoning", exact: true }),
+    page.getByRole("button", { name: /^Thought for / }),
   ).toHaveAttribute("aria-expanded", "true")
   await expect(
     page
@@ -2183,10 +2180,10 @@ test("preserves streamed reasoning and the final answer through completion and r
   await page.getByRole("button", { name: /^Worked for/ }).click()
   await expect(response.getByText(interimText, { exact: true })).toHaveCount(1)
   await expect(response.getByText(interimText, { exact: true })).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Reasoning", exact: true }),
-  ).toHaveCount(1)
-  await page.getByRole("button", { name: "Reasoning", exact: true }).click()
+  await expect(page.getByRole("button", { name: /^Thought for / })).toHaveCount(
+    1,
+  )
+  await page.getByRole("button", { name: /^Thought for / }).click()
   await expect(
     page
       .locator(".reasoning-trace")

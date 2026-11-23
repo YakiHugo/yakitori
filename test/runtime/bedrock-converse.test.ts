@@ -1,24 +1,24 @@
 import { once } from "node:events"
 import { createServer } from "node:http"
 import sharp from "sharp"
-import { fetch as bedrockFetch, Response as BedrockResponse } from "undici"
+import { Response as BedrockResponse, fetch as bedrockFetch } from "undici"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createBedrockConverseProvider } from "../../src/runtime/bedrock-converse-provider.ts"
-import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import type {
   ModelImageBlock,
   ModelRequest,
   ModelStreamEvent,
   StreamFn,
 } from "../../src/runtime/model.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
+import { providerPresets } from "../../src/runtime/provider-presets.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
-import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
 import {
   providerConfigValue,
   providersFromConfig,
   requireProviderConfiguration,
 } from "../../src/server/provider-configuration.ts"
-import { providerPresets } from "../../src/runtime/provider-presets.ts"
+import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>()
@@ -572,8 +572,8 @@ describe("Bedrock Converse native adapter", () => {
     )
     if (event?.type !== "response") throw new Error("Missing response")
     expect(event.response.content).toEqual([
-      { type: "reasoning", text: "Bedrock reasoning.", representation: "raw" },
-      { type: "reasoning", text: "", representation: "redacted" },
+      { type: "reasoning", text: "Bedrock reasoning.", format: "raw" },
+      { type: "reasoning", text: "", format: "redacted" },
       { type: "text", text: "Done." },
     ])
     expect(event.response.native?.map((item) => item.value)).toEqual(native)

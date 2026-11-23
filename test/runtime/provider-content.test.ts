@@ -1,6 +1,3 @@
-import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
-import { withSDKResponse } from "../support/sdk-response.ts"
-import { persistModelMessages } from "../support/persist-model-messages.ts"
 import type Anthropic from "@anthropic-ai/sdk"
 import type OpenAI from "openai"
 import type { Response } from "openai/resources/responses/responses"
@@ -9,13 +6,16 @@ import {
   fromAnthropicMessage,
   toAnthropicMessages,
 } from "../../src/runtime/anthropic-provider.ts"
+import { toChatCompletionsMessages } from "../../src/runtime/chat-completions-provider.ts"
+import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import {
   createOpenAIProvider,
   fromOpenAIResponse,
   toOpenAIInput,
 } from "../../src/runtime/openai-provider.ts"
-import { toChatCompletionsMessages } from "../../src/runtime/chat-completions-provider.ts"
-import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
+import { persistModelMessages } from "../support/persist-model-messages.ts"
+import { withSDKResponse } from "../support/sdk-response.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 const annotation = {
   type: "url_citation" as const,
@@ -426,7 +426,7 @@ it("retains native reasoning content independently of its display summary", () =
       {
         type: "reasoning",
         text: "Meaningful reasoning",
-        representation: "raw",
+        format: "raw",
       },
     ],
     native: [

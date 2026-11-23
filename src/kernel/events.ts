@@ -410,13 +410,20 @@ function isReasoningItem(
       "text",
       "providerMetadata",
       "source",
-      "representation",
+      "format",
+      "startedAt",
+      "completedAt",
       "durationMs",
     ]) &&
     isString(value.itemId) &&
     isString(value.text) &&
     isModelOutputSource(value.source) &&
-    isReasoningText(value.text, value.representation) &&
+    isReasoningText(value.text, value.format) &&
+    [value.startedAt, value.completedAt].every(
+      (at) =>
+        at === undefined ||
+        (typeof at === "string" && Number.isFinite(Date.parse(at))),
+    ) &&
     (value.durationMs === undefined ||
       (isNonNegativeInteger(value.durationMs) &&
         Number.isSafeInteger(value.durationMs))) &&
@@ -970,9 +977,9 @@ function isModelContentBlock(value: unknown): boolean {
   }
   if (value.type === "reasoning") {
     return (
-      onlyKeys(value, ["type", "text", "providerMetadata", "representation"]) &&
+      onlyKeys(value, ["type", "text", "providerMetadata", "format"]) &&
       isString(value.text) &&
-      isReasoningText(value.text, value.representation) &&
+      isReasoningText(value.text, value.format) &&
       (value.providerMetadata === undefined ||
         isJsonObject(value.providerMetadata))
     )
@@ -1025,12 +1032,12 @@ function isModelContentBlock(value: unknown): boolean {
   )
 }
 
-function isReasoningText(text: string, representation: unknown): boolean {
+function isReasoningText(text: string, format: unknown): boolean {
   return (
-    representation === undefined ||
-    representation === "summary" ||
-    representation === "raw" ||
-    (representation === "redacted" && text === "")
+    format === undefined ||
+    format === "summary" ||
+    format === "raw" ||
+    (format === "redacted" && text === "")
   )
 }
 

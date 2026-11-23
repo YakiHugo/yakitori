@@ -1,8 +1,8 @@
-import { pngImageBase64 } from "../fixtures/images.ts"
 import { describe, expect, it, vi } from "vitest"
 import { toGeminiInteractionInput } from "../../src/runtime/gemini-interactions-input.ts"
 import { createGeminiInteractionsProvider } from "../../src/runtime/gemini-interactions-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
+import { pngImageBase64 } from "../fixtures/images.ts"
 
 const created = {
   event_type: "interaction.created",
@@ -176,7 +176,7 @@ describe("Gemini Interactions wire boundary", () => {
     )
     const result = terminal(events)
     expect(result.content).toEqual([
-      { type: "reasoning", text: "Plan", representation: "summary" },
+      { type: "reasoning", text: "Plan", format: "summary" },
       {
         type: "tool_call",
         id: "custom-1",

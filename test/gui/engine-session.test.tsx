@@ -12,9 +12,8 @@ import {
   EngineConversation,
   EngineSelector,
 } from "../../src/gui/components/engine-session.tsx"
-import { projectEngineSession } from "../../src/shared/acp-execution-view.ts"
-import { useAppStore } from "../../src/gui/store/app-store.ts"
 import { textInputDraft } from "../../src/gui/input-draft.ts"
+import { useAppStore } from "../../src/gui/store/app-store.ts"
 import {
   cancelEngineTurn,
   chooseNewEngine,
@@ -29,6 +28,7 @@ import type {
   EngineEvent,
   EngineSessionSnapshot,
 } from "../../src/protocol/engine.ts"
+import { projectEngineSession } from "../../src/shared/acp-execution-view.ts"
 
 const request = vi.hoisted(() => vi.fn())
 vi.mock("../../src/gui/lib/rpc-client.ts", async (original) => ({
@@ -331,7 +331,7 @@ describe("external engine workspace", () => {
           ],
         },
       },
-      { kind: "reasoning", text: "Check the change.", representation: "raw" },
+      { kind: "reasoning", text: "Check the change.", format: "raw" },
       {
         kind: "plan",
         plan: { plan: [{ step: "Read the fixture", status: "completed" }] },
