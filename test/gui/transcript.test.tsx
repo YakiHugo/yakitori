@@ -765,6 +765,89 @@ it("keeps live process history available until the turn has a final answer", () 
   ).toBeNull()
 })
 
+it("keeps a marked final answer mounted outside commentary through completion", () => {
+  const progress: ExecutionEntry = {
+    kind: "assistant",
+    itemId: "progress",
+    turnId: "turn_1",
+    purpose: "commentary",
+    text: "I am reviewing the output.",
+    status: "completed",
+    at,
+  }
+  const answer: ExecutionEntry = {
+    ...progress,
+    itemId: "answer",
+    purpose: "final_answer",
+    text: "The output is ready.",
+    status: "streaming",
+  }
+  const active = {
+    ...useAppStore.getState().execution,
+    activeTurnId: "turn_1",
+    turnTimings: { turn_1: { startedAt: at } },
+    entries: [progress, answer],
+  }
+  useAppStore.setState({ execution: active })
+  render(<Transcript />)
+  const content = screen.getByText(answer.text)
+  expect(content.closest("ol")).toBeNull()
+  expect(screen.getByText(progress.text).closest("ol")).not.toBeNull()
+  act(() =>
+    useAppStore.setState({
+      execution: {
+        ...active,
+        activeTurnId: undefined,
+        turnTimings: {
+          turn_1: {
+            startedAt: at,
+            completedAt: at,
+            outcome: { status: "completed", answerItemIds: ["answer"] },
+          },
+        },
+        entries: [progress, { ...answer, status: "completed" }],
+      },
+    }),
+  )
+  expect(screen.getByText(answer.text)).toBe(content)
+  expect(screen.queryByText(progress.text)?.closest("[hidden]")).toBeDefined()
+})
+
+it("keeps unmarked prose in the process when a tool follows within the layout window", () => {
+  vi.useFakeTimers()
+  const answer: ExecutionEntry = {
+    kind: "assistant",
+    itemId: "answer",
+    turnId: "turn_1",
+    text: "Opening the file.",
+    status: "streaming",
+    at,
+  }
+  const active = {
+    ...useAppStore.getState().execution,
+    activeTurnId: "turn_1",
+    turnTimings: { turn_1: { startedAt: at } },
+    entries: [answer],
+  }
+  useAppStore.setState({ execution: active })
+  render(<Transcript />)
+  const narrative = screen.getByText(answer.text)
+  const timeline = narrative.closest("ol")
+  expect(timeline).not.toBeNull()
+  act(() => {
+    vi.advanceTimersByTime(60)
+    useAppStore.setState({
+      execution: {
+        ...active,
+        entries: [answer, readTool("read", "result.ts", "running")],
+      },
+    })
+  })
+  act(() => vi.advanceTimersByTime(120))
+  expect(screen.getByText(answer.text)).toBe(narrative)
+  expect(narrative.closest("ol")).toBe(timeline)
+})
+
 it("updates elapsed work time and collapses an open live trace when the turn completes", () => {
   vi.useFakeTimers()
   vi.setSystemTime(new Date("2026-09-12T00:00:58Z"))

@@ -1857,6 +1857,35 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
   })
 }
 
+test("keeps an ordinary answer outside activity through streaming and completion", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "An ordinary answer"
+  const first = "The answer begins."
+  const full = `${first} It stays in place.`
+  await renderingApp.send(prompt)
+  await renderingApp.append(prompt, first)
+
+  const live = page.getByRole("region", { name: "Current response" })
+  const text = live.getByText(first, { exact: true })
+  await expect(text).toBeVisible()
+  await expect(live.getByRole("list", { name: "Agent activity" })).toHaveCount(
+    0,
+  )
+  const paragraph = await text.elementHandle()
+  await renderingApp.append(prompt, " It stays in place.")
+  await expect(live.getByText(full, { exact: true })).toBeVisible()
+  await renderingApp.finish(prompt)
+
+  const completed = page.getByRole("region", { name: "Response", exact: true })
+  const final = completed.getByText(full, { exact: true })
+  await expect(final).toBeVisible()
+  expect(
+    await final.evaluate((node, previous) => node === previous, paragraph),
+  ).toBe(true)
+})
+
 test("shows summary, raw and encrypted reasoning live and after reopening persisted history", async ({
   page,
   renderingApp,
