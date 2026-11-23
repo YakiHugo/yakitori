@@ -127,7 +127,9 @@ export function projectAcpTool(
       descriptor = {
         type: "command_execution",
         command,
-        ...(title === undefined ? {} : { description: title }),
+        ...(title === undefined || title === command
+          ? {}
+          : { description: title }),
       }
   } else if (wire.kind === "search") {
     descriptor = {

@@ -83,7 +83,8 @@ export function UserMessageCell({
   queued: boolean
 }>) {
   const busy = useAppStore((state) => state.busy)
-  const { sessionId, threadId, apiBase, editable } = useConversationScope()
+  const { sessionId, threadId, apiBase, capabilities } = useConversationScope()
+  const { editable, supportsContextExcerpts } = capabilities
   const goalInputId = useAppStore(
     (state) => state.selectedSession?.goal?.inputId,
   )
@@ -165,7 +166,7 @@ export function UserMessageCell({
                 key={key}
                 className="message-bubble overflow-hidden"
                 {...contextSourceAttributes(
-                  sessionId
+                  sessionId && supportsContextExcerpts
                     ? {
                         kind: "message",
                         label: "User message",

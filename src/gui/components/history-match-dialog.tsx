@@ -157,7 +157,11 @@ function HistoryMatchPage({
                 apiBase,
                 workspaceRoot:
                   match.summary?.workingDirectory ?? execution.workingDirectory,
-                editable: false,
+                capabilities: {
+                  editable: false,
+                  supportsContextExcerpts: false,
+                  historyOwnership: "canonical",
+                },
                 interactiveQuestions: false,
                 loadTurnActivity,
               }}

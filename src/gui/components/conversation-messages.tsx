@@ -53,7 +53,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 import "./activity-timeline.css"
 
 import type { ExecutionView } from "../execution-view.ts"
-import { useConversationScope } from "./conversation-scope.tsx"
+import {
+  type ConversationCapabilities,
+  ConversationScopeContext,
+  useConversationScope,
+} from "./conversation-scope.tsx"
 
 // Keep admission order, including queued/steering inputs between turn items.
 // Only adjacent items of the same turn share a disclosure.
@@ -112,12 +116,15 @@ export function ConversationMessages({
   view,
   historyRevision = 0,
   onInputRef,
+  capabilities,
 }: Readonly<{
   view: ExecutionView
   historyRevision?: number
   onInputRef?: (inputId: string, node: HTMLDivElement | null) => void
+  capabilities?: ConversationCapabilities
 }>) {
-  const { sessionId } = useConversationScope()
+  const scope = useConversationScope()
+  const sessionId = scope.sessionId
   const previousBlocks = useRef<readonly TranscriptBlock[]>([])
   const previousScope = useRef({ sessionId, historyRevision })
   const previousAnswers = useRef(new Map<string, FinalAnswer>())
@@ -245,7 +252,7 @@ export function ConversationMessages({
     return answers
   }, [view.entries, view.turnTimings, view.activeTurnId])
   const queued = new Set(view.queuedInputIds)
-  return (
+  const messages = (
     <>
       {blocks.map((block, index) => {
         const first = block.entries[0]
@@ -309,6 +316,13 @@ export function ConversationMessages({
         />
       ) : null}
     </>
+  )
+  return capabilities === undefined ? (
+    messages
+  ) : (
+    <ConversationScopeContext.Provider value={{ ...scope, capabilities }}>
+      {messages}
+    </ConversationScopeContext.Provider>
   )
 }
 
@@ -746,7 +760,8 @@ const EntryCell = memo(function EntryCell({
 })
 
 function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
-  const { workspaceRoot, sessionId, apiBase } = useConversationScope()
+  const { workspaceRoot, sessionId, apiBase, capabilities } =
+    useConversationScope()
   const openAgent = async (agentId: string) => {
     if (sessionId) useWorkspaceStore.getState().openAgents(sessionId, agentId)
   }
@@ -758,7 +773,9 @@ function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
         <AssistantMessageCell
           entry={entry}
           workspaceRoot={workspaceRoot}
-          sessionId={sessionId}
+          sessionId={
+            capabilities.supportsContextExcerpts ? sessionId : undefined
+          }
           apiBase={apiBase}
         />
       )

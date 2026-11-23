@@ -3,13 +3,19 @@ import { selectCurrentThreadId, useAppStore } from "../store/app-store.ts"
 
 // A transcript's identity must never come from whichever other pane is selected.
 // Containers own lifecycle and capabilities; message renderers share this scope.
+export type ConversationCapabilities = Readonly<{
+  editable: boolean
+  supportsContextExcerpts: boolean
+  historyOwnership: "canonical" | "observed"
+}>
+
 export type ConversationScope = {
   sessionId: string | undefined
   engineId?: string | undefined
   threadId: string
   apiBase: string
   workspaceRoot: string | undefined
-  editable: boolean
+  capabilities: ConversationCapabilities
   interactiveQuestions: boolean
   loadTurnActivity?(turnId: string): Promise<void>
 }
@@ -30,7 +36,11 @@ export function useConversationScope(): ConversationScope {
       threadId,
       apiBase,
       workspaceRoot,
-      editable: true,
+      capabilities: {
+        editable: true,
+        supportsContextExcerpts: true,
+        historyOwnership: "canonical",
+      },
       interactiveQuestions: true,
     }
   )
