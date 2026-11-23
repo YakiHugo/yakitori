@@ -279,7 +279,7 @@ describe("tool cell", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button", { name: /Run pnpm lint/ }))
+    await user.click(screen.getByRole("button", { name: "Lint project" }))
 
     expect(await screen.findByText(/\$ pnpm lint/)).toBeTruthy()
     expect(screen.getByText(/\$ pnpm lint/).textContent).toBe(

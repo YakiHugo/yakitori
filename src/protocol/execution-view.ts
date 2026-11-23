@@ -9,6 +9,7 @@ import type { ContextExcerpt } from "./input-context.ts"
 import type { ModelFailureKind } from "./model-failure.ts"
 import type { ModelOutputPresentation } from "./model-output.ts"
 import type { InputDraft } from "./user-input.ts"
+import type { SessionPlan } from "./user-interaction.ts"
 
 export type CitationMention = Readonly<{
   // Half-open UTF-16 offsets in the associated assistant entry text.
@@ -75,6 +76,7 @@ export type ExecutionEntry =
     }
   | {
       readonly kind: "tool"
+      readonly origin?: "local" | "provider" | "engine"
       readonly toolCallId: string
       readonly turnId: string
       readonly execution: ToolExecutionItem
@@ -85,6 +87,19 @@ export type ExecutionEntry =
       readonly resultError?: boolean
       readonly resultErrorMessage?: string
     }
+  | Readonly<{
+      kind: "plan"
+      itemId: string
+      turnId: string
+      plan: SessionPlan
+    }>
+  | Readonly<{
+      kind: "compaction"
+      itemId: string
+      turnId: string
+      status: "completed" | "failed"
+      errorMessage?: string
+    }>
   | {
       readonly kind: "permission"
       readonly permissionRequestId: string

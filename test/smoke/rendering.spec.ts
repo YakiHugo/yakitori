@@ -1886,6 +1886,42 @@ test("keeps an ordinary answer outside activity through streaming and completion
   ).toBe(true)
 })
 
+test("shows a native plan live and after reopening the session", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "Make a plan for a fixture check."
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(prompt, "update_plan", {
+    plan: [
+      { step: "Open the fixture", status: "completed" },
+      { step: "Check the result", status: "in_progress" },
+    ],
+  })
+  const live = page.getByRole("region", { name: "Current response" })
+  await live
+    .getByRole("button", { name: "Updated plan · 1/2 completed" })
+    .click()
+  await expect(
+    live.getByText("Check the result", { exact: true }),
+  ).toBeVisible()
+  await renderingApp.append(prompt, "The fixture plan is ready.")
+  await renderingApp.finish(prompt)
+  await expect(
+    page.getByText("The fixture plan is ready.", { exact: true }),
+  ).toBeVisible()
+  await renderingApp.reopen()
+
+  const history = page.getByRole("region", { name: "Response", exact: true })
+  await history.getByRole("button", { name: /^Worked for/ }).click()
+  await history
+    .getByRole("button", { name: "Updated plan · 1/2 completed" })
+    .click()
+  await expect(
+    history.getByText("Check the result", { exact: true }),
+  ).toBeVisible()
+})
+
 test("shows summary, raw and encrypted reasoning live and after reopening persisted history", async ({
   page,
   renderingApp,

@@ -23,7 +23,10 @@ import type {
 import type { LiveSessionEvent } from "../protocol/live-events.ts"
 import type { InputContent } from "../protocol/user-input.ts"
 import { inputContentText } from "../protocol/user-input.ts"
-import { parseUserQuestions } from "../protocol/user-interaction.ts"
+import {
+  parseSessionPlan,
+  parseUserQuestions,
+} from "../protocol/user-interaction.ts"
 import { citationSources } from "./citation-sources.ts"
 
 export type {
@@ -124,6 +127,8 @@ export function executionEntryKey(entry: ExecutionEntry): string {
       return entry.inputId
     case "assistant":
     case "reasoning":
+    case "plan":
+    case "compaction":
       return entry.itemId
     case "tool":
       return entry.toolCallId
@@ -206,6 +211,8 @@ function executionEntryIdentity(entry: ExecutionEntry): string {
   switch (entry.kind) {
     case "assistant":
     case "reasoning":
+    case "plan":
+    case "compaction":
       return `item:${entry.itemId}`
     case "tool":
       return `item:${entry.execution.itemId}`
@@ -1026,10 +1033,15 @@ function applyDurable(
       if (item.type === "context_compaction") {
         const { [item.itemId]: _, ...openCompactionItems } =
           next.openCompactionItems
-        return {
-          ...next,
-          openCompactionItems,
-        }
+        return replaceItemEntry({ ...next, openCompactionItems }, item.itemId, {
+          kind: "compaction",
+          itemId: item.itemId,
+          turnId: event.data.turnId,
+          status: item.status,
+          ...(item.error === undefined
+            ? {}
+            : { errorMessage: item.error.message }),
+        })
       }
       if (item.type === "agent_message" || item.type === "reasoning") {
         const text =
@@ -1082,6 +1094,16 @@ function applyDurable(
       const previousIndex = state.itemEntryIndexes[item.itemId]
       const previous =
         previousIndex === undefined ? undefined : state.entries[previousIndex]
+      if (item.name === "update_plan" && item.error === undefined) {
+        const plan = parseSessionPlan(item.output)
+        if (plan !== undefined)
+          return replaceItemEntry(next, item.itemId, {
+            kind: "plan",
+            itemId: item.itemId,
+            turnId: event.data.turnId,
+            plan,
+          })
+      }
       if (
         !replay &&
         item.name === "request_user_input_async" &&
@@ -1302,6 +1324,8 @@ function indexEntries(entries: readonly ExecutionEntry[]): {
     if (
       entry.kind === "assistant" ||
       entry.kind === "reasoning" ||
+      entry.kind === "plan" ||
+      entry.kind === "compaction" ||
       entry.kind === "tool"
     ) {
       const itemId =

@@ -29,6 +29,7 @@ import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
+import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
 import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   Collapsible,
@@ -518,6 +519,10 @@ function TraceEntry({
           apiBase={apiBase}
         />
       )
+    case "plan":
+      return <PlanCell plan={entry.plan} />
+    case "compaction":
+      return <CompactionCell entry={entry} />
     case "tool":
       return (
         <ToolCell

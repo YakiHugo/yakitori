@@ -326,12 +326,14 @@ function presentRunCommand(
   execution: ExecutionOf<"command_execution">,
 ): ToolPresentation {
   const command = execution.command
-  const description = execution.description
+  const description = execution.description?.trim() || undefined
+  const intent = description === undefined ? commandIntent(command) : undefined
   return {
-    verb: "Run",
-    activeVerb: "Running",
-    subject: truncateLine(description ?? command, 120),
-    subjectTone: description === undefined ? "code" : "text",
+    verb: intent?.verb ?? "Run",
+    activeVerb: intent?.activeVerb ?? "Running",
+    subject: truncateLine(description ?? intent?.subject ?? command, 120),
+    subjectTone:
+      description === undefined && intent === undefined ? "code" : "text",
     meta: [],
     detail: {
       kind: "command",
@@ -343,6 +345,54 @@ function presentRunCommand(
         ? {}
         : { errorMessage: entry.resultErrorMessage }),
     },
+  }
+}
+
+type CommandIntent = Pick<ToolPresentation, "verb" | "activeVerb" | "subject">
+
+function commandIntent(command: string): CommandIntent | undefined {
+  if (/[;&|\n\r<>`$]/u.test(command)) return undefined
+  const [program, action, argument] = command.trim().split(/\s+/u)
+  if (program === "git") {
+    const subject =
+      action === "diff"
+        ? "Git changes"
+        : action === "status"
+          ? "Git status"
+          : action === "log"
+            ? "Git history"
+            : undefined
+    if (subject !== undefined)
+      return { verb: "View", activeVerb: "Viewing", subject }
+  }
+  let task: string | undefined
+  if (
+    program !== undefined &&
+    ["pnpm", "npm", "yarn", "bun"].includes(program)
+  ) {
+    if (action === "install")
+      return {
+        verb: "Install",
+        activeVerb: "Installing",
+        subject: "dependencies",
+      }
+    task = action === "run" ? argument : action
+  } else if (program === "pytest" || (program === "go" && action === "test")) {
+    task = "test"
+  } else if (program === "cargo" || program === "make") {
+    task = action
+  }
+  switch (task?.split(":", 1)[0]) {
+    case "test":
+      return { verb: "Run", activeVerb: "Running", subject: "tests" }
+    case "build":
+      return { verb: "Build", activeVerb: "Building", subject: "project" }
+    case "lint":
+      return { verb: "Lint", activeVerb: "Linting", subject: "project" }
+    case "typecheck":
+      return { verb: "Check", activeVerb: "Checking", subject: "types" }
+    default:
+      return undefined
   }
 }
 
