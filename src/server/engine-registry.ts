@@ -1,13 +1,16 @@
+import type { RolloutAssets } from "../core/rollout-assets.ts"
 import type { UserAttachment } from "../protocol/asset-types.ts"
 import type {
   EngineDescriptor,
   EngineRpcParams,
+  EngineSessionSearchResult,
   EngineSessionSnapshot,
   EngineSessionSummary,
 } from "../protocol/engine.ts"
+import { projectEngineSession } from "../shared/acp-execution-view.ts"
+import type { AcpEngineConfiguration } from "./engine-configuration.ts"
 import { createAcpEngine } from "./engines/acp/adapter.ts"
 import type { EngineAdapter } from "./engines/engine.ts"
-import type { AcpEngineConfiguration } from "./engine-configuration.ts"
 import {
   createExternalSessionService,
   type ExternalAppSession,
@@ -179,6 +182,39 @@ export class EngineRegistry {
       .sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
+  search(term: string, offset = 0): EngineSessionSearchResult {
+    const needle = term.toLowerCase()
+    const sessions = this.list()
+    const matches: EngineSessionSearchResult["matches"][number][] = []
+    // Bound the number of full transcript projections per foreground search page.
+    const end = Math.min(sessions.length, offset + 25)
+    for (const engineSession of sessions.slice(offset, end)) {
+      const title = engineSession.title ?? ""
+      let match = title.toLowerCase().includes(needle) ? title : undefined
+      if (match === undefined) {
+        const snapshot = this.read(engineSession.id)
+        const { entries } = projectEngineSession(snapshot).executionView
+        for (const entry of entries) {
+          if (entry.kind !== "assistant" && entry.kind !== "user_input")
+            continue
+          if (!entry.text.toLowerCase().includes(needle)) continue
+          match = entry.text
+          break
+        }
+      }
+      if (match !== undefined) {
+        const location = match.toLowerCase().indexOf(needle)
+        const start = Math.max(0, location - 48)
+        const stop = Math.min(match.length, location + term.length + 72)
+        matches.push({
+          engineSession,
+          snippet: `${start === 0 ? "" : "…"}${match.slice(start, stop)}${stop === match.length ? "" : "…"}`,
+        })
+      }
+    }
+    return { matches, ...(end < sessions.length ? { nextOffset: end } : {}) }
+  }
+
   hasSession(id: string): boolean {
     return [...this.#entries.values()].some(({ service }) =>
       service.hasSession(id),
@@ -257,4 +293,3 @@ function summary(session: ExternalAppSession): EngineSessionSummary {
   const { binding, ...metadata } = session
   return { ...metadata, engineId: binding.engineId, cwd: binding.cwd }
 }
-import type { RolloutAssets } from "../core/rollout-assets.ts"

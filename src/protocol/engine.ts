@@ -30,6 +30,14 @@ export type EngineSessionSummary = Readonly<{
   updatedAt: number
 }>
 
+export type EngineSessionSearchResult = Readonly<{
+  matches: readonly Readonly<{
+    engineSession: EngineSessionSummary
+    snippet: string
+  }>[]
+  nextOffset?: number
+}>
+
 export type EngineEvent =
   | Readonly<{
       type: "turn.status"
@@ -114,6 +122,7 @@ export type EngineRpcParams = {
     projectId?: string
   }
   "engineSession/list": Record<string, never>
+  "engineSession/search": { term: string; offset?: number }
   "engineSession/read": { sessionId: string }
   "engineSession/send": {
     sessionId: string
@@ -140,12 +149,14 @@ export type EngineRpcResponses = {
   "engine/inspect": EngineDescriptor
   "engineSession/create": EngineSessionSnapshot
   "engineSession/list": { sessions: readonly EngineSessionSummary[] }
+  "engineSession/search": EngineSessionSearchResult
   "engineSession/read": EngineSessionSnapshot
   "engineSession/send": EngineSendResult
   "engineSession/cancel": { status: "requested" | "not_running" }
   "engineSession/configure": boolean
   "engineSession/respondPermission": boolean
 }
+
 import type { InputContent } from "./user-input.ts"
 
 export type EnginePromptCapabilities = Readonly<{

@@ -1,17 +1,22 @@
 import { Search } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { ApiSearchSessionsResponse } from "../../protocol/application.ts"
+import type { EngineSessionSearchResult } from "../../protocol/engine.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { selectEngineSession, useEngineStore } from "../store/engine-store.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 
 export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
   const apiBase = useAppStore((state) => state.apiBase)
   const selectSession = useAppStore((state) => state.selectSession)
   const projects = useAppStore((state) => state.projects)
+  const engines = useEngineStore((state) => state.engines)
+  const observedAvailable = useEngineStore((state) => state.sessions.length > 0)
   const [query, setQuery] = useState("")
   const [archived, setArchived] = useState(false)
   const [result, setResult] = useState<ApiSearchSessionsResponse>()
+  const [observed, setObserved] = useState<EngineSessionSearchResult>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const [active, setActive] = useState(0)
@@ -19,27 +24,60 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
   const list = useRef<HTMLElement>(null)
   const term = query.trim()
   const fetchPage = useCallback(
-    async (requestRevision: number, cursor?: string) => {
+    async (
+      requestRevision: number,
+      page?: { native?: string; observed?: number },
+    ) => {
       setLoading(true)
       setError(undefined)
       try {
-        const response = await getAppRpcClient(apiBase).request(
-          "session/search",
-          {
-            searchTerm: term,
-            archived,
-            ...(cursor === undefined ? {} : { cursor }),
-          },
-        )
+        const rpc = getAppRpcClient(apiBase)
+        const [response, engineResponse] = await Promise.all([
+          page === undefined || page.native !== undefined
+            ? rpc.request("session/search", {
+                searchTerm: term,
+                archived,
+                ...(page?.native === undefined ? {} : { cursor: page.native }),
+              })
+            : undefined,
+          observedAvailable &&
+          !archived &&
+          (page === undefined || page.observed !== undefined)
+            ? rpc.request("engineSession/search", {
+                term,
+                ...(page?.observed === undefined
+                  ? {}
+                  : { offset: page.observed }),
+              })
+            : undefined,
+        ])
         if (revision.current !== requestRevision) return
-        if (cursor === undefined) setActive(0)
-        setResult((previous) => ({
-          ...response,
-          data:
-            cursor === undefined
-              ? response.data
-              : [...(previous?.data ?? []), ...response.data],
-        }))
+        if (page === undefined) setActive(0)
+        if (response !== undefined)
+          setResult((previous) => ({
+            ...response,
+            data:
+              page === undefined
+                ? response.data
+                : [...(previous?.data ?? []), ...response.data],
+          }))
+        if (engineResponse !== undefined)
+          setObserved((previous) => ({
+            ...engineResponse,
+            matches:
+              page === undefined
+                ? engineResponse.matches
+                : [
+                    ...(previous?.matches ?? []),
+                    ...engineResponse.matches.filter(
+                      (match) =>
+                        !previous?.matches.some(
+                          (prior) =>
+                            prior.engineSession.id === match.engineSession.id,
+                        ),
+                    ),
+                  ],
+          }))
       } catch (cause) {
         if (revision.current === requestRevision)
           setError(cause instanceof Error ? cause.message : "Search failed.")
@@ -47,11 +85,12 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
         if (revision.current === requestRevision) setLoading(false)
       }
     },
-    [apiBase, term, archived],
+    [apiBase, term, archived, observedAvailable],
   )
   useEffect(() => {
     const requestRevision = ++revision.current
     setResult(undefined)
+    setObserved(undefined)
     setActive(0)
     setError(undefined)
     setLoading(term !== "")
@@ -62,10 +101,15 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
       revision.current += 1
     }
   }, [term, fetchPage])
-  const results = result?.data ?? []
+  const results = [...(result?.data ?? []), ...(observed?.matches ?? [])]
   const open = (index: number) => {
     const match = results[index]
     if (!match) return
+    if ("engineSession" in match) {
+      onClose()
+      void selectEngineSession(match.engineSession)
+      return
+    }
     const { session, location } = match
     onClose()
     if (location === undefined) void selectSession(session.id, session)
@@ -132,27 +176,36 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
         className="max-h-[50vh] overflow-y-auto"
         aria-label="Search results"
       >
-        {results.map(({ session, snippet }, index) => (
-          <button
-            type="button"
-            key={session.id}
-            data-active={index === active}
-            onMouseEnter={() => setActive(index)}
-            onClick={() => open(index)}
-            className="search-result"
-          >
-            <span className="block truncate font-medium">
-              {session.title ?? "Untitled session"}
-            </span>
-            <span className="mt-1 block truncate text-xs text-muted-foreground">
-              {snippet}
-            </span>
-            <span className="mt-1 block text-[11px] text-muted-foreground">
-              {projects.find((project) => project.id === session.projectId)
-                ?.name ?? "No project"}
-            </span>
-          </button>
-        ))}
+        {results.map((match, index) => {
+          const session =
+            "engineSession" in match ? match.engineSession : match.session
+          return (
+            <button
+              type="button"
+              key={session.id}
+              data-active={index === active}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => open(index)}
+              className="search-result"
+            >
+              <span className="block truncate font-medium">
+                {session.title ?? "Untitled session"}
+              </span>
+              <span className="mt-1 block truncate text-xs text-muted-foreground">
+                {match.snippet}
+              </span>
+              <span className="mt-1 block text-[11px] text-muted-foreground">
+                {"engineSession" in match
+                  ? (engines.find(
+                      (engine) => engine.id === match.engineSession.engineId,
+                    )?.label ?? "External engine")
+                  : (projects.find(
+                      (project) => project.id === session.projectId,
+                    )?.name ?? "No project")}
+              </span>
+            </button>
+          )
+        })}
       </section>
       <p role="status" className="mt-3 text-xs text-muted-foreground">
         {loading
@@ -161,7 +214,9 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
             (term === ""
               ? "Find a session by its title or a phrase from the conversation."
               : results.length === 0
-                ? "No matching sessions"
+                ? observed?.nextOffset === undefined
+                  ? "No matching sessions"
+                  : "Search more sessions"
                 : "↑ ↓ to navigate · Enter to open"))}
       </p>
       {result?.unavailableSessionCount ? (
@@ -182,12 +237,21 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
           Retry search
         </button>
       )}
-      {result?.nextCursor && (
+      {(result?.nextCursor || observed?.nextOffset !== undefined) && (
         <button
           type="button"
           disabled={loading}
           className="sidebar-row mt-2"
-          onClick={() => void fetchPage(revision.current, result.nextCursor)}
+          onClick={() =>
+            void fetchPage(revision.current, {
+              ...(result?.nextCursor === undefined
+                ? {}
+                : { native: result.nextCursor }),
+              ...(observed?.nextOffset === undefined
+                ? {}
+                : { observed: observed.nextOffset }),
+            })
+          }
         >
           Show more results
         </button>
