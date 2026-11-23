@@ -92,7 +92,7 @@ type OccurrenceCursor = Readonly<{
 
 // Status, compact display history and checkpoints share a disposable projection,
 // so a schema reset rebuilds them consistently from authoritative JSONL.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.

@@ -42,17 +42,22 @@ export function ToolCell({
   workspaceRoot,
   onOpenSession,
   onExpandedChange,
+  separateMedia = false,
   apiBase: apiBaseOverride,
 }: Readonly<{
   entry: ToolEntry
   workspaceRoot?: string | undefined
   onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
   onExpandedChange?: ((expanded: boolean) => void) | undefined
+  separateMedia?: boolean
   apiBase?: string | undefined
 }>) {
   const storeApiBase = useAppStore((state) => state.apiBase)
   const apiBase = apiBaseOverride ?? storeApiBase
   const presentation = presentTool(entry)
+  const resultParts = separateMedia
+    ? entry.resultContent?.filter((part) => part.type === "text")
+    : entry.resultContent
   const collaboration =
     presentation.detail?.kind === "collaboration"
       ? presentation.detail
@@ -250,9 +255,11 @@ export function ToolCell({
               {collaboration.request}
             </p>
           )}
-          {entry.resultContent?.some((part) => part.type !== "text") ? (
+          {entry.resultContent?.some((part) => part.type !== "text") &&
+          resultParts !== undefined &&
+          resultParts.length > 0 ? (
             <ToolResultParts
-              parts={entry.resultContent}
+              parts={resultParts}
               toolCallId={entry.toolCallId}
               apiBase={apiBase}
             />

@@ -156,7 +156,9 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
               api_backend: "chat_completions",
               base_url: `${origin}/v1`,
               authentication: "none",
-              models: [{ id: "rendering-model" }],
+              models: [
+                { id: "rendering-model", inputModalities: ["text", "image"] },
+              ],
             },
           },
         }),
@@ -2161,4 +2163,34 @@ test("keeps provider refusal recognizable live and on reopened transcripts", asy
     completed.getByText("Provider refusal", { exact: true }),
   ).toBeVisible()
   await expect(completed.getByText(message, { exact: true })).toBeVisible()
+})
+
+test("keeps tool media visible and unique when activity collapses and history reopens", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "View the screenshot fixture"
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(prompt, "view_image", { path: "smoke.png" })
+  const live = page.getByRole("region", { name: "Current response" })
+  const media = live.getByRole("region", { name: "Tool attachments" })
+  await expect(media.getByRole("img")).toBeVisible()
+  await renderingApp.append(prompt, "The image is ready.")
+  await renderingApp.finish(prompt)
+
+  const history = page.getByRole("region", { name: "Response", exact: true })
+  const image = history
+    .getByRole("region", { name: "Tool attachments" })
+    .getByRole("img")
+  await expect(image).toBeVisible()
+  expect(
+    await image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+  ).toBeGreaterThan(0)
+  const activity = history.getByRole("button", { name: /^Worked for/ })
+  await expect(activity).toHaveAttribute("aria-expanded", "false")
+  await activity.click()
+  await history.getByRole("button", { name: /View image/ }).click()
+  await expect(history.getByRole("img")).toHaveCount(1)
+  await renderingApp.reopen()
+  await expect(image).toBeVisible()
 })

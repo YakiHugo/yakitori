@@ -10,6 +10,7 @@ import {
   useState,
 } from "react"
 import { answerTextParts } from "../../protocol/model-output.ts"
+import type { ModelToolContentBlock } from "../../protocol/conversation.ts"
 import { parseUserQuestions } from "../../protocol/user-interaction.ts"
 import { groupConversationActivity } from "../conversation-activity.ts"
 import {
@@ -30,6 +31,7 @@ import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
+import { ToolResultParts } from "./cells/tool-result-parts.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
 import {
@@ -339,6 +341,12 @@ function composeFinalAnswer(
   }
 }
 
+type ToolMedia = Readonly<{
+  kind: "tool_media"
+  toolCallId: string
+  parts: readonly ModelToolContentBlock[]
+}>
+
 const TurnBlock = memo(
   function TurnBlock({
     blockKey,
@@ -363,7 +371,8 @@ const TurnBlock = memo(
     canPreviewUnmarkedAnswer: boolean
     retry: ActiveModelRetry | undefined
   }>) {
-    const { threadId, sessionId, loadTurnActivity } = useConversationScope()
+    const { threadId, sessionId, apiBase, loadTurnActivity } =
+      useConversationScope()
     const [liveActivityCollapsed, setLiveActivityCollapsed] =
       useThreadScopeState(threadId, `turn:${blockKey}:live-collapsed`, false)
     const [activityExpanded, setActivityExpanded] = useThreadScopeState(
@@ -449,21 +458,33 @@ const TurnBlock = memo(
       )
       const visibleAnswer = answerInBlock ? answer?.entry : undefined
       const answerItemIds = new Set(answer?.itemIds)
-      const persistent = entries.flatMap<ExecutionEntry>((entry) => {
-        if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
-          return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
-        }
-        return entry.kind === "turn_terminal" ||
-          entry.kind === "compaction" ||
-          (entry.kind === "assistant" && entry.refusal) ||
-          (entry.kind === "permission" && entry.state !== "resolved") ||
-          (entry.kind === "tool" &&
-            entry.execution.name === "request_user_input_async" &&
-            !entry.resultError &&
-            parseUserQuestions(entry.output) !== undefined)
-          ? [entry]
-          : []
-      })
+      const persistent = entries.flatMap<ExecutionEntry | ToolMedia>(
+        (entry) => {
+          if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
+            return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
+          }
+          const pinned =
+            entry.kind === "turn_terminal" ||
+            entry.kind === "compaction" ||
+            (entry.kind === "assistant" && entry.refusal) ||
+            (entry.kind === "permission" && entry.state !== "resolved") ||
+            (entry.kind === "tool" &&
+              entry.execution.name === "request_user_input_async" &&
+              !entry.resultError &&
+              parseUserQuestions(entry.output) !== undefined)
+          if (entry.kind === "tool") {
+            const parts = entry.resultContent?.filter(
+              (part) => part.type !== "text",
+            )
+            if (parts !== undefined && parts.length > 0)
+              return [
+                ...(pinned ? [entry] : []),
+                { kind: "tool_media", toolCallId: entry.toolCallId, parts },
+              ]
+          }
+          return pinned ? [entry] : []
+        },
+      )
       const reasoning = entries.filter(
         (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
           entry.kind === "reasoning",
@@ -657,9 +678,19 @@ const TurnBlock = memo(
             )}
           </div>
         ) : null}
-        {persistent.map((entry) => (
-          <EntryCell key={executionEntryKey(entry)} entry={entry} />
-        ))}
+        {persistent.map((entry) =>
+          entry.kind === "tool_media" ? (
+            <ToolResultParts
+              key={`media:${entry.toolCallId}`}
+              label="Tool attachments"
+              parts={entry.parts}
+              toolCallId={entry.toolCallId}
+              apiBase={apiBase}
+            />
+          ) : (
+            <EntryCell key={executionEntryKey(entry)} entry={entry} />
+          ),
+        )}
         {completed && visibleAnswer ? (
           <ResponseActions
             text={visibleAnswer.text}
@@ -722,6 +753,7 @@ const EntryCell = memo(function EntryCell({
           workspaceRoot={workspaceRoot}
           onOpenSession={openAgent}
           apiBase={apiBase}
+          separateMedia
         />
       )
     case "permission":

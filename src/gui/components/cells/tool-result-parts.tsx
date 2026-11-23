@@ -7,14 +7,16 @@ export function ToolResultParts({
   parts,
   toolCallId,
   apiBase,
+  label = "Ordered tool result",
 }: Readonly<{
   parts: readonly ModelToolContentBlock[]
   toolCallId: string
   apiBase: string
+  label?: string
 }>) {
   const [openError, setOpenError] = useState<string>()
   return (
-    <section className="space-y-2" aria-label="Ordered tool result">
+    <section className="space-y-2" aria-label={label}>
       {parts.map((part, index) => {
         // Completed items replace one stable tool entry. Part indices are stable
         // within that immutable payload, including repeated references to one file.

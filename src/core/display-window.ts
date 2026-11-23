@@ -41,7 +41,11 @@ export function isTranscriptRecord({ item }: StoredRolloutItem): boolean {
     (execution.type === "reasoning" && execution.text === "") ||
     ("name" in execution &&
       (execution.name === "request_user_input_async" ||
-        execution.name === "update_plan"))
+        execution.name === "update_plan" ||
+        (execution.content.kind === "tool_result" &&
+          execution.content.parts.some((part) => part.type !== "text")) ||
+        (execution.content.kind === "text" &&
+          (execution.content.attachments?.length ?? 0) > 0)))
   )
 }
 
