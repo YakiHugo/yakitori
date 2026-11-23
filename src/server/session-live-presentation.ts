@@ -79,6 +79,22 @@ export function createSessionLivePresentation(
             ? {}
             : { representation: event.representation }),
         })
+      } else if (event.type === "tool.output") {
+        let publisher = streams.get(event.itemId)
+        if (publisher === undefined) {
+          publisher = createCoalescingDeltaPublisher(
+            { publishTransient },
+            30,
+            "tool.output.delta",
+          )
+          streams.set(event.itemId, publisher)
+        }
+        publisher.publish({
+          sessionId: event.threadId,
+          turnId: event.turnId,
+          itemId: event.itemId,
+          delta: event.delta,
+        })
       } else if (event.type === "model.output_discarded") {
         discard(event.threadId, event.turnId, event.itemIds)
       } else if (event.type === "item.started") {

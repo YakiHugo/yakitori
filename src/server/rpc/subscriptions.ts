@@ -741,12 +741,14 @@ function isLiveDisplayEvent(event: LiveSessionEvent): event is Extract<
       | "item.discarded"
       | "assistant.delta"
       | "reasoning.delta"
+      | "tool.output.delta"
   }>
 > {
   return (
     event.type === "item.started" ||
     event.type === "item.discarded" ||
     event.type === "assistant.delta" ||
-    event.type === "reasoning.delta"
+    event.type === "reasoning.delta" ||
+    event.type === "tool.output.delta"
   )
 }

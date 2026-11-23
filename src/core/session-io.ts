@@ -1,10 +1,10 @@
-import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type { TurnInput } from "../protocol/input-queue.ts"
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 
 export type {
-  TurnInput,
-  InputSource,
   InputPurpose,
+  InputSource,
+  TurnInput,
 } from "../protocol/input-queue.ts"
 
 import type {
@@ -151,6 +151,13 @@ export type SessionEvent =
         kind: "assistant" | "reasoning"
         delta: string
       }>)
+  | Readonly<{
+      type: "tool.output"
+      threadId: string
+      turnId: string
+      itemId: string
+      delta: string
+    }>
   | Readonly<{
       type: "item.started"
       threadId: string

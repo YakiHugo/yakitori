@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process"
 import { randomInt } from "node:crypto"
 import { closeSync, fsyncSync, openSync, writeSync } from "node:fs"
 import { basename } from "node:path"
+import { StringDecoder } from "node:string_decoder"
 import { type IPty, spawn as spawnPty } from "node-pty"
 import type { JsonValue } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
@@ -91,8 +92,13 @@ export type UnifiedExecProcessManager = Readonly<{
     readonly maxOutputTokens: number
     readonly outputPath?: string
     readonly signal?: AbortSignal
+    readonly onOutput?: (delta: string) => void
   }): Promise<UnifiedExecOutput>
-  write(input: WriteInput, signal?: AbortSignal): Promise<UnifiedExecOutput>
+  write(
+    input: WriteInput,
+    signal?: AbortSignal,
+    onOutput?: (delta: string) => void,
+  ): Promise<UnifiedExecOutput>
   close(): Promise<void>
 }>
 
@@ -228,6 +234,9 @@ export function createUnifiedExecTools(
           yieldTimeMs: parsed.value.yieldTimeMs,
           maxOutputTokens: parsed.value.maxOutputTokens,
           ...(context.signal === undefined ? {} : { signal: context.signal }),
+          ...(context.onOutput === undefined
+            ? {}
+            : { onOutput: context.onOutput }),
         })
         return success(output)
       } catch (error) {
@@ -279,7 +288,9 @@ export function createUnifiedExecTools(
       const parsed = parseWriteInput(rawInput)
       if (!parsed.ok) return parsed.result
       try {
-        return success(await manager.write(parsed.value, context.signal))
+        return success(
+          await manager.write(parsed.value, context.signal, context.onOutput),
+        )
       } catch (error) {
         return failure(
           "write_stdin_failed",
@@ -408,6 +419,8 @@ export function createUnifiedExecProcessManager(
       input.signal?.addEventListener("abort", onAbort, { once: true })
       if (input.signal?.aborted) onAbort()
       const startedAt = Date.now()
+      const stopWatching =
+        input.onOutput === undefined ? undefined : output.watch(input.onOutput)
       try {
         await waitForExitOrYield(
           entry,
@@ -423,11 +436,12 @@ export function createUnifiedExecProcessManager(
           entries,
         )
       } finally {
+        stopWatching?.()
         entry.interactionCount -= 1
         input.signal?.removeEventListener("abort", onAbort)
       }
     },
-    async write(input, signal) {
+    async write(input, signal, onOutput) {
       if (closed) throw new Error("Unified exec manager is closed.")
       const entry = entries.get(input.sessionId)
       if (entry === undefined) {
@@ -436,6 +450,7 @@ export function createUnifiedExecProcessManager(
       entry.interactionCount += 1
       entry.lastUsedAt = Date.now()
       const interaction = entry.interaction.then(async () => {
+        let stopWatching: (() => void) | undefined
         try {
           if (entries.get(input.sessionId) !== entry) {
             throw new Error(
@@ -443,6 +458,8 @@ export function createUnifiedExecProcessManager(
             )
           }
           if (signal?.aborted) throw abortError()
+          if (onOutput !== undefined)
+            stopWatching = entry.output.watch(onOutput)
           if (input.chars.length > 0 && entry.exited === undefined) {
             if (!entry.tty && input.chars !== "\u0003") {
               throw new Error(
@@ -468,6 +485,7 @@ export function createUnifiedExecProcessManager(
             entries,
           )
         } finally {
+          stopWatching?.()
           entry.interactionCount -= 1
         }
       })
@@ -664,6 +682,7 @@ class IntervalOutputBuffer {
   #head = Buffer.alloc(0)
   #tail = Buffer.alloc(0)
   #totalBytes = 0
+  readonly #observers = new Set<(bytes: Buffer) => void>()
 
   readonly path: string | undefined
   error: string | undefined
@@ -681,6 +700,7 @@ class IntervalOutputBuffer {
 
   append(value: Buffer | string): void {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
+    for (const observer of this.#observers) observer(bytes)
     if (this.#logFd !== undefined && this.error === undefined) {
       try {
         if (this.#loggedBytes + bytes.length > COMMAND_LOG_SAFETY_BYTES)
@@ -713,6 +733,16 @@ class IntervalOutputBuffer {
           this.#tail.byteLength - this.#tailLimit,
         )
       }
+    }
+  }
+
+  watch(onOutput: (delta: string) => void): () => void {
+    const decoder = new StringDecoder("utf8")
+    const observe = (bytes: Buffer) => onOutput(decoder.write(bytes))
+    this.#observers.add(observe)
+    return () => {
+      this.#observers.delete(observe)
+      onOutput(decoder.end())
     }
   }
 

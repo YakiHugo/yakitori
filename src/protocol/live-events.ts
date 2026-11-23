@@ -3,8 +3,8 @@ import type {
   StartedExecutionItem,
   TurnOutcome,
 } from "./events.ts"
-import type { RuntimePermissionEvent } from "./permission-events.ts"
 import type { ModelOutputPresentation } from "./model-output.ts"
+import type { RuntimePermissionEvent } from "./permission-events.ts"
 
 export type LiveAssistantDelta = ModelOutputPresentation & {
   readonly type: "assistant.delta"
@@ -33,6 +33,18 @@ export type LiveReasoningDelta = ModelOutputPresentation & {
   readonly delta: string
   readonly createdAt: string
 }
+
+export type LiveToolOutputDelta = Readonly<{
+  type: "tool.output.delta"
+  sessionId: string
+  turnId: string
+  itemId: string
+  streamId: string
+  snapshot?: true
+  offset: number
+  delta: string
+  createdAt: string
+}>
 
 export type LiveDisplayItemStarted = {
   readonly type: "item.started"
@@ -97,6 +109,7 @@ export type LiveSessionEvent =
   | LiveDisplayItemDiscarded
   | LiveAssistantDelta
   | LiveReasoningDelta
+  | LiveToolOutputDelta
   | LiveTurnFinished
   | LiveSessionError
   | LiveRuntimeWarning

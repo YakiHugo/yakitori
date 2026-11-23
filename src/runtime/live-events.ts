@@ -1,9 +1,10 @@
-import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type {
   LiveAssistantDelta,
   LiveReasoningDelta,
   LiveSessionEvent,
+  LiveToolOutputDelta,
 } from "../protocol/live-events.ts"
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 
 export type {
   LiveAssistantDelta,
@@ -39,7 +40,8 @@ export function createCoalescingDeltaPublisher(
   publicationsPerSecond: number,
   type:
     | LiveAssistantDelta["type"]
-    | LiveReasoningDelta["type"] = "assistant.delta",
+    | LiveReasoningDelta["type"]
+    | LiveToolOutputDelta["type"] = "assistant.delta",
 ): DeltaPublisher {
   const minIntervalMs = Math.max(1, Math.floor(1000 / publicationsPerSecond))
   let pending:

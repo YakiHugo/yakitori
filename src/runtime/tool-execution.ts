@@ -45,6 +45,7 @@ type ToolExecutionScope = Readonly<{
   toolPlan: ReturnType<ToolRegistry["finalize"]>
   permissionGate: PermissionGate
   recordToolStarted: (item: ToolExecutionItem) => Promise<void>
+  publishToolOutput?: (itemId: string, delta: string) => void
   recordNestedToolResult: (
     item: Extract<CompletedExecutionItem, { toolCallId: string }>,
   ) => Promise<void>
@@ -73,6 +74,9 @@ type PreparedToolCall = Readonly<{
   hookBlockedReason?: string
   hookContext?: readonly string[]
 }>
+
+// Bound live display traffic independently of the stored command log and model result.
+const maxLiveToolOutputCharacters = 16 * 1024
 
 export async function* executeToolCalls(
   input: ToolExecutionScope &
@@ -489,6 +493,8 @@ async function executePreparedTool(
       // Steering cancels waiting calls, not already-started tool effects.
       if (startSignal.aborted) throw abortError()
       started = true
+      let streamedCharacters = 0
+      const publish = input.publishToolOutput
       const context: ToolExecutionContext = {
         workspaceRoot: input.workspaceRoot,
         threadId: input.threadId,
@@ -496,6 +502,21 @@ async function executePreparedTool(
         toolCallId: prepared.call.id,
         turnId: input.turnId,
         signal: input.signal,
+        ...(publish === undefined
+          ? {}
+          : {
+              onOutput: (delta: string) => {
+                const remaining =
+                  maxLiveToolOutputCharacters - streamedCharacters
+                if (remaining === 0 || delta.length === 0) return
+                const preview = delta
+                  .slice(0, remaining)
+                  .replace(/[\uD800-\uDBFF]$/u, "")
+                streamedCharacters +=
+                  delta.length > remaining ? remaining : preview.length
+                if (preview) publish(prepared.item.itemId, preview)
+              },
+            }),
         documentReading: input.documentReading,
         ...(input.rolloutAssets === undefined
           ? {}

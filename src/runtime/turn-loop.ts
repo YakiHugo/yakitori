@@ -1546,6 +1546,8 @@ async function executeTurnModelLoop(
                   modelCallId,
                 })
               },
+              publishToolOutput: (itemId, delta) =>
+                input.session.emitToolOutput(input.execution, itemId, delta),
               recordNestedToolResult: (completion) =>
                 input.session.recordNestedToolResult(input.execution, {
                   ...completion,

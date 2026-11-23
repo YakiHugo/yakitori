@@ -103,6 +103,7 @@ export type ExecutionEntry =
       readonly output?: unknown
       readonly locations?: readonly Readonly<{ path: string; line?: number }>[]
       readonly streamOutput?: string
+      readonly streamOutputOffset?: number
       readonly resultContent?: readonly ModelToolContentBlock[]
       readonly resultText?: string
       readonly resultError?: boolean

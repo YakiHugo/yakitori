@@ -757,6 +757,29 @@ function applyTransient(
       state: "requested",
     })
   }
+  if (event.type === "tool.output.delta") {
+    if (!Number.isSafeInteger(event.offset) || event.offset < 0) return state
+    const index = state.itemEntryIndexes[event.itemId]
+    const current = index === undefined ? undefined : state.entries[index]
+    if (
+      current?.kind !== "tool" ||
+      current.turnId !== event.turnId ||
+      current.state !== "requested"
+    )
+      return state
+    const start = current.streamOutputOffset ?? 0
+    const text = current.streamOutput ?? ""
+    const end = start + text.length
+    if (event.offset + event.delta.length <= end) return state
+    return replaceItemEntry(state, event.itemId, {
+      ...current,
+      streamOutput:
+        event.offset <= end
+          ? text + event.delta.slice(end - event.offset)
+          : event.delta,
+      streamOutputOffset: event.offset <= end ? start : event.offset,
+    })
+  }
   if (event.type === "assistant.delta" || event.type === "reasoning.delta") {
     if (!Number.isSafeInteger(event.offset) || event.offset < 0) return state
     if (state.turnTimings[event.turnId]?.completedAt !== undefined) return state

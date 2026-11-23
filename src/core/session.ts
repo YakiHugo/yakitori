@@ -1411,6 +1411,21 @@ export class Session {
     this.#notifyExecution(execution, { type: "tool_started", item })
   }
 
+  emitToolOutput(
+    execution: ExecutionContext,
+    itemId: string,
+    delta: string,
+  ): void {
+    const active = this.#requireExecution(execution, true)
+    this.#events.send({
+      type: "tool.output",
+      threadId: this.id,
+      turnId: active.input.submissionId,
+      itemId,
+      delta,
+    })
+  }
+
   emitItemStarted(
     execution: ExecutionContext,
     item: StartedExecutionItem,

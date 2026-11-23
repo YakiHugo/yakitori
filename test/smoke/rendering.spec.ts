@@ -1557,6 +1557,61 @@ test("a multi-file edit displays each committed diff", async ({
   ])
 })
 
+test("streams command output, restores it on reconnect, and reopens the final result", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "Stream the command fixture."
+  const first = "first incremental line"
+  const last = "finished command line"
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(prompt, "exec_command", {
+    cmd: `printf '%s\\n' '${first}'; while [ ! -f .command-release ]; do sleep 0.05; done; printf '%s\\n' '${last}'`,
+    yield_time_ms: 30_000,
+  })
+  await page.getByRole("button", { name: "Allow", exact: true }).click()
+  const live = page.getByRole("region", {
+    name: "Current response",
+    exact: true,
+  })
+  const history = page.getByRole("region", { name: "Response", exact: true })
+  const openTool = async (response: Locator) => {
+    const trigger = response.locator(".tool-trigger")
+    await expect(trigger).toBeVisible()
+    if ((await trigger.getAttribute("aria-expanded")) !== "true")
+      await trigger.click()
+    return response.locator(".tool-output")
+  }
+  const checkLines = async (output: Locator, lines: string[]) => {
+    await expect
+      .poll(async () =>
+        (await output.textContent())
+          ?.split("\n")
+          .filter((line) => line === first || line === last),
+      )
+      .toEqual(lines)
+  }
+  await checkLines(await openTool(live), [first])
+  await page.reload()
+  await checkLines(await openTool(live), [first])
+  await writeFile(join(renderingApp.workspace, ".command-release"), "")
+  await renderingApp.append(prompt, "The command completed.")
+  await renderingApp.finish(prompt)
+
+  const checkHistory = async () => {
+    await expect(
+      history.getByText("The command completed.", { exact: true }),
+    ).toBeVisible()
+    const activity = history.getByRole("button", { name: /^Worked for/ })
+    if ((await activity.getAttribute("aria-expanded")) !== "true")
+      await activity.click()
+    await checkLines(await openTool(history), [first, last])
+  }
+  await checkHistory()
+  await renderingApp.reopen()
+  await checkHistory()
+})
+
 test("failed tools show their full error on narrow screens and command output stays bounded", async ({
   page,
   renderingApp,
