@@ -134,6 +134,17 @@ export class AcpEngine implements EngineAdapter {
           ...(prompt.image === true ? { image: true } : {}),
           ...(prompt.embeddedContext === true ? { embeddedContext: true } : {}),
         }
+        const meta = result._meta
+        const steering =
+          meta !== null && typeof meta === "object" && "steering" in meta
+            ? meta.steering
+            : undefined
+        // OpenCode advertises this extension separately from standard ACP.
+        const steeringAdvertised =
+          steering !== null &&
+          typeof steering === "object" &&
+          "supported" in steering &&
+          steering.supported === true
         this.negotiated = {
           ...this.negotiated,
           load: capabilities.loadSession === true,
@@ -142,6 +153,7 @@ export class AcpEngine implements EngineAdapter {
           ...(Object.keys(promptCapabilities).length === 0
             ? {}
             : { prompt: promptCapabilities }),
+          ...(steeringAdvertised ? { steeringAdvertised: true } : {}),
         }
       })
       .catch((error: unknown) => {
@@ -669,9 +681,10 @@ export class AcpEngine implements EngineAdapter {
     session.permissions.clear()
   }
 }
+
 import {
-  applyAcpConfig,
   type AcpConfigControl,
+  applyAcpConfig,
 } from "../../../protocol/acp-config.ts"
 import type { AssetSource } from "../../../protocol/asset-types.ts"
 import type { EnginePromptCapabilities } from "../../../protocol/engine.ts"

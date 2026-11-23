@@ -2,6 +2,7 @@ import { useState } from "react"
 import type { ModelToolContentBlock } from "../../../protocol/conversation.ts"
 import { openUrlTarget } from "../../lib/open-resource.ts"
 import { rolloutAssetUrl } from "../../rollout-asset-url.ts"
+import { ImageOutputCell } from "./image-output-cell.tsx"
 
 export function ToolResultParts({
   parts,
@@ -26,6 +27,15 @@ export function ToolResultParts({
             <pre key={key} className="tool-output max-h-96">
               {part.text}
             </pre>
+          )
+        if (part.type === "image" && part.file === undefined)
+          return (
+            <ImageOutputCell
+              key={key}
+              image={part}
+              apiBase={apiBase}
+              label="Tool image"
+            />
           )
         const url =
           part.file === undefined

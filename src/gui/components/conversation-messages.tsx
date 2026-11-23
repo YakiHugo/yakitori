@@ -9,8 +9,8 @@ import {
   useRef,
   useState,
 } from "react"
-import { answerTextParts } from "../../protocol/model-output.ts"
 import type { ModelToolContentBlock } from "../../protocol/conversation.ts"
+import { answerTextParts } from "../../protocol/model-output.ts"
 import { parseUserQuestions } from "../../protocol/user-interaction.ts"
 import { groupConversationActivity } from "../conversation-activity.ts"
 import {
@@ -199,7 +199,11 @@ export function ConversationMessages({
         turn.failed = ["failed", "cancelled", "interrupted"].includes(
           entry.state,
         )
-      } else if (entry.kind !== "permission" && entry.kind !== "compaction")
+      } else if (
+        entry.kind !== "permission" &&
+        entry.kind !== "compaction" &&
+        entry.kind !== "image_output"
+      )
         turn.last = entry
       if (entry.kind === "assistant") {
         const id = entry.source?.itemId ?? entry.itemId
@@ -762,7 +766,13 @@ const EntryCell = memo(function EntryCell({
     case "hosted_tool":
       return <HostedToolCell tool={entry.tool} />
     case "image_output":
-      return <ImageOutputCell image={entry.image} apiBase={apiBase} />
+      return (
+        <ImageOutputCell
+          image={entry.image}
+          apiBase={apiBase}
+          label={entry.label}
+        />
+      )
     case "permission":
       return <PermissionCell entry={entry} />
     case "turn_terminal":

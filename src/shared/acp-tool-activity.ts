@@ -2,23 +2,12 @@ import { createTwoFilesPatch } from "diff"
 import type { FileChange, ToolExecutionDescriptor } from "../protocol/events.ts"
 import type { ExecutionEntry } from "../protocol/execution-view.ts"
 import { isJsonValue } from "../protocol/json.ts"
+import { acpBitmap, acpRecord, acpString } from "./acp-message-content.ts"
 
 export type AcpToolEntry = Extract<ExecutionEntry, { kind: "tool" }>
 
 // Bound the work of rendering a diff supplied by an external process.
 const diffEditSafetyLimit = 2_000
-
-export function acpRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value))
-    : {}
-}
-
-export function acpString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : undefined
-}
 
 export function projectAcpTool(
   wire: Record<string, unknown>,
@@ -36,6 +25,15 @@ export function projectAcpTool(
   const path = acpString(location?.path ?? input.path)
   const line = location?.line
   const parts = Array.isArray(wire.content) ? wire.content.map(acpRecord) : []
+  const images = parts.flatMap((part) => {
+    if (part.type !== "content") return []
+    const content = acpRecord(part.content)
+    const image =
+      content.type === "image"
+        ? acpBitmap(content.mimeType, content.data)
+        : undefined
+    return image === undefined ? [] : [image]
+  })
   const resultText =
     parts
       .flatMap((part) => {
@@ -153,6 +151,7 @@ export function projectAcpTool(
       requiresPermission,
     },
     state,
+    ...(images.length === 0 ? {} : { resultContent: images }),
     ...(resultText === undefined ? {} : { resultText }),
     ...(state === "failed" ? { resultError: true } : {}),
   }

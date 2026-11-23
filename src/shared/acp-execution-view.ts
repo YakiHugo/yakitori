@@ -4,6 +4,7 @@ import type {
   EngineSessionSnapshot,
 } from "../protocol/engine.ts"
 import type {
+  CitationSource,
   ExecutionEntry,
   ExecutionView,
   TurnTiming,
@@ -11,11 +12,11 @@ import type {
 import { createUserInput } from "../protocol/user-input.ts"
 import type { SessionPlan } from "../protocol/user-interaction.ts"
 import {
+  acpMessageContent,
   acpRecord,
   acpString,
-  type AcpToolEntry,
-  projectAcpTool,
-} from "./acp-tool-activity.ts"
+} from "./acp-message-content.ts"
+import { type AcpToolEntry, projectAcpTool } from "./acp-tool-activity.ts"
 import {
   createExecutionViewState,
   projectExecutionView,
@@ -197,12 +198,19 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
     text: string,
     seq: number,
     at: string,
+    source?: CitationSource,
   ) => {
-    if (text.length === 0) return
+    if (text.length === 0 && source === undefined) return
     const index = turn.openText
     const prior = index === undefined ? undefined : turn.entries[index]
     if (index !== undefined && prior?.kind === kind) {
-      turn.entries[index] = { ...prior, text: prior.text + text }
+      turn.entries[index] = {
+        ...prior,
+        text: prior.text + text,
+        ...(prior.kind === "assistant" && source !== undefined
+          ? { sources: [...(prior.sources ?? []), source] }
+          : {}),
+      }
       return
     }
     turn.openText = turn.entries.length
@@ -215,6 +223,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
         replay || turn.completedAt !== undefined ? "completed" : "streaming",
       at,
       ...(kind === "reasoning" ? { representation: "raw" } : {}),
+      ...(source === undefined ? {} : { sources: [source] }),
     })
   }
   const addTool = (
@@ -312,8 +321,31 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
           channel === "agent_thought_chunk" ||
           channel === "user_message_chunk")
       ) {
-        const { text, type } = acpRecord(update.content)
-        if (type !== "text" || typeof text !== "string") continue
+        const content = acpRecord(update.content)
+        const { text, type } = content
+        if (type !== "text" || typeof text !== "string") {
+          if (channel !== "agent_message_chunk") continue
+          const display = acpMessageContent(content, `acp:source:${seq}`)
+          addText(
+            turn,
+            "assistant",
+            display.text ?? "",
+            seq,
+            at,
+            display.source,
+          )
+          if (display.image !== undefined) {
+            delete turn.openText
+            turn.entries.push({
+              kind: "image_output",
+              itemId: `acp:image:${seq}`,
+              turnId: turn.id,
+              image: display.image,
+              label: "Engine image",
+            })
+          }
+          continue
+        }
         if (channel === "user_message_chunk") {
           if (!replay) continue
           const full = (turn.input?.text ?? "") + text
@@ -403,7 +435,8 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
     if (replay) turn.completedAt = turn.startedAt
   return { turns, tools, permissions, activeTurnId }
 }
+
 import {
-  applyAcpConfig,
   type AcpConfigControl,
+  applyAcpConfig,
 } from "../protocol/acp-config.ts"

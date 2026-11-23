@@ -4,7 +4,12 @@ import { rolloutAssetUrl } from "../../rollout-asset-url.ts"
 export function ImageOutputCell({
   image,
   apiBase,
-}: Readonly<{ image: ModelImageBlock; apiBase: string }>) {
+  label = "Generated image",
+}: Readonly<{
+  image: ModelImageBlock
+  apiBase: string
+  label?: string | undefined
+}>) {
   const src =
     image.file === undefined
       ? `data:${image.mediaType};base64,${image.data}`
@@ -12,11 +17,7 @@ export function ImageOutputCell({
   return src === undefined ? null : (
     <img
       src={src}
-      alt={
-        image.file === undefined
-          ? "Generated image"
-          : (image.name ?? "Generated image")
-      }
+      alt={image.file === undefined ? label : (image.name ?? label)}
       loading="lazy"
       className="max-h-96 max-w-full rounded object-contain"
     />

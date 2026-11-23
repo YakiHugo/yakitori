@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
+import { pngImageBase64 } from "../images.ts"
 
 const mode = process.argv[2] ?? "resume"
 const send = (message) =>
@@ -12,6 +13,38 @@ const text = (sessionId, value) =>
     sessionUpdate: "agent_message_chunk",
     content: { type: "text", text: value },
   })
+const outputMedia = (sessionId) => {
+  update(sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId: "draw_fixture",
+    title: "Draw fixture",
+    status: "completed",
+    content: [
+      {
+        type: "content",
+        content: { type: "image", data: pngImageBase64, mimeType: "image/png" },
+      },
+    ],
+  })
+  for (const content of [
+    { type: "text", text: "The ACP resource is ready." },
+    {
+      type: "resource_link",
+      name: "Engine reference",
+      uri: "https://example.test/engine/reference",
+    },
+    {
+      type: "resource",
+      resource: {
+        uri: "file:///fixture/engine-notes.txt",
+        mimeType: "text/plain",
+        text: "Embedded engine notes",
+      },
+    },
+    { type: "image", data: pngImageBase64, mimeType: "image/png" },
+  ])
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content })
+}
 let prompt
 let pendingPermission
 let effort = "fast"
@@ -47,6 +80,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         sessionCapabilities: mode === "resume" ? { resume: {}, list: {} } : {},
       },
       authMethods: [],
+      ...(mode === "steering"
+        ? { _meta: { steering: { supported: true } } }
+        : {}),
     })
   } else if (m.method === "session/new") {
     update("external-session", {
@@ -188,6 +224,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       })
       text(m.params.sessionId, "The ACP fixture is ready.")
       reply(m.id, { stopReason: "end_turn" })
+    } else if (content === "output-media") {
+      outputMedia(m.params.sessionId)
+      setTimeout(() => reply(m.id, { stopReason: "end_turn" }), 1500)
     } else if (content === "invalid-stop") reply(m.id, {})
     else if (content === "cancel") {
       /* only finish after cancel notification */

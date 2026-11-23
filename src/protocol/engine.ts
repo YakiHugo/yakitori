@@ -6,6 +6,7 @@ export type EngineCapabilities = Readonly<{
   list: boolean
   fork: boolean
   steer: boolean
+  steeringAdvertised?: true
   queue: boolean
   subagents: boolean
   prompt?: EnginePromptCapabilities

@@ -36,6 +36,15 @@ afterEach(async () => {
 })
 
 describe("external ACP v1 process boundary", () => {
+  it("records an advertised steering extension separately from client support", async () => {
+    const adapter = engine("steering")
+    await adapter.connect()
+    expect(adapter.capabilities).toMatchObject({
+      steeringAdvertised: true,
+      steer: false,
+    })
+  })
+
   it("negotiates capabilities, streams rich updates, and completes only on terminal response", async () => {
     const { adapter, binding, events } = await setup()
     expect(binding.engineSessionId).toBe("external-session")

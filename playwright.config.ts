@@ -29,6 +29,7 @@ export default defineConfig({
         "rendering.spec.ts",
         "gemini-citations.spec.ts",
         "hosted-tools.spec.ts",
+        "acp-output.spec.ts",
         "account-financials.spec.ts",
         "title-model.spec.ts",
         "app-update-renderer.spec.ts",
