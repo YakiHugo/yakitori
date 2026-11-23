@@ -57,6 +57,7 @@ import {
   providerErrorMessage,
 } from "./model-failure.ts"
 import { openAICitations } from "./model-citations.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
   ModelHistoryScopeError,
@@ -129,7 +130,8 @@ export function createChatCompletionsProvider(
     defaultHeaders: options.defaultHeaders,
     maxRetries: 0,
   })
-  return (request) => streamChatCompletions(client, options, request)
+  return (request) =>
+    cleanModelTextStream(streamChatCompletions(client, options, request))
 }
 
 async function* streamChatCompletions(

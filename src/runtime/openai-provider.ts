@@ -63,6 +63,7 @@ import {
   providerErrorMessage,
 } from "./model-failure.ts"
 import { openAICitations } from "./model-citations.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   ModelHistoryScopeError,
   modelNativeItems,
@@ -217,7 +218,13 @@ function openAIClient(options: OpenAIProviderOptions): OpenAI {
   )
 }
 
-async function* streamOpenAI(
+function streamOpenAI(
+  ...args: Parameters<typeof streamOpenAIWire>
+): AsyncIterable<ModelStreamEvent> {
+  return cleanModelTextStream(streamOpenAIWire(...args))
+}
+
+async function* streamOpenAIWire(
   client: OpenAI,
   defaultModel: string,
   request: ModelRequest,

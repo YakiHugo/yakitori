@@ -17,6 +17,91 @@ import {
 } from "../../src/runtime/openai-provider.ts"
 
 describe("provider output completeness", () => {
+  it("holds split control tokens in a Responses stream and remaps citation spans on commit", async () => {
+    const marker = "\uE200cite\uE202turn0search0\uE201"
+    const rawText = `See ${marker}report<|eos|>`
+    const reportStart = rawText.indexOf("report")
+    const item = {
+      type: "message",
+      id: "answer",
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text: rawText,
+          annotations: [
+            {
+              type: "url_citation",
+              title: "A report",
+              url: "https://example.test/report",
+              start_index: reportStart,
+              end_index: reportStart + "report".length,
+            },
+            {
+              type: "url_citation",
+              title: "Marker source",
+              url: "https://example.test/marker",
+              start_index: "See ".length,
+              end_index: reportStart,
+            },
+          ],
+        },
+      ],
+    }
+    const events = await collect(
+      openaiStream([
+        ...[
+          "See \uE200ci",
+          "te\uE202turn0",
+          "search0\uE201report<|",
+          "eos|>",
+        ].map((delta) => ({
+          type: "response.output_text.delta",
+          item_id: "answer",
+          output_index: 0,
+          content_index: 0,
+          delta,
+        })),
+        { type: "response.output_item.done", output_index: 0, item },
+        openaiFinish(undefined, [item]),
+      ]),
+      request("openai"),
+    )
+    expect(
+      events.flatMap((event) => (event.type === "delta" ? [event.text] : [])),
+    ).toEqual(["See ", "report"])
+    const expected = {
+      content: [
+        {
+          type: "text",
+          text: "See report",
+          annotations: [
+            {
+              kind: "url",
+              title: "A report",
+              url: "https://example.test/report",
+              responseSpan: { start: 4, end: 10 },
+            },
+            {
+              kind: "url",
+              title: "Marker source",
+              url: "https://example.test/marker",
+            },
+          ],
+        },
+      ],
+      native: [{ value: item }],
+    }
+    expect(events.find((event) => event.type === "output_item")).toMatchObject(
+      expected,
+    )
+    expect(events.at(-1)).toMatchObject({
+      type: "response",
+      response: expected,
+    })
+  })
+
   it("keeps raw and summary positions separate and displays encrypted-only reasoning on completion", async () => {
     const item = {
       type: "reasoning",

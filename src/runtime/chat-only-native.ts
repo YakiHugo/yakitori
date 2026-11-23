@@ -1,4 +1,5 @@
 import type { ModelContentBlock, ModelNativeItem } from "./model.ts"
+import { cleanModelText } from "./model-control-tokens.ts"
 
 // Admit only a redundant, plain Chat assistant message. In particular, never
 // infer portability from a readable text field next to opaque provider state.
@@ -26,5 +27,7 @@ export function isPortableChatOnlyNative(
   const text = content
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("")
-  return value.content === text || (value.content === null && text.length === 0)
+  return typeof value.content === "string"
+    ? value.content === text || cleanModelText(value.content) === text
+    : value.content === null && text.length === 0
 }
