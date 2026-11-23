@@ -10,6 +10,7 @@ import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { useConversationScope } from "./conversation-scope.tsx"
 import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
+import { TranscriptPresenterSlot } from "./transcript-presenters.tsx"
 import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
 
 export function ActivityBatch({
@@ -87,30 +88,35 @@ export function ActivityBatch({
           aria-label={grouped ? "Activity details" : undefined}
           tabIndex={grouped ? 0 : undefined}
         >
-          {entries.map((entry) =>
-            entry.kind === "reasoning" ? (
-              <ReasoningCell
-                key={executionEntryKey(entry)}
-                entry={entry}
-                workspaceRoot={workspaceRoot}
-                apiBase={apiBase}
-                onExpandedChange={(next) => {
-                  if (next) setExpanded(true)
-                }}
-              />
-            ) : (
-              <ToolCell
-                key={executionEntryKey(entry)}
-                entry={entry}
-                workspaceRoot={workspaceRoot}
-                apiBase={apiBase}
-                separateMedia
-                onExpandedChange={(next) => {
-                  if (next) setExpanded(true)
-                }}
-              />
-            ),
-          )}
+          {entries.map((entry) => (
+            <TranscriptPresenterSlot
+              key={executionEntryKey(entry)}
+              name="entry"
+              context={{ entry }}
+              fallback={
+                entry.kind === "reasoning" ? (
+                  <ReasoningCell
+                    entry={entry}
+                    workspaceRoot={workspaceRoot}
+                    apiBase={apiBase}
+                    onExpandedChange={(next) => {
+                      if (next) setExpanded(true)
+                    }}
+                  />
+                ) : (
+                  <ToolCell
+                    entry={entry}
+                    workspaceRoot={workspaceRoot}
+                    apiBase={apiBase}
+                    separateMedia
+                    onExpandedChange={(next) => {
+                      if (next) setExpanded(true)
+                    }}
+                  />
+                )
+              }
+            />
+          ))}
         </section>
       </TranscriptDisclosureContent>
     </Collapsible>

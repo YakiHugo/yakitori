@@ -47,6 +47,7 @@ import {
 } from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
+import { TranscriptPresenterSlot } from "./transcript-presenters.tsx"
 import { TurnActivityLabel } from "./turn-activity-label.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 import "./activity-timeline.css"
@@ -250,14 +251,20 @@ export function ConversationMessages({
               key={block.key}
               ref={(node) => onInputRef?.(first.inputId, node)}
             >
-              {first.kind === "agent_input" ? (
-                <AgentMessageCell entry={first} sessionId={sessionId} />
-              ) : (
-                <UserMessageCell
-                  entry={first}
-                  queued={queued.has(first.inputId)}
-                />
-              )}
+              <TranscriptPresenterSlot
+                name="entry"
+                context={{ entry: first }}
+                fallback={
+                  first.kind === "agent_input" ? (
+                    <AgentMessageCell entry={first} sessionId={sessionId} />
+                  ) : (
+                    <UserMessageCell
+                      entry={first}
+                      queued={queued.has(first.inputId)}
+                    />
+                  )
+                }
+              />
             </div>
           )
         return block.turnId ? (
@@ -675,7 +682,11 @@ const TurnBlock = memo(
                         : "Retry"}
                     </button>
                   )}
-                  {timelineContent}
+                  <TranscriptPresenterSlot
+                    name="turn_activity"
+                    context={{ entries, active, turnId }}
+                    fallback={timelineContent}
+                  />
                 </div>
               </TranscriptDisclosureContent>
             )}
@@ -721,6 +732,16 @@ const TurnBlock = memo(
 const EntryCell = memo(function EntryCell({
   entry,
 }: Readonly<{ entry: ExecutionEntry }>) {
+  return (
+    <TranscriptPresenterSlot
+      name="entry"
+      context={{ entry }}
+      fallback={<DefaultEntryCell entry={entry} />}
+    />
+  )
+})
+
+function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
   const { workspaceRoot, sessionId, apiBase } = useConversationScope()
   const openAgent = async (agentId: string) => {
     if (sessionId) useWorkspaceStore.getState().openAgents(sessionId, agentId)
@@ -770,4 +791,4 @@ const EntryCell = memo(function EntryCell({
     case "user_input":
       return <UserMessageCell entry={entry} queued={false} />
   }
-})
+}

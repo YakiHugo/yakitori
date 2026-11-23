@@ -29,6 +29,7 @@ import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { presentTool, type ToolTarget } from "../../tool-presentation.ts"
 import { useConversationScope } from "../conversation-scope.tsx"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
+import { TranscriptPresenterSlot } from "../transcript-presenters.tsx"
 import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 import { UserQuestionsCell } from "./session-progress-cell.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
@@ -255,21 +256,27 @@ export function ToolCell({
               {collaboration.request}
             </p>
           )}
-          {entry.resultContent?.some((part) => part.type !== "text") &&
-          resultParts !== undefined &&
-          resultParts.length > 0 ? (
-            <ToolResultParts
-              parts={resultParts}
-              toolCallId={entry.toolCallId}
-              apiBase={apiBase}
-            />
-          ) : (
-            <ToolDetailView
-              detail={presentation.detail}
-              pending={active}
-              workspaceRoot={workspaceRoot}
-            />
-          )}
+          <TranscriptPresenterSlot
+            name="tool_detail"
+            context={{ entry, presentation }}
+            fallback={
+              entry.resultContent?.some((part) => part.type !== "text") &&
+              resultParts !== undefined &&
+              resultParts.length > 0 ? (
+                <ToolResultParts
+                  parts={resultParts}
+                  toolCallId={entry.toolCallId}
+                  apiBase={apiBase}
+                />
+              ) : (
+                <ToolDetailView
+                  detail={presentation.detail}
+                  pending={active}
+                  workspaceRoot={workspaceRoot}
+                />
+              )
+            }
+          />
         </div>
       </TranscriptDisclosureContent>
     </Collapsible>

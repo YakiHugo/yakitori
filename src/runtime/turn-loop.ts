@@ -2583,6 +2583,7 @@ async function consumeModelStream(input: {
                   source: {
                     callId: attempt.origin.callId,
                     itemId: parentItemId,
+                    provider: attempt.origin.provider,
                   },
                 }),
             ...(event.type === "delta" && event.purpose !== undefined
@@ -3129,6 +3130,7 @@ function completedResponseItems(
       : {
           callId: response.item.response.callId,
           itemId: response.id,
+          provider: response.item.response.provider,
         }
   return Array.from(
     displayOutputParts(response.id, response.item.content, requestItemId),

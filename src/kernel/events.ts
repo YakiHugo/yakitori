@@ -370,9 +370,10 @@ function isModelOutputSource(value: unknown): boolean {
   return (
     value === undefined ||
     (isRecord(value) &&
-      onlyKeys(value, ["callId", "itemId"]) &&
+      onlyKeys(value, ["callId", "itemId", "provider"]) &&
       isString(value.callId) &&
-      isString(value.itemId))
+      isString(value.itemId) &&
+      (value.provider === undefined || isString(value.provider)))
   )
 }
 
