@@ -9,6 +9,11 @@
 .agent-timeline-item + .agent-timeline-item {
   margin-top: var(--conversation-activity-gap);
 }
+.markdown.assistant-commentary {
+  color: var(--muted-foreground);
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
+}
 .agent-timeline-item:is([data-kind="batch"], [data-kind="tool"])
   + .agent-timeline-item:is([data-kind="batch"], [data-kind="tool"]) {
   margin-top: 4px;

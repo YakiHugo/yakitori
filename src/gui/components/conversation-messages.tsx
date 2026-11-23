@@ -166,6 +166,16 @@ export function ConversationMessages({
             block.turnId === view.activeTurnId ? index : last,
           -1,
         )
+  const canPreviewUnmarkedAnswer =
+    activeBlockIndex !== -1 &&
+    blocks.every(
+      (block) =>
+        block.turnId !== view.activeTurnId ||
+        block.entries.every(
+          (entry) =>
+            entry.kind === "assistant" && entry.purpose !== "commentary",
+        ),
+    )
   const finalAnswers = useMemo(() => {
     const turns = new Map<
       string,
@@ -209,44 +219,14 @@ export function ConversationMessages({
       const pieces = itemIds
         .flatMap((id) => answerTextParts(assistants.get(id) ?? []))
         .filter((entry) => entry.turnId === turnId)
-      const last = pieces.at(-1)
-      if (last === undefined) continue
-      let text = ""
-      const incomplete = pieces.some((entry) => entry.incomplete)
-      const sources = pieces.flatMap((piece) => {
-        const offset = text.length
-        text += piece.text
-        return (piece.sources ?? []).map((source) => ({
-          ...source,
-          // Citation IDs are local to each recorded assistant item.
-          id: JSON.stringify([piece.itemId, source.id]),
-          ...(source.mentions === undefined || offset === 0
-            ? {}
-            : {
-                mentions: source.mentions.map(
-                  ({ responseSpan, ...mention }) => ({
-                    ...mention,
-                    responseSpan: {
-                      start: responseSpan.start + offset,
-                      end: responseSpan.end + offset,
-                    },
-                  }),
-                ),
-              }),
-        }))
-      })
+      if (pieces.length === 0) continue
       const previous = previousAnswers.current.get(turnId)
-      answers.set(
-        turnId,
+      const answer =
         previous?.pieces.length === pieces.length &&
-          previous.pieces.every((entry, index) => entry === pieces[index])
+        previous.pieces.every((entry, index) => entry === pieces[index])
           ? previous
-          : {
-              itemIds: pieces.map((piece) => piece.itemId),
-              pieces,
-              entry: { ...last, text, incomplete, sources },
-            },
-      )
+          : composeFinalAnswer(pieces)
+      if (answer !== undefined) answers.set(turnId, answer)
     }
     previousAnswers.current = answers
     return answers
@@ -282,6 +262,10 @@ export function ConversationMessages({
             active={view.activeTurnId === block.turnId}
             timing={view.turnTimings[block.turnId]}
             finalAnswer={finalAnswers.get(block.turnId)}
+            presentLiveAnswer={index === activeBlockIndex}
+            canPreviewUnmarkedAnswer={
+              index === activeBlockIndex && canPreviewUnmarkedAnswer
+            }
             retry={index === activeBlockIndex ? view.activeRetry : undefined}
           />
         ) : (
@@ -300,6 +284,8 @@ export function ConversationMessages({
           active
           timing={view.turnTimings[view.activeTurnId]}
           finalAnswer={undefined}
+          presentLiveAnswer={false}
+          canPreviewUnmarkedAnswer={false}
           retry={view.activeRetry}
         />
       ) : null}
@@ -313,6 +299,42 @@ type FinalAnswer = Readonly<{
   entry: Extract<ExecutionEntry, { kind: "assistant" }>
 }>
 
+function composeFinalAnswer(
+  pieces: FinalAnswer["pieces"],
+): FinalAnswer | undefined {
+  const last = pieces.at(-1)
+  if (last === undefined) return undefined
+  if (pieces.length === 1)
+    return { pieces, itemIds: [last.itemId], entry: last }
+  let text = ""
+  const incomplete = pieces.some((entry) => entry.incomplete)
+  const sources = pieces.flatMap((piece) => {
+    const offset = text.length
+    text += piece.text
+    return (piece.sources ?? []).map((source) => ({
+      ...source,
+      // Citation IDs are local to each recorded assistant item.
+      id: JSON.stringify([piece.itemId, source.id]),
+      ...(source.mentions === undefined || offset === 0
+        ? {}
+        : {
+            mentions: source.mentions.map(({ responseSpan, ...mention }) => ({
+              ...mention,
+              responseSpan: {
+                start: responseSpan.start + offset,
+                end: responseSpan.end + offset,
+              },
+            })),
+          }),
+    }))
+  })
+  return {
+    pieces,
+    itemIds: pieces.map((piece) => piece.itemId),
+    entry: { ...last, text, incomplete, sources },
+  }
+}
+
 const TurnBlock = memo(
   function TurnBlock({
     blockKey,
@@ -322,6 +344,8 @@ const TurnBlock = memo(
     active,
     timing,
     finalAnswer,
+    presentLiveAnswer,
+    canPreviewUnmarkedAnswer,
     retry,
   }: Readonly<{
     blockKey: string
@@ -331,6 +355,8 @@ const TurnBlock = memo(
     active: boolean
     timing: TurnTiming | undefined
     finalAnswer: FinalAnswer | undefined
+    presentLiveAnswer: boolean
+    canPreviewUnmarkedAnswer: boolean
     retry: ActiveModelRetry | undefined
   }>) {
     const { threadId, sessionId, loadTurnActivity } = useConversationScope()
@@ -375,14 +401,48 @@ const TurnBlock = memo(
     const contentId = useId()
     const labelId = useId()
     const completed = !active && timing?.completedAt !== undefined
+    const livePieces = useMemo(() => {
+      if (!presentLiveAnswer) return []
+      const assistants = entries.filter(
+        (entry): entry is FinalAnswer["pieces"][number] =>
+          entry.kind === "assistant" && entry.purpose !== "commentary",
+      )
+      const explicit = assistants.filter(
+        (entry) => entry.purpose === "final_answer",
+      )
+      return explicit.length > 0 || !canPreviewUnmarkedAnswer
+        ? explicit
+        : assistants
+    }, [entries, presentLiveAnswer, canPreviewUnmarkedAnswer])
+    const firstLivePiece = livePieces[0]
+    const unmarked =
+      firstLivePiece !== undefined && firstLivePiece.purpose === undefined
+        ? JSON.stringify([sessionId, firstLivePiece.itemId])
+        : undefined
+    const [settledUnmarked, setSettledUnmarked] = useState<string>()
+    useEffect(() => {
+      setSettledUnmarked(undefined)
+      if (unmarked === undefined) return
+      // Let adjacent tool and reasoning updates claim the process layout
+      // before moving an unmarked reply. Text continues updating in place.
+      const timer = setTimeout(() => setSettledUnmarked(unmarked), 120)
+      return () => clearTimeout(timer)
+    }, [unmarked])
+    const answer = useMemo(
+      () =>
+        finalAnswer ??
+        (unmarked === undefined || settledUnmarked === unmarked
+          ? composeFinalAnswer(livePieces)
+          : undefined),
+      [finalAnswer, unmarked, settledUnmarked, livePieces],
+    )
     const { visibleAnswer, persistent, reasoning, timeline } = useMemo(() => {
       const answerInBlock = entries.some(
         (entry) =>
-          entry.kind === "assistant" &&
-          entry.itemId === finalAnswer?.entry.itemId,
+          entry.kind === "assistant" && entry.itemId === answer?.entry.itemId,
       )
-      const visibleAnswer = answerInBlock ? finalAnswer?.entry : undefined
-      const answerItemIds = new Set(finalAnswer?.itemIds)
+      const visibleAnswer = answerInBlock ? answer?.entry : undefined
+      const answerItemIds = new Set(answer?.itemIds)
       const persistent = entries.flatMap<ExecutionEntry>((entry) => {
         if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
           return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
@@ -420,7 +480,7 @@ const TurnBlock = memo(
             )),
       )
       return { visibleAnswer, persistent, reasoning, timeline }
-    }, [entries, finalAnswer])
+    }, [entries, answer])
     const currentSummary = active
       ? reasoning
           .filter((entry) => entry.representation === "summary")
@@ -557,7 +617,7 @@ const TurnBlock = memo(
               ) : null}
             </div>
             {!hasDisclosure ? null : (
-              // Completion moves the final answer outside this cached tree.
+              // Promoted answers leave this cached tree before it closes.
               <TranscriptDisclosureContent
                 id={contentId}
                 open={expanded}
@@ -592,7 +652,7 @@ const TurnBlock = memo(
         {persistent.map((entry) => (
           <EntryCell key={executionEntryKey(entry)} entry={entry} />
         ))}
-        {visibleAnswer ? (
+        {completed && visibleAnswer ? (
           <ResponseActions
             text={visibleAnswer.text}
             at={timing?.completedAt ?? visibleAnswer.at}
@@ -607,6 +667,8 @@ const TurnBlock = memo(
     previous.active === next.active &&
     previous.timing === next.timing &&
     previous.finalAnswer === next.finalAnswer &&
+    previous.presentLiveAnswer === next.presentLiveAnswer &&
+    previous.canPreviewUnmarkedAnswer === next.canPreviewUnmarkedAnswer &&
     previous.retry === next.retry &&
     // Grouping creates new arrays on each delta; the reducer preserves entries
     // outside the changed item. Keep completed turns out of the render path.

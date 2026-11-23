@@ -2,6 +2,7 @@ import { useId } from "react"
 import { citationURL } from "../../citation-sources.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
+import { cn } from "../../lib/utils.ts"
 import { openCitationLink } from "../markdown-citation.tsx"
 import { MarkdownView } from "../markdown.tsx"
 import { LiveTextNotice } from "./live-text-notice.tsx"
@@ -38,7 +39,10 @@ export function AssistantMessageCell({
       <LiveTextNotice entry={entry} />
       <MarkdownView
         apiBase={apiBase}
-        {...(className === undefined ? {} : { className })}
+        className={cn(
+          className,
+          entry.purpose === "commentary" && "assistant-commentary",
+        )}
         text={entry.text}
         streaming={entry.status === "streaming"}
         workspaceRoot={workspaceRoot}
