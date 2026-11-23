@@ -35,6 +35,7 @@ export type ExecutionEntry =
       itemId: string
       turnId: string
       image: ModelImageBlock
+      label?: string
     }>
   | Readonly<{
       kind: "hosted_tool"
@@ -209,4 +210,5 @@ export type ExecutionView = Readonly<{
   activeActivity?: ActiveTurnActivity
   activeRetry?: ActiveModelRetry
 }>
+
 import type { HostedToolBlock } from "./hosted-tool.ts"
