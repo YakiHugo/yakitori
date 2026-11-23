@@ -101,6 +101,8 @@ export type ExecutionEntry =
       readonly execution: ToolExecutionItem
       readonly state: string
       readonly output?: unknown
+      readonly locations?: readonly Readonly<{ path: string; line?: number }>[]
+      readonly streamOutput?: string
       readonly resultContent?: readonly ModelToolContentBlock[]
       readonly resultText?: string
       readonly resultError?: boolean

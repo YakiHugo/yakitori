@@ -4,7 +4,7 @@ import type {
   EngineSessionSnapshot,
   EngineSessionSummary,
 } from "../../protocol/engine.ts"
-import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
+import type { InputContent } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../../shared/acp-execution-view.ts"
 import {
   hasInputDraft,
@@ -23,8 +23,8 @@ type EngineState = {
   sessionId?: string | undefined
   snapshot?: EngineSessionSnapshot | undefined
   pendingRequestId?: string | undefined
-  draft: InputDraft
-  drafts: Record<string, InputDraft>
+  draft: InputContent
+  drafts: Record<string, InputContent>
   error?: string | undefined
   loading: boolean
   sending: boolean
@@ -50,12 +50,21 @@ function draftKey(engineId: string, sessionId?: string): string {
   return JSON.stringify([engineId, sessionId ?? null])
 }
 
+function sameEngineDraft(left: InputContent, right: InputContent): boolean {
+  return (
+    sameInputDraft(left, right) &&
+    JSON.stringify(left.references ?? []) ===
+      JSON.stringify(right.references ?? [])
+  )
+}
+
 export function clearEngineSelection() {
   const state = useEngineStore.getState()
   const drafts = { ...state.drafts }
   if (state.engineId) {
     const key = draftKey(state.engineId, state.sessionId)
-    if (hasInputDraft(state.draft)) drafts[key] = state.draft
+    if (hasInputDraft(state.draft) || state.draft.references?.length)
+      drafts[key] = state.draft
     else delete drafts[key]
   }
   revision += 1
@@ -169,8 +178,9 @@ async function refreshEngineSelection() {
               draft:
                 accepted &&
                 (receipt.input.content === undefined
-                  ? current.draft.text.trim() === receipt.input.text
-                  : sameInputDraft(current.draft, receipt.input.content))
+                  ? !current.draft.references?.length &&
+                    current.draft.text.trim() === receipt.input.text
+                  : sameEngineDraft(current.draft, receipt.input.content))
                   ? textInputDraft("")
                   : current.draft,
               stopping,
@@ -304,7 +314,7 @@ export async function sendEngineInput(text: string, content?: InputContent) {
       if (
         parked &&
         localStorage.getItem(pendingKey(sessionId)) === null &&
-        sameInputDraft(parked, state.draft)
+        sameEngineDraft(parked, state.draft)
       )
         delete drafts[key]
       return {
@@ -314,7 +324,7 @@ export async function sendEngineInput(text: string, content?: InputContent) {
           current.pendingRequestId === requestId)
           ? {
               pendingRequestId: undefined,
-              draft: sameInputDraft(current.draft, state.draft)
+              draft: sameEngineDraft(current.draft, state.draft)
                 ? textInputDraft("")
                 : current.draft,
             }

@@ -18,13 +18,15 @@ type CapturedSelection = {
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 
 export function SelectionActions({
+  sourceRoot,
   readOnlySideChatIds,
   onAddToConversation,
   onAskInSideChat,
 }: Readonly<{
+  sourceRoot?: { readonly current: HTMLElement | null }
   readOnlySideChatIds?: readonly string[]
   onAddToConversation(excerpt: ContextExcerpt, sideChatId?: string): void
-  onAskInSideChat(excerpt: ContextExcerpt, sideChatId?: string): void
+  onAskInSideChat?(excerpt: ContextExcerpt, sideChatId?: string): void
 }>) {
   const [captured, setCaptured] = useState<CapturedSelection>()
   const [position, setPosition] = useState({ top: 0, left: 0 })
@@ -70,6 +72,7 @@ export function SelectionActions({
       const source = start?.closest<HTMLElement>("[data-context-kind]")
       if (
         !source ||
+        (sourceRoot !== undefined && !sourceRoot.current?.contains(source)) ||
         source.closest("[hidden]") ||
         source !== end?.closest("[data-context-kind]") ||
         start?.closest("input, textarea, [contenteditable=true]") ||
@@ -151,7 +154,7 @@ export function SelectionActions({
       document.removeEventListener("keydown", keydown)
       window.getSelection()?.removeAllRanges()
     }
-  }, [])
+  }, [sourceRoot])
 
   useLayoutEffect(() => {
     if (!captured) return
@@ -202,6 +205,7 @@ export function SelectionActions({
     }
     const add =
       action === "conversation" ? onAddToConversation : onAskInSideChat
+    if (add === undefined) return
     if (captured.sideChatId) add(captured.excerpt, captured.sideChatId)
     else add(captured.excerpt)
     window.getSelection()?.removeAllRanges()
@@ -226,10 +230,14 @@ export function SelectionActions({
               >
                 Add to chat
               </button>
-              <span className="selection-actions-divider" />
-              <button type="button" onClick={() => actOnSelection("side")}>
-                Ask in side chat
-              </button>
+              {onAskInSideChat === undefined ? null : (
+                <>
+                  <span className="selection-actions-divider" />
+                  <button type="button" onClick={() => actOnSelection("side")}>
+                    Ask in side chat
+                  </button>
+                </>
+              )}
             </div>,
             document.body,
           )

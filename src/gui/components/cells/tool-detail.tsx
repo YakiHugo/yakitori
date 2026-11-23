@@ -173,16 +173,44 @@ export function ToolDetailView({
   }
 }
 
+export function ToolFileLocations({
+  locations,
+  workspaceRoot,
+}: Readonly<{
+  locations: readonly Readonly<Omit<FileTarget, "kind">>[] | undefined
+  workspaceRoot?: string | undefined
+}>) {
+  if (!locations?.length) return null
+  return (
+    <section aria-label="Tool file locations" className="space-y-0.5">
+      {locations.map((location) => (
+        <FileLink
+          key={JSON.stringify(location)}
+          target={{ kind: "file", ...location }}
+          label={
+            location.line === undefined
+              ? location.path
+              : `${location.path}:${location.line}`
+          }
+          workspaceRoot={workspaceRoot}
+        />
+      ))}
+    </section>
+  )
+}
+
 function FileLink({
   target,
+  label = target.path,
   workspaceRoot,
 }: {
   readonly target: FileTarget
+  readonly label?: string
   readonly workspaceRoot?: string | undefined
 }) {
   return (
     <ActionButton
-      label={target.path}
+      label={label}
       title={fileActionLabel()}
       mono
       action={() => openFileTarget(target, workspaceRoot)}
