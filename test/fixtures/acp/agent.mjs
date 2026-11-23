@@ -269,6 +269,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       text(m.params.sessionId, "The ACP fixture is ready.")
       reply(m.id, { stopReason: "end_turn" })
     } else if (content === "output-media") {
+      update(m.params.sessionId, {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Plan the ACP fixture image." },
+      })
       outputMedia(m.params.sessionId)
       setTimeout(() => reply(m.id, { stopReason: "end_turn" }), 1500)
     } else if (content === "invalid-stop") reply(m.id, {})

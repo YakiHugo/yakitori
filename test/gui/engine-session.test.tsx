@@ -341,6 +341,59 @@ describe("external engine workspace", () => {
     expect(view.activeTurnId).toBe("later")
   })
 
+  it("closes an observed reasoning segment at the next message and omits elapsed time for loaded history", () => {
+    const reasoning: EngineEvent = {
+      type: "session.update",
+      turnId: "turn",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Checking the fixture." },
+      },
+    }
+    const answer: EngineEvent = {
+      type: "message.delta",
+      turnId: "turn",
+      channel: "assistant",
+      text: "Ready.",
+    }
+    const observed = snapshot([
+      { type: "turn.status", turnId: "turn", status: "running" },
+      reasoning,
+      answer,
+    ])
+    const live = {
+      ...observed,
+      events: observed.events.map((event, index) => ({
+        ...event,
+        createdAt: [1000, 2000, 4500][index] ?? event.createdAt,
+      })),
+    }
+    const beforeAnswer = projectEngineSession({
+      ...live,
+      events: live.events.slice(0, -1),
+    })
+    expect(beforeAnswer.executionView.entries[0]).toMatchObject({
+      kind: "reasoning",
+      format: "raw",
+      status: "streaming",
+      startedAt: "1970-01-01T00:00:02.000Z",
+    })
+    expect(projectEngineSession(live).executionView.entries[0]).toMatchObject({
+      kind: "reasoning",
+      status: "completed",
+      completedAt: "1970-01-01T00:00:04.500Z",
+      durationMs: 2500,
+    })
+    const replay = projectEngineSession(
+      snapshot([{ ...reasoning, replayed: true }]),
+    )
+    expect(replay.executionView.entries[0]).toMatchObject({
+      kind: "reasoning",
+      status: "completed",
+    })
+    expect(replay.executionView.entries[0]).not.toHaveProperty("durationMs")
+  })
+
   it("adds missing loaded history and keeps the already observed turns once", () => {
     const replay = (channel: string, text: string): EngineEvent => ({
       type: "session.update",
