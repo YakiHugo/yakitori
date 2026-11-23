@@ -527,7 +527,11 @@ export function SideChatPanel({
               threadId: `side:${chat.id}`,
               apiBase,
               workspaceRoot: chat.cwd,
-              editable: false,
+              capabilities: {
+                editable: false,
+                supportsContextExcerpts: true,
+                historyOwnership: "canonical",
+              },
               interactiveQuestions: false,
             }}
           >

@@ -63,7 +63,8 @@ export function ToolCell({
     presentation.detail?.kind === "collaboration"
       ? presentation.detail
       : undefined
-  const { threadId, interactiveQuestions } = useConversationScope()
+  const { threadId, interactiveQuestions, capabilities } =
+    useConversationScope()
   const [open, setOpen] = useThreadScopeState(
     threadId,
     `tool:${entry.toolCallId}`,
@@ -120,6 +121,7 @@ export function ToolCell({
   if (!entry.resultError && entry.output !== undefined) {
     if (
       interactiveQuestions &&
+      capabilities.historyOwnership === "canonical" &&
       entry.execution.name === "request_user_input_async"
     ) {
       const request = parseUserQuestions(entry.output)

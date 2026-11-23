@@ -18,7 +18,10 @@ import { presentTool } from "../tool-presentation.ts"
 import { ToolDetailView, ToolFileLocations } from "./cells/tool-detail.tsx"
 import { ComposerSurface } from "./composer-surface.tsx"
 import { ConversationMessages } from "./conversation-messages.tsx"
-import { ConversationScopeContext } from "./conversation-scope.tsx"
+import {
+  type ConversationCapabilities,
+  ConversationScopeContext,
+} from "./conversation-scope.tsx"
 import { ExcerptSourceLayer, requestExcerptEdit } from "./excerpt-source.tsx"
 import { SelectionActions } from "./selection-actions.tsx"
 import { Select } from "./ui/select.tsx"
@@ -118,7 +121,11 @@ export function EngineConversation() {
   const [configuring, setConfiguring] = useState(false)
   const promptCapabilities =
     view?.chrome.prompt ?? descriptor?.capabilities.prompt
-  const supportsContextExcerpts = promptCapabilities?.embeddedContext === true
+  const capabilities: ConversationCapabilities = {
+    editable: false,
+    supportsContextExcerpts: promptCapabilities?.embeddedContext === true,
+    historyOwnership: "observed",
+  }
   const excerpts = state.draft.references ?? []
   const excerptOwnerId = `engine:${state.sessionId ?? state.engineId}`
   const scroll = useRef<HTMLElement>(null)
@@ -165,6 +172,19 @@ export function EngineConversation() {
               ? "Existing engine sessions can reconnect."
               : "This engine does not advertise reconnecting existing sessions."}
           </p>
+          <EngineSessionChrome
+            chrome={view?.chrome}
+            label={descriptor?.label ?? state.engineId}
+            disabled={
+              configuring || uncertain || view?.activeTurnId !== undefined
+            }
+            onConfigure={(id, value) => {
+              setConfiguring(true)
+              void configureEngineSession(id, value).finally(() =>
+                setConfiguring(false),
+              )
+            }}
+          />
           {state.loading && <p role="status">Loading conversation…</p>}
           {view === undefined ? null : (
             <ConversationScopeContext.Provider
@@ -174,11 +194,14 @@ export function EngineConversation() {
                 threadId: state.sessionId ?? "",
                 apiBase,
                 workspaceRoot: state.snapshot?.session.cwd,
-                editable: false,
+                capabilities,
                 interactiveQuestions: false,
               }}
             >
-              <ConversationMessages view={view.executionView} />
+              <ConversationMessages
+                view={view.executionView}
+                capabilities={capabilities}
+              />
             </ConversationScopeContext.Provider>
           )}
           {view?.uncertain.map((request) => (
@@ -252,7 +275,7 @@ export function EngineConversation() {
           </div>
         </fieldset>
       ))}
-      {supportsContextExcerpts && state.sessionId !== undefined ? (
+      {capabilities.supportsContextExcerpts && state.sessionId !== undefined ? (
         <>
           <ExcerptSourceLayer
             items={excerpts.map((excerpt, index) => ({
@@ -333,44 +356,7 @@ export function EngineConversation() {
         onCancel={() => {
           if (view?.activeTurnId) void cancelEngineTurn(view.activeTurnId)
         }}
-        modelControls={
-          <div className="flex flex-wrap items-center gap-2">
-            {view?.chrome.controls.length ? (
-              view.chrome.controls.map((control) => (
-                <Select
-                  key={control.id}
-                  size="sm"
-                  variant="ghost"
-                  aria-label={control.label}
-                  value={control.value}
-                  options={[...control.options]}
-                  disabled={
-                    configuring || uncertain || view.activeTurnId !== undefined
-                  }
-                  onValueChange={(value) => {
-                    setConfiguring(true)
-                    void configureEngineSession(control.id, value).finally(() =>
-                      setConfiguring(false),
-                    )
-                  }}
-                />
-              ))
-            ) : (
-              <span className="text-xs text-muted-foreground">
-                {descriptor?.label ?? state.engineId} · Engine-managed model
-              </span>
-            )}
-            {view?.chrome.usage === undefined ? null : (
-              <span
-                className="text-xs text-muted-foreground"
-                title="Engine context usage"
-              >
-                {view.chrome.usage.used.toLocaleString()} /{" "}
-                {view.chrome.usage.size.toLocaleString()} tokens
-              </span>
-            )}
-          </div>
-        }
+        modelControls={null}
         importAttachments={async (prepare, validate) => {
           if (
             !promptCapabilities?.image &&
@@ -418,6 +404,50 @@ export function EngineConversation() {
         stopping={state.stopping}
         activeTurnId={view?.activeTurnId}
       />
+    </div>
+  )
+}
+
+function EngineSessionChrome({
+  chrome,
+  label,
+  disabled,
+  onConfigure,
+}: Readonly<{
+  chrome: ReturnType<typeof projectEngineSession>["chrome"] | undefined
+  label: string | undefined
+  disabled: boolean
+  onConfigure(id: string, value: string): void
+}>) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {chrome?.controls.length ? (
+        chrome.controls.map((control) => (
+          <Select
+            key={control.id}
+            size="sm"
+            variant="ghost"
+            aria-label={control.label}
+            value={control.value}
+            options={control.options}
+            disabled={disabled}
+            onValueChange={(value) => onConfigure(control.id, value)}
+          />
+        ))
+      ) : (
+        <span className="text-xs text-muted-foreground">
+          {label} · Engine-managed model
+        </span>
+      )}
+      {chrome?.usage === undefined ? null : (
+        <span
+          className="text-xs text-muted-foreground"
+          title="Engine context usage"
+        >
+          {chrome.usage.used.toLocaleString()} /{" "}
+          {chrome.usage.size.toLocaleString()} tokens
+        </span>
+      )}
     </div>
   )
 }

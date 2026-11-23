@@ -1583,6 +1583,9 @@ test("ACP negotiates image and quote input, configuration and available commands
       exact: true,
     })
     await control.click()
+    await expect(
+      page.getByText("Reasoning modes", { exact: true }),
+    ).toBeVisible()
     await page.getByRole("option", { name: "Deep", exact: true }).click()
     await expect(control).toContainText("Deep")
     await composer.fill("/")

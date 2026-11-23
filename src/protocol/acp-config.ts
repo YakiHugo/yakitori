@@ -5,7 +5,11 @@ export type AcpConfigControl = Readonly<{
   kind: "config" | "mode" | "model"
   label: string
   value: string
-  options: readonly Readonly<{ value: string; label: string }>[]
+  options: readonly Readonly<{
+    value: string
+    label: string
+    group?: Readonly<{ id: string; label: string }>
+  }>[]
 }>
 
 export function applyAcpConfig(
@@ -23,19 +27,17 @@ export function applyAcpConfig(
         !Array.isArray(value.options)
       )
         return []
-      const options = value.options
-        .flatMap((option) =>
-          isJsonObject(option) && Array.isArray(option.options)
-            ? option.options
-            : [option],
-        )
-        .flatMap((option) =>
-          isJsonObject(option) &&
-          typeof option.value === "string" &&
-          typeof option.name === "string"
-            ? [{ value: option.value, label: option.name }]
-            : [],
-        )
+      const options = value.options.flatMap((option) =>
+        isJsonObject(option) &&
+        Array.isArray(option.options) &&
+        typeof option.group === "string" &&
+        typeof option.name === "string"
+          ? parseOptions(option.options, {
+              id: option.group,
+              label: option.name,
+            })
+          : parseOptions([option]),
+      )
       return options.length === 0
         ? []
         : [
@@ -73,6 +75,25 @@ export function applyAcpConfig(
     )
   }
   return current
+}
+
+function parseOptions(
+  input: readonly unknown[],
+  group?: AcpConfigControl["options"][number]["group"],
+): AcpConfigControl["options"] {
+  return input.flatMap((option) =>
+    isJsonObject(option) &&
+    typeof option.value === "string" &&
+    typeof option.name === "string"
+      ? [
+          {
+            value: option.value,
+            label: option.name,
+            ...(group === undefined ? {} : { group }),
+          },
+        ]
+      : [],
+  )
 }
 
 function legacyControl(

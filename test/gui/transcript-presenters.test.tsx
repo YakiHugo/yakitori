@@ -57,7 +57,11 @@ it("uses the first matching replacement and preserves declared decoration order"
         engineId: "test-engine",
         apiBase: "",
         workspaceRoot: undefined,
-        editable: false,
+        capabilities: {
+          editable: false,
+          supportsContextExcerpts: false,
+          historyOwnership: "observed",
+        },
         interactiveQuestions: false,
       }}
     >

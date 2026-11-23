@@ -83,7 +83,8 @@ export function UserMessageCell({
   queued: boolean
 }>) {
   const busy = useAppStore((state) => state.busy)
-  const { sessionId, threadId, apiBase, editable } = useConversationScope()
+  const { sessionId, threadId, apiBase, capabilities } = useConversationScope()
+  const { editable } = capabilities
   const goalInputId = useAppStore(
     (state) => state.selectedSession?.goal?.inputId,
   )

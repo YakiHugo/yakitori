@@ -7,6 +7,7 @@ import {
 } from "react"
 import type { ExecutionEntry } from "../execution-view.ts"
 import type { ToolPresentation } from "../tool-presentation.ts"
+import { transcriptPresenterRegistry } from "../transcript-presenter-registry.ts"
 import { ConversationScopeContext } from "./conversation-scope.tsx"
 
 type SlotContexts = {
@@ -38,7 +39,7 @@ export type TranscriptPresenterRegistry = Readonly<{
   [Name in SlotName]?: readonly Presenter<Name>[]
 }>
 export const TranscriptPresenters = createContext<TranscriptPresenterRegistry>(
-  {},
+  transcriptPresenterRegistry,
 )
 
 export function TranscriptPresenterSlot<Name extends SlotName>({

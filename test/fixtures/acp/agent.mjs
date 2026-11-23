@@ -56,8 +56,14 @@ const configOptions = () => [
     category: "thought_level",
     currentValue: effort,
     options: [
-      { value: "fast", name: "Fast" },
-      { value: "deep", name: "Deep" },
+      {
+        group: "reasoning-modes",
+        name: "Reasoning modes",
+        options: [
+          { value: "fast", name: "Fast" },
+          { value: "deep", name: "Deep" },
+        ],
+      },
     ],
   },
 ]
