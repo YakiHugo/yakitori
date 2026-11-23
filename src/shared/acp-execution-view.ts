@@ -22,6 +22,7 @@ import {
   createExecutionViewState,
   projectExecutionView,
 } from "./execution-view.ts"
+import { scanModelText } from "./model-text.ts"
 
 type ObservedEvent = EngineSessionSnapshot["events"][number]
 type Permission = Extract<EngineEvent, { type: "permission.requested" }>
@@ -30,6 +31,7 @@ type Turn = {
   id: string
   startedAt: string
   completedAt?: string
+  replayed?: boolean
   input?: Extract<ExecutionEntry, { kind: "user_input" }>
   inputMessageId?: string
   entries: ExecutionEntry[]
@@ -108,38 +110,77 @@ export function projectEngineSession(snapshot: EngineSessionSnapshot) {
   const replayed = projectObserved(latestReplay, true)
   const turns: Turn[] = []
   const liveTurns = [...observed.turns.values()]
-  let liveIndex = 0
-  for (const turn of replayed.turns.values()) {
+  const liveKeys = liveTurns.map((turn) =>
+    turn.completedAt === undefined ? undefined : turnIdentity(turn),
+  )
+  const liveMessageIds = new Map(
+    liveTurns.flatMap((turn, index) =>
+      turn.inputMessageId === undefined
+        ? []
+        : [[turn.inputMessageId, index] as const],
+    ),
+  )
+  let precedingExact = -1
+  const replayMatches = [...replayed.turns.values()].map((turn) => {
+    const exact =
+      turn.inputMessageId === undefined
+        ? undefined
+        : liveMessageIds.get(turn.inputMessageId)
+    const after = precedingExact
+    if (exact !== undefined) precedingExact = exact
+    return { turn, exact, after }
+  })
+  let liveEnd = liveTurns.length
+  // Prefer the newest suffix when text repeats, without crossing an exact ID.
+  for (const { turn, exact, after } of replayMatches.reverse()) {
     const key = turnIdentity(turn)
     const match =
-      key === undefined && turn.inputMessageId === undefined
-        ? -1
-        : liveTurns.findIndex(
-            (live, index) =>
-              index >= liveIndex &&
-              (turn.inputMessageId !== undefined &&
-              live.inputMessageId !== undefined
-                ? turn.inputMessageId === live.inputMessageId
-                : key !== undefined && turnIdentity(live) === key),
-          )
+      exact !== undefined
+        ? exact < liveEnd
+          ? exact
+          : -1
+        : key === undefined
+          ? -1
+          : liveKeys.findLastIndex(
+              (liveKey, index) =>
+                index > after &&
+                index < liveEnd &&
+                liveKey === key &&
+                (turn.inputMessageId === undefined ||
+                  liveTurns[index]?.inputMessageId === undefined),
+            )
     if (match < 0) turns.push(turn)
     else {
-      turns.push(...liveTurns.slice(liveIndex, match + 1))
-      liveIndex = match + 1
+      turns.push(...liveTurns.slice(match, liveEnd).reverse())
+      liveEnd = match
     }
   }
-  turns.push(...liveTurns.slice(liveIndex))
+  turns.push(...liveTurns.slice(0, liveEnd).reverse())
+  turns.reverse()
   const base = projectExecutionView(createExecutionViewState())
   const executionView: ExecutionView = {
     ...base,
     entries: turns.flatMap((turn) =>
-      turn.input === undefined ? turn.entries : [turn.input, ...turn.entries],
+      (turn.input === undefined
+        ? turn.entries
+        : [turn.input, ...turn.entries]
+      ).map((entry) =>
+        entry.kind === "assistant"
+          ? {
+              ...entry,
+              text: scanModelText(entry.text, entry.status !== "streaming")
+                .text,
+            }
+          : entry,
+      ),
     ),
     turnTimings: Object.fromEntries(
       turns.map((turn): [string, TurnTiming] => [
         turn.id,
         {
-          startedAt: turn.startedAt,
+          ...(turn.replayed
+            ? { outcome: { status: "completed" } }
+            : { startedAt: turn.startedAt }),
           ...(turn.completedAt === undefined
             ? {}
             : { completedAt: turn.completedAt }),
@@ -173,7 +214,13 @@ function turnIdentity(turn: Turn): string | undefined {
   const text = turn.entries
     .flatMap((entry) => (entry.kind === "assistant" ? [entry.text] : []))
     .join("")
-  return text === "" ? undefined : JSON.stringify([turn.input.text, text])
+  if (text !== "") return JSON.stringify([turn.input.text, text])
+  const tools = turn.entries.flatMap((entry) =>
+    entry.kind === "tool" ? [entry.toolCallId] : [],
+  )
+  return tools.length === 0
+    ? undefined
+    : JSON.stringify([turn.input.text, tools])
 }
 
 function projectObserved(events: readonly ObservedEvent[], replay = false) {
@@ -195,7 +242,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
   const turnFor = (id: string, at: string) => {
     const prior = turns.get(id)
     if (prior !== undefined) return prior
-    const turn: Turn = { id, startedAt: at, entries: [] }
+    const turn: Turn = { id, startedAt: at, replayed: replay, entries: [] }
     turns.set(id, turn)
     return turn
   }
@@ -277,13 +324,24 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       Object.entries(update).filter(([, value]) => value != null),
     )
     const wire = { ...prior?.wire, ...fields }
+    if (Array.isArray(fields.content) && fields.content.length === 0)
+      wire.content = prior?.wire.content ?? fields.content
+    if (Array.isArray(fields.locations) && prior?.entry.locations !== undefined)
+      wire.locations = [...prior.entry.locations, ...fields.locations]
     const index = prior?.index ?? owner.entries.length
-    const entry = projectAcpTool(
+    const projected = projectAcpTool(
       wire,
       id,
       owner.id,
       permission || prior?.entry.execution.requiresPermission === true,
     )
+    const entry =
+      projected.state === "requested" && owner.completedAt !== undefined
+        ? settleTool(
+            projected,
+            prior?.entry.state === "failed" ? "failed" : "interrupted",
+          )
+        : projected
     owner.entries[index] = entry
     tools.set(id, { wire, turn: owner, index, entry })
   }
@@ -298,6 +356,15 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
         state: "resolved",
         ...(behavior === undefined ? {} : { behavior }),
       }
+  }
+  const settleTurnTools = (turn: Turn, state: "failed" | "interrupted") => {
+    for (const [index, entry] of turn.entries.entries()) {
+      if (entry.kind !== "tool" || entry.state !== "requested") continue
+      const settled = settleTool(entry, state)
+      turn.entries[index] = settled
+      const tool = tools.get(entry.toolCallId.slice("acp:".length))
+      if (tool !== undefined) tool.entry = settled
+    }
   }
   let previousRawText:
     | { turnId: string; kind: TextEntry["kind"]; text: string }
@@ -329,7 +396,10 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
           replayTurnId = `acp:replay:${seq}`
         if (
           channel === "user_message_chunk" ||
-          channel === "agent_message_chunk"
+          channel === "agent_message_chunk" ||
+          channel === "agent_thought_chunk" ||
+          channel === "tool_call" ||
+          channel === "plan"
         )
           replayChannel = channel
       }
@@ -497,6 +567,10 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       }
       closeText(turn, at)
       turn.completedAt = at
+      settleTurnTools(
+        turn,
+        event.status === "failed" ? "failed" : "interrupted",
+      )
       if (activeTurnId === turn.id) activeTurnId = undefined
       for (const [id, permission] of permissions)
         if (permission.turnId === turn.id) resolvePermission(id)
@@ -515,9 +589,22 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
         })
     }
   }
-  for (const turn of turns.values())
-    if (replay) turn.completedAt = turn.startedAt
+  if (replay)
+    for (const turn of turns.values()) settleTurnTools(turn, "interrupted")
   return { turns, tools, permissions, activeTurnId }
+}
+
+function settleTool(
+  entry: AcpToolEntry,
+  state: "failed" | "interrupted",
+): AcpToolEntry {
+  const { streamOutput, ...rest } = entry
+  return {
+    ...rest,
+    state,
+    ...(streamOutput === undefined ? {} : { resultText: streamOutput }),
+    ...(state === "failed" ? { resultError: true } : {}),
+  }
 }
 
 import {

@@ -394,6 +394,177 @@ describe("external engine workspace", () => {
     expect(replay.executionView.entries[0]).not.toHaveProperty("durationMs")
   })
 
+  it.each([
+    ["completed", "interrupted"],
+    ["failed", "failed"],
+    ["cancelled", "interrupted"],
+    ["disconnected", "interrupted"],
+  ] as const)("settles an unfinished tool when the turn is %s", (status, state) => {
+    const { executionView } = projectEngineSession(
+      snapshot([
+        { type: "turn.status", turnId: "turn", status: "running" },
+        {
+          type: "session.update",
+          turnId: "turn",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "read",
+            status: "in_progress",
+            kind: "read",
+            rawInput: { path: "fixture.txt" },
+            locations: [{ path: "fixture.txt", line: 3 }],
+            content: [
+              {
+                type: "content",
+                content: { type: "text", text: "Partial result" },
+              },
+            ],
+          },
+        },
+        {
+          type: "session.update",
+          turnId: "turn",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "read",
+            content: [],
+            locations: [
+              { path: "fixture.txt", line: 3 },
+              { path: "other.txt" },
+            ],
+          },
+        },
+        { type: "turn.status", turnId: "turn", status },
+      ]),
+    )
+    const tool = executionView.entries.find((entry) => entry.kind === "tool")
+    expect(tool).toMatchObject({
+      state,
+      resultText: "Partial result",
+      execution: { input: { path: "fixture.txt" } },
+      locations: [{ path: "fixture.txt", line: 3 }, { path: "other.txt" }],
+    })
+    expect(tool).not.toHaveProperty("streamOutput")
+  })
+
+  it("aligns a replayed tool-only turn without joining it to the next prompt", () => {
+    const prompt = (text: string): EngineEvent => ({
+      type: "session.update",
+      replayed: true,
+      update: {
+        sessionUpdate: "user_message_chunk",
+        content: { type: "text", text },
+      },
+    })
+    const tool: EngineEvent = {
+      type: "session.update",
+      turnId: "local",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "read",
+        status: "completed",
+        kind: "read",
+      },
+    }
+    const { executionView } = projectEngineSession(
+      snapshot([
+        {
+          type: "input.submitted",
+          requestId: "local-request",
+          turnId: "local",
+          text: "Read only",
+        },
+        tool,
+        { type: "turn.status", turnId: "local", status: "completed" },
+        prompt("Read only"),
+        { ...tool, replayed: true },
+        prompt("Another prompt"),
+      ]),
+    )
+    expect(executionView.entries).toMatchObject([
+      { kind: "user_input", text: "Read only", inputId: "local-request" },
+      { kind: "tool", turnId: "local" },
+      { kind: "user_input", text: "Another prompt" },
+    ])
+  })
+
+  it("keeps the observed turn in its newest position when stateless replies repeat", () => {
+    const replay = (sessionUpdate: string, text: string): EngineEvent => ({
+      type: "session.update",
+      replayed: true,
+      update: { sessionUpdate, content: { type: "text", text } },
+    })
+    const { executionView } = projectEngineSession(
+      snapshot([
+        {
+          type: "input.submitted",
+          requestId: "observed",
+          turnId: "local",
+          text: "Again",
+        },
+        {
+          type: "message.delta",
+          channel: "assistant",
+          turnId: "local",
+          text: "OK",
+        },
+        { type: "turn.status", turnId: "local", status: "completed" },
+        replay("user_message_chunk", "Again"),
+        replay("agent_message_chunk", "OK"),
+        replay("user_message_chunk", "Again"),
+        replay("agent_message_chunk", "OK"),
+      ]),
+    )
+    expect(executionView.entries).toMatchObject([
+      {
+        kind: "user_input",
+        text: "Again",
+        inputId: expect.stringMatching(/^acp:replay:/u),
+      },
+      { kind: "assistant", text: "OK" },
+      { kind: "user_input", text: "Again", inputId: "observed" },
+      { kind: "assistant", text: "OK", turnId: "local" },
+    ])
+  })
+
+  it("prefers an exact replay message ID over a later identical reply without an ID", () => {
+    const prompt = (messageId?: string) => ({
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "Again" },
+      ...(messageId === undefined ? {} : { messageId }),
+    })
+    const answer = {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "OK" },
+    }
+    const wireId = "stable-message"
+    const { executionView } = projectEngineSession(
+      snapshot([
+        {
+          type: "input.submitted",
+          requestId: "observed",
+          turnId: "local",
+          text: "Again",
+        },
+        { type: "session.update", turnId: "local", update: prompt(wireId) },
+        { type: "session.update", turnId: "local", update: answer },
+        { type: "turn.status", turnId: "local", status: "completed" },
+        ...[prompt(wireId), answer, prompt(), answer].map(
+          (update): EngineEvent => ({
+            type: "session.update",
+            replayed: true,
+            update,
+          }),
+        ),
+      ]),
+    )
+    expect(
+      executionView.entries
+        .filter(({ kind }) => kind === "user_input")
+        .map(({ inputId }) => inputId),
+    ).toEqual(["observed", expect.stringMatching(/^acp:replay:/u)])
+  })
+
   it("adds missing loaded history and keeps the already observed turns once", () => {
     const replay = (channel: string, text: string): EngineEvent => ({
       type: "session.update",

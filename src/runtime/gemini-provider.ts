@@ -33,6 +33,7 @@ import {
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -92,7 +93,7 @@ class GeminiInlineRequestSizeError extends Error {
 // returned part intact: signatures can be attached even to an empty text part.
 // https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
 export function createGeminiProvider(options: GeminiProviderOptions): StreamFn {
-  return (request) => streamGemini(options, request)
+  return (request) => cleanModelTextStream(streamGemini(options, request))
 }
 
 async function* streamGemini(

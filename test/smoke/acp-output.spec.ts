@@ -133,6 +133,13 @@ test("restores distinct ACP user messages and their media from session/load", as
     await expect(
       page.getByText("Second historical message", { exact: true }),
     ).toBeVisible()
+    await expect(
+      page.getByText("Replayed reply", { exact: true }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Activity", exact: true }).click()
+    await expect(
+      page.getByRole("list", { name: "Agent activity" }),
+    ).toBeVisible()
     const image = page.getByRole("img", { name: "User image" })
     await expect(image).toBeVisible()
     await expect

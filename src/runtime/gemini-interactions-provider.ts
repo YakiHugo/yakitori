@@ -20,6 +20,7 @@ import {
   type ModelStreamEvent,
   type StreamFn,
 } from "./model.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -42,7 +43,7 @@ class InteractionsHttpError extends Error {}
 export function createGeminiInteractionsProvider(
   options: GeminiProviderOptions,
 ): StreamFn {
-  return (request) => streamInteractions(options, request)
+  return (request) => cleanModelTextStream(streamInteractions(options, request))
 }
 
 async function* streamInteractions(
