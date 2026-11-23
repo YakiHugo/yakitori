@@ -1,6 +1,6 @@
 import { expect, it } from "vitest"
 import type { StoredRolloutItem } from "../../src/core/rollout.ts"
-import type { ModelCitation } from "../../src/protocol/conversation.ts"
+import type { CanonicalAnnotation } from "../../src/protocol/conversation.ts"
 import type { JsonObject } from "../../src/protocol/events.ts"
 import { mapRolloutEvent } from "../../src/server/session-event-projection.ts"
 
@@ -12,14 +12,14 @@ const web = {
   start_index: 2,
   end_index: 6,
 }
-const expectedWeb: ModelCitation = {
+const expectedWeb: CanonicalAnnotation = {
   kind: "url",
   title: "Source",
   url,
   responseSpan: { start: 3, end: 7 },
 }
 
-it.each<{ providerMetadata: JsonObject; expected: ModelCitation }>([
+it.each<{ providerMetadata: JsonObject; expected: CanonicalAnnotation }>([
   {
     providerMetadata: { openai: { part: { annotations: [web] } } },
     expected: expectedWeb,

@@ -3,8 +3,8 @@ import { citationURL } from "../../citation-sources.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { cn } from "../../lib/utils.ts"
-import { openCitationLink } from "../markdown-citation.tsx"
 import { MarkdownView } from "../markdown.tsx"
+import { openCitationLink } from "../markdown-citation.tsx"
 import { LiveTextNotice } from "./live-text-notice.tsx"
 
 export function AssistantMessageCell({
@@ -85,6 +85,19 @@ export function AssistantMessageCell({
                     </a>
                   )}
                   {source.location ? <span> · {source.location}</span> : null}
+                  {source.citedTexts?.length ? (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer">Cited text</summary>
+                      {source.citedTexts.map((text) => (
+                        <blockquote
+                          key={text}
+                          className="mt-1 max-w-prose whitespace-pre-wrap border-s ps-2"
+                        >
+                          {text}
+                        </blockquote>
+                      ))}
+                    </details>
+                  ) : null}
                 </li>
               )
             })}

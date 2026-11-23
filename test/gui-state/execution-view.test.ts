@@ -1322,6 +1322,7 @@ describe("execution view", () => {
             id: "citation_0_0",
             label: "Source",
             url: "https://example.com/source",
+            citedTexts: ["Source excerpt"],
             mentions: [
               { responseSpan: { start: 0, end: 5 } },
               {

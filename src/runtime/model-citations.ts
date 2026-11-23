@@ -1,10 +1,16 @@
-import type { CitationRange, ModelCitation } from "../protocol/conversation.ts"
+import type {
+  CanonicalAnnotation,
+  CitationRange,
+} from "../protocol/conversation.ts"
 import { isJsonObject } from "../protocol/json.ts"
 
 // Responses sends a flat annotation. Chat Completions wraps URL citations.
-export function openAICitations(value: unknown, text: string): ModelCitation[] {
+export function openAICitations(
+  value: unknown,
+  text: string,
+): CanonicalAnnotation[] {
   if (!Array.isArray(value)) return []
-  const citations: ModelCitation[] = []
+  const citations: CanonicalAnnotation[] = []
   for (const annotation of value) {
     if (!isJsonObject(annotation)) continue
     if (annotation.type === "url_citation") {
@@ -45,9 +51,9 @@ export function openAICitations(value: unknown, text: string): ModelCitation[] {
   return citations
 }
 
-export function anthropicCitations(value: unknown): ModelCitation[] {
+export function anthropicCitations(value: unknown): CanonicalAnnotation[] {
   if (!Array.isArray(value)) return []
-  const citations: ModelCitation[] = []
+  const citations: CanonicalAnnotation[] = []
   for (const citation of value) {
     if (!isJsonObject(citation)) continue
     const citedText = stringField(citation.cited_text)
@@ -73,7 +79,7 @@ export function anthropicCitations(value: unknown): ModelCitation[] {
       continue
     }
     const title = stringField(citation.document_title)
-    let sourceLocation: ModelCitation["sourceLocation"]
+    let sourceLocation: CanonicalAnnotation["sourceLocation"]
     switch (citation.type) {
       case "page_location":
         sourceLocation = documentLocation(
@@ -127,10 +133,10 @@ function characterSpan(
 }
 
 function documentLocation(
-  unit: NonNullable<ModelCitation["sourceLocation"]>["unit"],
+  unit: NonNullable<CanonicalAnnotation["sourceLocation"]>["unit"],
   start: unknown,
   end: unknown,
-): ModelCitation["sourceLocation"] {
+): CanonicalAnnotation["sourceLocation"] {
   if (!isOffset(start) || (unit === "page" && start === 0)) return
   return isOffset(end) && end > start ? { unit, start, end } : { unit, start }
 }

@@ -1,4 +1,7 @@
-import type { ModelAssistantTextBlock } from "../protocol/conversation.ts"
+import type {
+  CanonicalAnnotation,
+  ModelAssistantTextBlock,
+} from "../protocol/conversation.ts"
 import type {
   CitationMention,
   CitationSource,
@@ -9,8 +12,9 @@ export type { CitationSource } from "../protocol/execution-view.ts"
 export function citationSources(
   blocks: readonly ModelAssistantTextBlock[],
 ): CitationSource[] {
-  const sources: (Omit<CitationSource, "mentions"> & {
+  const sources: (Omit<CitationSource, "mentions" | "citedTexts"> & {
     mentions?: CitationMention[]
+    citedTexts?: string[]
   })[] = []
   const byURL = new Map<string, (typeof sources)[number]>()
   let offset = 0
@@ -29,10 +33,7 @@ export function citationSources(
                 ? "Document source"
                 : "Source"
               : new URL(url).hostname)
-      const location =
-        annotation.sourceLocation?.unit === "page"
-          ? `from page ${annotation.sourceLocation.start}`
-          : undefined
+      const location = sourceLocationLabel(annotation.sourceLocation)
       // Matching local titles alone cannot prove that two documents are equal.
       const key =
         url === undefined ? undefined : JSON.stringify([url, label, location])
@@ -47,6 +48,12 @@ export function citationSources(
         sources.push(source)
         if (key !== undefined) byURL.set(key, source)
       }
+      const citedText = annotation.citedText?.trim()
+      if (citedText) {
+        source.citedTexts ??= []
+        if (!source.citedTexts.includes(citedText))
+          source.citedTexts.push(citedText)
+      }
       const span = annotation.responseSpan
       if (
         span === undefined ||
@@ -59,7 +66,6 @@ export function citationSources(
         splitsSurrogate(block.text, span.end)
       )
         continue
-      const citedText = annotation.citedText?.trim()
       source.mentions ??= []
       source.mentions.push({
         responseSpan: {
@@ -71,6 +77,19 @@ export function citationSources(
     }
   }
   return sources
+}
+
+function sourceLocationLabel(
+  location: CanonicalAnnotation["sourceLocation"],
+): string | undefined {
+  if (location === undefined) return undefined
+  const { unit, start, end } = location
+  const range = end === undefined ? String(start) : `${start}–${end}`
+  if (unit === "page")
+    return end === undefined ? `from page ${range}` : `pages ${range}`
+  return unit === "character"
+    ? `source characters ${range}`
+    : `source blocks ${range}`
 }
 
 function splitsSurrogate(text: string, offset: number): boolean {

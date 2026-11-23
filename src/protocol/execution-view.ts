@@ -26,6 +26,7 @@ export type CitationSource = Readonly<{
   label: string
   url?: string
   location?: string
+  citedTexts?: readonly string[]
   mentions?: readonly CitationMention[]
 }>
 

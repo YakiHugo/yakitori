@@ -137,6 +137,12 @@ for (const wireApi of [
         await expect(preview).toContainText(sourceTitle)
         if (!interactions) await expect(preview).toContainText(sourceQuote)
         await page.mouse.move(0, 0)
+        if (!interactions) {
+          await sources.getByText("Cited text", { exact: true }).click()
+          await expect(
+            sources.getByText(sourceQuote, { exact: true }),
+          ).toBeVisible()
+        }
         if (interactions) {
           const file = sources
             .getByRole("listitem")
