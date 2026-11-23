@@ -1,5 +1,3 @@
-import { pngImageBytes } from "../fixtures/images.ts"
-import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
 import {
@@ -14,7 +12,9 @@ import {
 } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
+import { pngImageBytes } from "../fixtures/images.ts"
 import { withSDKResponse } from "../support/sdk-response.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 describe("anthropic provider conversion", () => {
   it.each([
@@ -888,7 +888,7 @@ describe("anthropic provider conversion", () => {
       {
         type: "reasoning",
         text: "Inspect the event log.",
-        representation: "raw",
+        format: "raw",
         providerMetadata: {
           anthropic: {
             provider: "anthropic",
@@ -899,7 +899,7 @@ describe("anthropic provider conversion", () => {
       {
         type: "reasoning",
         text: "",
-        representation: "redacted",
+        format: "redacted",
         providerMetadata: {
           anthropic: {
             provider: "anthropic",
@@ -1055,8 +1055,8 @@ describe("anthropic provider conversion", () => {
       thinking: { type: "adaptive", display: "summarized" },
     })
     expect(events).toEqual([
-      { type: "reasoning_delta", text: "Inspect", representation: "summary" },
-      { type: "reasoning_delta", text: " files", representation: "summary" },
+      { type: "reasoning_delta", text: "Inspect", format: "summary" },
+      { type: "reasoning_delta", text: " files", format: "summary" },
       expect.objectContaining({
         type: "response",
         response: expect.objectContaining({
@@ -1064,7 +1064,7 @@ describe("anthropic provider conversion", () => {
             {
               type: "reasoning",
               text: "Inspect files",
-              representation: "summary",
+              format: "summary",
             },
             { type: "text", text: "Done." },
           ],

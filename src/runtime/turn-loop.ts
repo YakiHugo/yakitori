@@ -1692,7 +1692,10 @@ async function executeTurnModelLoop(
       const committedContent: ModelContentBlock[] = []
       const committedNative: ModelNativeItem[] = []
       const committedCallIds = new Set<string>()
-      const reasoningTimes = new Map<string, { first: number; last: number }>()
+      const reasoningTimes = new Map<
+        string,
+        { startedAt: string; monotonicStart: number }
+      >()
       if (!continuingAnswer) answerItemIds.length = 0
       let answerStartIndex = answerItemIds.length
       let explicitAnswer = false
@@ -1835,13 +1838,11 @@ async function executeTurnModelLoop(
         emitModelStream: (event) => {
           if (event.kind === "assistant" && event.delta.trim().length > 0)
             latency.firstUsefulOutputMs ??= elapsed()
-          if (event.kind === "reasoning" && event.delta.length > 0) {
-            const now = performance.now()
-            const prior = reasoningTimes.get(event.itemId)
-            if (prior === undefined)
-              reasoningTimes.set(event.itemId, { first: now, last: now })
-            else prior.last = now
-          }
+          if (event.kind === "reasoning" && !reasoningTimes.has(event.itemId))
+            reasoningTimes.set(event.itemId, {
+              startedAt: new Date().toISOString(),
+              monotonicStart: performance.now(),
+            })
           input.session.emitModelStream(input.execution, event)
         },
         emitWarning: (message, diagnostic) =>
@@ -2575,7 +2576,7 @@ async function consumeModelStream(input: {
             parentItemId,
             kind,
             event.partIndex,
-            event.type === "reasoning_delta" ? event.representation : undefined,
+            event.type === "reasoning_delta" ? event.format : undefined,
           )
           provisionalItems.add(itemId)
           input.emitModelStream?.({
@@ -2597,9 +2598,8 @@ async function consumeModelStream(input: {
             ...(event.type === "delta" && event.refusal === true
               ? { refusal: true }
               : {}),
-            ...(event.type === "reasoning_delta" &&
-            event.representation !== undefined
-              ? { representation: event.representation }
+            ...(event.type === "reasoning_delta" && event.format !== undefined
+              ? { format: event.format }
               : {}),
           })
         }
@@ -3107,8 +3107,8 @@ function* displayOutputParts(
         itemId: modelOutputItemId(
           itemId,
           "reasoning",
-          indexes[block.representation ?? "summary"]++,
-          block.representation,
+          indexes[block.format ?? "summary"]++,
+          block.format,
         ),
       }
     else if (block.type === "hosted_tool")
@@ -3125,7 +3125,7 @@ function hostedToolItemId(requestItemId: string, toolId: string): string {
 function completedResponseItems(
   response: ResponseItemEnvelope,
   requestItemId: string,
-  reasoningTimes: Map<string, { first: number; last: number }>,
+  reasoningTimes: Map<string, { startedAt: string; monotonicStart: number }>,
 ): readonly CompletedExecutionItem[] {
   if (response.item.role !== "assistant") return []
   const providerMetadata = response.providerMetadata
@@ -3156,18 +3156,22 @@ function completedResponseItems(
       }
       const time = reasoningTimes.get(itemId)
       reasoningTimes.delete(itemId)
-      const durationMs =
-        time === undefined ? 0 : Math.floor(time.last - time.first)
       return {
         ...(block.type === "text"
           ? { type: "agent_message" as const, content: [block] }
           : {
               type: "reasoning" as const,
               text: block.text,
-              ...(block.representation === undefined
+              ...(block.format === undefined ? {} : { format: block.format }),
+              completedAt: new Date().toISOString(),
+              ...(time === undefined
                 ? {}
-                : { representation: block.representation }),
-              ...(durationMs === 0 ? {} : { durationMs }),
+                : {
+                    startedAt: time.startedAt,
+                    durationMs: Math.floor(
+                      performance.now() - time.monotonicStart,
+                    ),
+                  }),
             }),
         itemId,
         ...(source === undefined ? {} : { source }),

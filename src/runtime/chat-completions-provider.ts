@@ -1,15 +1,3 @@
-import { isStepfunEndpoint } from "./stepfun-image-policy.ts"
-import {
-  isSparkChatEndpoint,
-  validateSparkChatMessages,
-  validateSparkChatRequest,
-} from "./spark-chat-policy.ts"
-import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
-import { isLongCatEndpoint, longcatVisionModel } from "./longcat-vision.ts"
-import {
-  isSenseNovaEndpoint,
-  sensenovaVisionModel,
-} from "./sensenova-vision.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -20,7 +8,7 @@ import type {
 } from "openai/resources/chat/completions/completions"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
-import type { ReasoningRepresentation } from "../protocol/model-output.ts"
+import type { ReasoningFormat } from "../protocol/model-output.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import {
@@ -29,15 +17,12 @@ import {
   isGlmStandardEndpoint,
 } from "./chat-completions-wire-policy.ts"
 import { glmTextModel } from "./glm-models.ts"
-import { JsonRequestBudgetError } from "./json-request-budget.ts"
-import { isMetaEndpoint } from "./meta-image-policy.ts"
-import { isMimoEndpoint } from "./mimo-image-policy.ts"
 import { createChatImagePolicy } from "./image-preparation-profiles.ts"
+import { JsonRequestBudgetError } from "./json-request-budget.ts"
+import { isLongCatEndpoint, longcatVisionModel } from "./longcat-vision.ts"
+import { isMetaEndpoint } from "./meta-image-policy.ts"
 import { isMetaContributorModel } from "./meta-models.ts"
-import {
-  isNvidiaEndpoint,
-  validateNvidiaRequest,
-} from "./nvidia-image-policy.ts"
+import { isMimoEndpoint } from "./mimo-image-policy.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
@@ -51,13 +36,13 @@ import {
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import { openAICitations } from "./model-citations.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
   providerErrorMessage,
 } from "./model-failure.ts"
-import { openAICitations } from "./model-citations.ts"
-import { cleanModelTextStream } from "./model-control-tokens.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
   ModelHistoryScopeError,
@@ -76,8 +61,23 @@ import {
   ModelRequestPlanError,
   validateChatOnlyRequest,
 } from "./model-request-plan.ts"
-import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+import {
+  isNvidiaEndpoint,
+  validateNvidiaRequest,
+} from "./nvidia-image-policy.ts"
+import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { isRekaEndpoint } from "./reka-vision.ts"
+import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+import {
+  isSenseNovaEndpoint,
+  sensenovaVisionModel,
+} from "./sensenova-vision.ts"
+import {
+  isSparkChatEndpoint,
+  validateSparkChatMessages,
+  validateSparkChatRequest,
+} from "./spark-chat-policy.ts"
+import { isStepfunEndpoint } from "./stepfun-image-policy.ts"
 import { tencentVisionModel } from "./tencent-chat-only.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
@@ -468,15 +468,15 @@ async function* streamChatCompletions(
     }
     const reasoningParts: {
       text: string
-      representation: ReasoningRepresentation
+      format: ReasoningFormat
       partIndex: number
     }[] = []
     const reasoningIndexes = { raw: 0, summary: 0, redacted: 0 }
-    const addReasoningPart = (representation: ReasoningRepresentation) => {
+    const addReasoningPart = (format: ReasoningFormat) => {
       const part = {
         text: "",
-        representation,
-        partIndex: reasoningIndexes[representation]++,
+        format,
+        partIndex: reasoningIndexes[format]++,
       }
       reasoningParts.push(part)
       return part
@@ -491,7 +491,7 @@ async function* streamChatCompletions(
       return {
         type: "reasoning_delta",
         text: fragment,
-        representation: part.representation,
+        format: part.format,
         ...(part.partIndex === 0 ? {} : { partIndex: part.partIndex }),
         ...(request.streamOutputItems && completionId !== undefined
           ? { itemId: `${completionId}_0` }
@@ -634,7 +634,7 @@ async function* streamChatCompletions(
               }
             }
             reasoningDetails[index] = previous
-            const representation =
+            const format =
               previous.type === "reasoning.summary"
                 ? "summary"
                 : previous.type === "reasoning.text"
@@ -642,20 +642,20 @@ async function* streamChatCompletions(
                   : previous.type === "reasoning.encrypted"
                     ? "redacted"
                     : undefined
-            if (representation === undefined) continue
+            if (format === undefined) continue
             const detailText =
-              representation === "summary" ? fragment.summary : fragment.text
+              format === "summary" ? fragment.summary : fragment.text
             const existing = detailParts.get(index)
-            if (representation === "redacted") {
+            if (format === "redacted") {
               if (existing !== undefined) continue
-              const part = addReasoningPart(representation)
+              const part = addReasoningPart(format)
               detailParts.set(index, part)
               yield reasoningDelta(part, "")
             } else if (
               typeof detailText === "string" &&
               detailText.length > 0
             ) {
-              const part = existing ?? addReasoningPart(representation)
+              const part = existing ?? addReasoningPart(format)
               detailParts.set(index, part)
               structuredText.push(detailText)
               yield reasoningDelta(part, detailText)
@@ -880,7 +880,7 @@ async function* streamChatCompletions(
       content.push({
         type: "reasoning",
         text: part.text,
-        representation: part.representation,
+        format: part.format,
         ...(portableChat || part !== plainReasoning
           ? {}
           : {

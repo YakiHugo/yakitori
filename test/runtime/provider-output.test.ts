@@ -1,5 +1,3 @@
-import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
-import { persistModelMessages } from "../support/persist-model-messages.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 import { describe, expect, it } from "vitest"
@@ -15,6 +13,8 @@ import {
   createOpenAIProvider,
   toOpenAIInput,
 } from "../../src/runtime/openai-provider.ts"
+import { persistModelMessages } from "../support/persist-model-messages.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 describe("provider output completeness", () => {
   it("streams and commits a provider search as read-only activity and keeps its native replay", async () => {
@@ -222,39 +222,39 @@ describe("provider output completeness", () => {
     expect(
       events.filter((event) => event.type === "reasoning_delta"),
     ).toMatchObject([
-      { itemId: "thought", partIndex: 0, representation: "summary" },
-      { itemId: "thought", partIndex: 0, representation: "raw", text: "Raw " },
+      { itemId: "thought", partIndex: 0, format: "summary" },
+      { itemId: "thought", partIndex: 0, format: "raw", text: "Raw " },
       {
         itemId: "thought",
         partIndex: 0,
-        representation: "raw",
+        format: "raw",
         text: "reasoning.",
       },
       {
         itemId: "thought",
         partIndex: 1,
-        representation: "raw",
+        format: "raw",
         text: "Snapshot reasoning.",
       },
-      { itemId: "thought", partIndex: 1, representation: "summary" },
+      { itemId: "thought", partIndex: 1, format: "summary" },
     ])
     expect(events.find((event) => event.type === "output_item")).toMatchObject({
       content: [
         {
           type: "reasoning",
           text: "**Inspecting output**",
-          representation: "summary",
+          format: "summary",
         },
         {
           type: "reasoning",
           text: "**Checking persistence**",
-          representation: "summary",
+          format: "summary",
         },
-        { type: "reasoning", text: "Raw reasoning.", representation: "raw" },
+        { type: "reasoning", text: "Raw reasoning.", format: "raw" },
         {
           type: "reasoning",
           text: "Snapshot reasoning.",
-          representation: "raw",
+          format: "raw",
         },
       ],
       native: [{ value: item }],
@@ -264,7 +264,7 @@ describe("provider output completeness", () => {
         (event) => event.type === "output_item" && event.itemId === "encrypted",
       ),
     ).toMatchObject({
-      content: [{ type: "reasoning", text: "", representation: "redacted" }],
+      content: [{ type: "reasoning", text: "", format: "redacted" }],
       native: [{ value: encrypted }],
     })
     const final = events.at(-1)
@@ -614,7 +614,7 @@ describe("provider output completeness", () => {
     const terminal = events.at(-1)
     if (terminal?.type !== "response") throw new Error("Missing response")
     expect(terminal.response.content).toEqual([
-      { type: "reasoning", text: "Partial reasoning", representation: "raw" },
+      { type: "reasoning", text: "Partial reasoning", format: "raw" },
     ])
     expect(terminal.response.native).toEqual([])
     const history = await persistModelMessages([

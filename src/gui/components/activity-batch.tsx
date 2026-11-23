@@ -37,7 +37,7 @@ export function ActivityBatch({
     (entry) =>
       entry.kind === "reasoning" &&
       entry.status === "streaming" &&
-      (entry.representation === undefined || entry.representation === "raw"),
+      (entry.format === undefined || entry.format === "raw"),
   )
   const open = !grouped || (expanded ?? streamingRaw)
   const summary = tools.length > 0 ? summarizeToolBatch(tools) : "Reasoning"

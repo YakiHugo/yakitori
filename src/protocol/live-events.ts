@@ -62,7 +62,7 @@ export type LiveDisplayItemStarted = {
         readonly type: "reasoning"
         readonly itemId: string
         readonly source?: ModelOutputPresentation["source"]
-        readonly representation?: ModelOutputPresentation["representation"]
+        readonly format?: ModelOutputPresentation["format"]
       }
     | StartedExecutionItem
   readonly createdAt: string

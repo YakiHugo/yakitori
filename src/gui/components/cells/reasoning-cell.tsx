@@ -30,14 +30,14 @@ export function ReasoningCell({
     false,
   )
   const contentId = useId()
-  if (entry.representation === "redacted")
+  if (entry.format === "redacted")
     return (
       <p className="py-1 text-detail text-muted-foreground">
         {encryptedReasoningLabel}
       </p>
     )
   if (!entry.incomplete && !entry.text.trim()) return null
-  const summary = entry.representation === "summary"
+  const summary = entry.format === "summary"
   const streaming = entry.status === "streaming"
   const sections = summary ? reasoningSections(entry.text) : []
   if (
@@ -54,15 +54,20 @@ export function ReasoningCell({
         ))}
       </div>
     )
-  const seconds = Math.floor((entry.durationMs ?? 0) / 1000)
+  const elapsed =
+    entry.durationMs === undefined
+      ? undefined
+      : entry.durationMs < 1000
+        ? "<1s"
+        : formatElapsed(Math.floor(entry.durationMs / 1000))
   const label = summary
     ? streaming
       ? "Reasoning summary…"
       : "Reasoning summary"
     : streaming
       ? "Reasoning…"
-      : seconds > 0
-        ? `Thought for ${formatElapsed(seconds)}`
+      : elapsed !== undefined
+        ? `Thought for ${elapsed}`
         : "Reasoning"
   return (
     <Collapsible
@@ -81,7 +86,7 @@ export function ReasoningCell({
         <ChevronRight className="size-3 transition-transform group-data-[state=open]/reasoning:rotate-90" />
       </CollapsibleTrigger>
       {!summary && streaming && !open && entry.text.trim() ? (
-        <p className="line-clamp-2 max-w-prose break-words whitespace-pre-wrap text-detail text-muted-foreground opacity-80">
+        <p className="line-clamp-2 max-w-prose break-words whitespace-pre-wrap text-detail text-muted-foreground [mask-image:linear-gradient(#000_65%,transparent)]">
           {entry.text.length > 360 ? `…${entry.text.slice(-360)}` : entry.text}
         </p>
       ) : null}

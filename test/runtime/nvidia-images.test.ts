@@ -125,7 +125,7 @@ it.each([
   expect(result.events).toContainEqual({
     type: "reasoning_delta",
     text: "Inspecting.",
-    representation: "raw",
+    format: "raw",
   })
   expect(input).toEqual(original)
 })

@@ -471,7 +471,7 @@ async function* streamGemini(
                   type,
                   text: part.text,
                   ...(type === "reasoning"
-                    ? { representation: "summary" as const }
+                    ? { format: "summary" as const }
                     : {}),
                   providerMetadata: metadata,
                 })
@@ -481,7 +481,7 @@ async function* streamGemini(
                   text: part.text,
                   partIndex,
                   ...(type === "reasoning"
-                    ? { representation: "summary" as const }
+                    ? { format: "summary" as const }
                     : {}),
                   ...(request.streamOutputItems ? { itemId } : {}),
                 }

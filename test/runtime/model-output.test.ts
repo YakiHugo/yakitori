@@ -14,7 +14,7 @@ it("preserves output order and identities through live delivery, persistence, an
   const content: ModelContentBlock[] = [
     {
       type: "reasoning",
-      representation: "summary",
+      format: "summary",
       text: "**Inspecting output**",
     },
     {
@@ -24,7 +24,7 @@ it("preserves output order and identities through live delivery, persistence, an
     },
     {
       type: "reasoning",
-      representation: "summary",
+      format: "summary",
       text: "**Checking persistence**",
     },
     { type: "text", purpose: "final_answer", text: "The final conclusion." },

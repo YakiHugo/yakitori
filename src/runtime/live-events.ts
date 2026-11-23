@@ -68,9 +68,7 @@ export function createCoalescingDeltaPublisher(
       ...(input.source === undefined ? {} : { source: input.source }),
       ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
       ...(input.refusal === true ? { refusal: true as const } : {}),
-      ...(input.representation === undefined
-        ? {}
-        : { representation: input.representation }),
+      ...(input.format === undefined ? {} : { format: input.format }),
       streamId,
       offset,
       delta,
@@ -92,7 +90,7 @@ export function createCoalescingDeltaPublisher(
 
   return {
     publish(input) {
-      if (input.delta === "" && input.representation !== "redacted") return
+      if (input.delta === "" && input.format !== "redacted") return
 
       const now = Date.now()
       if (now - lastPublishedAt >= minIntervalMs) {

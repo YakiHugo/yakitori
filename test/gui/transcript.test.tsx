@@ -956,7 +956,7 @@ it("retains title-only reasoning and preserves headings when expanding full reas
         {
           kind: "reasoning",
           itemId: "first_summary",
-          representation: "summary",
+          format: "summary",
           turnId: "turn_1",
           text: "**Implementing favicon fallback**\n\n**Inspecting existing icons**",
           status: "completed",
@@ -965,7 +965,7 @@ it("retains title-only reasoning and preserves headings when expanding full reas
         {
           kind: "reasoning",
           itemId: "second_summary",
-          representation: "summary",
+          format: "summary",
           turnId: "turn_1",
           text: "### Reading rendering tests\n\nKeep **meaningful emphasis** in the details.",
           status: "completed",
@@ -974,7 +974,7 @@ it("retains title-only reasoning and preserves headings when expanding full reas
         {
           kind: "reasoning",
           itemId: "live_summary",
-          representation: "summary",
+          format: "summary",
           turnId: "turn_1",
           text: "**Checking dependencies**\n\n**Checking the",
           status: "streaming",
@@ -1033,7 +1033,7 @@ it("keeps raw reasoning inside tool batches and reveals the original process ord
         {
           kind: "reasoning",
           itemId: "summary_only",
-          representation: "summary",
+          format: "summary",
           turnId: "turn_1",
           text: "**Inspecting files**\n\n**Comparing implementation**",
           status: "completed",

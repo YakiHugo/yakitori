@@ -1,7 +1,7 @@
 import type { ModelFailureKind } from "../protocol/model-failure.ts"
 import type {
   AssistantTextPurpose,
-  ReasoningRepresentation,
+  ReasoningFormat,
 } from "../protocol/model-output.ts"
 
 export type { ModelFailureKind } from "../protocol/model-failure.ts"
@@ -238,7 +238,7 @@ export type ModelStreamReasoningDeltaEvent = Readonly<{
   text: string
   itemId?: string
   partIndex?: number
-  representation?: ReasoningRepresentation
+  format?: ReasoningFormat
 }>
 
 export type ModelStreamOutputItemEvent = Readonly<{
@@ -300,4 +300,5 @@ export function requireModelDocumentData(document: ModelDocumentBlock): string {
   if (document.data !== undefined) return document.data
   throw new Error("Model request contains an unresolved Session PDF.")
 }
+
 import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

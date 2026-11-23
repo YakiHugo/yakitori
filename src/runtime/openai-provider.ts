@@ -868,7 +868,7 @@ async function* streamOpenAIWire(
         if (text.startsWith(previous) && text.length > previous.length)
           yield {
             type: "reasoning_delta",
-            representation: "raw",
+            format: "raw",
             text: text.slice(previous.length),
             partIndex: event.content_index,
             ...(request.streamOutputItems ? { itemId: event.item_id } : {}),
@@ -923,7 +923,7 @@ async function* streamOpenAIWire(
           text: event.delta,
           ...(partIndex === undefined ? {} : { partIndex }),
           ...(reasoning
-            ? { representation: "summary" as const }
+            ? { format: "summary" as const }
             : purpose === undefined
               ? {}
               : { purpose }),
@@ -1939,11 +1939,11 @@ function fromOpenAIOutput(
       const visible = [
         ...item.summary.map(({ text }) => ({
           text,
-          representation: "summary" as const,
+          format: "summary" as const,
         })),
         ...rawParts.map(([, text]) => ({
           text,
-          representation: "raw" as const,
+          format: "raw" as const,
         })),
       ]
       const parts = visible.some(({ text }) => text.length > 0)
@@ -1951,7 +1951,7 @@ function fromOpenAIOutput(
         : [
             {
               text: "",
-              representation: item.encrypted_content
+              format: item.encrypted_content
                 ? ("redacted" as const)
                 : ("summary" as const),
             },
@@ -2167,10 +2167,10 @@ function toOpenAIReasoningItem(
     type: "reasoning",
     id: metadata.id,
     summary:
-      block.text.length === 0 || block.representation === "raw"
+      block.text.length === 0 || block.format === "raw"
         ? []
         : [{ type: "summary_text", text: block.text }],
-    ...(block.representation === "raw" && block.text.length > 0
+    ...(block.format === "raw" && block.text.length > 0
       ? { content: [{ type: "reasoning_text" as const, text: block.text }] }
       : {}),
     ...(typeof encryptedContent === "string"

@@ -54,9 +54,7 @@ export function createSessionLivePresentation(
                 ? {}
                 : { purpose: event.purpose }),
               ...(event.refusal === true ? { refusal: true as const } : {}),
-              ...(event.representation === undefined
-                ? {}
-                : { representation: event.representation }),
+              ...(event.format === undefined ? {} : { format: event.format }),
             },
             createdAt: new Date().toISOString(),
           })
@@ -75,9 +73,7 @@ export function createSessionLivePresentation(
           ...(event.source === undefined ? {} : { source: event.source }),
           ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
           ...(event.refusal === true ? { refusal: true as const } : {}),
-          ...(event.representation === undefined
-            ? {}
-            : { representation: event.representation }),
+          ...(event.format === undefined ? {} : { format: event.format }),
         })
       } else if (event.type === "tool.output") {
         let publisher = streams.get(event.itemId)

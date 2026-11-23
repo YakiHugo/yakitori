@@ -5,10 +5,7 @@ import type {
 } from "./conversation.ts"
 import type { ContextExcerpt } from "./input-context.ts"
 import type { InputSource, ThreadMessageProvenance } from "./input-queue.ts"
-import type {
-  ModelOutputSource,
-  ReasoningRepresentation,
-} from "./model-output.ts"
+import type { ModelOutputSource, ReasoningFormat } from "./model-output.ts"
 import type { InputContent } from "./user-input.ts"
 export const EventType = {
   SessionCreated: "session.created",
@@ -286,7 +283,9 @@ export type ReasoningExecutionItem = Readonly<{
   itemId: string
   text: string
   source?: ModelOutputSource
-  representation?: ReasoningRepresentation
+  format?: ReasoningFormat
+  startedAt?: string
+  completedAt?: string
   durationMs?: number
   providerMetadata?: EventMetadata
 }>
@@ -449,6 +448,6 @@ export type AppSessionEventEnvelope =
         data: Readonly<Record<string, never>>
       }>)
 
-import type { HostedToolBlock } from "./hosted-tool.ts"
-import type { ModelImageBlock } from "./conversation.ts"
 import type { AssetSource } from "./asset-types.ts"
+import type { ModelImageBlock } from "./conversation.ts"
+import type { HostedToolBlock } from "./hosted-tool.ts"

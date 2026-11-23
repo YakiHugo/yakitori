@@ -1,13 +1,24 @@
 import { isDeepStrictEqual } from "node:util"
 import { Agent, fetch as bedrockFetch } from "undici"
+import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import {
   isJsonObject,
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
-import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
+import {
+  flattenModelSystem,
+  type ModelContentBlock,
+  type ModelMessage,
+  type ModelRequest,
+  ModelStopReason,
+  type ModelStreamEvent,
+  type ModelUsage,
+  requireModelImageData,
+  type StreamFn,
+} from "./model.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -21,17 +32,6 @@ import {
   validateModelHistoryScope,
 } from "./model-native.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
-import {
-  flattenModelSystem,
-  ModelStopReason,
-  requireModelImageData,
-  type ModelContentBlock,
-  type ModelMessage,
-  type ModelRequest,
-  type ModelStreamEvent,
-  type ModelUsage,
-  type StreamFn,
-} from "./model.ts"
 
 const WIRE = "bedrock_converse"
 const ENDPOINT = "https://bedrock-runtime.us-east-1.amazonaws.com"
@@ -464,11 +464,11 @@ function parseContent(
           {
             type: "reasoning",
             text: reasoningText.text,
-            representation: "raw",
+            format: "raw",
           },
         ]
       if (typeof redactedContent === "string" && redactedContent.length > 0)
-        return [{ type: "reasoning", text: "", representation: "redacted" }]
+        return [{ type: "reasoning", text: "", format: "redacted" }]
       return []
     }
     if (isJsonObject(part.toolUse) && Object.keys(part).length === 1) {

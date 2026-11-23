@@ -507,7 +507,7 @@ const TurnBlock = memo(
         entries.filter(
           (entry) =>
             entry.kind !== "reasoning" ||
-            entry.representation === "redacted" ||
+            entry.format === "redacted" ||
             entry.incomplete ||
             entry.text.trim().length > 0,
         ),
@@ -526,7 +526,7 @@ const TurnBlock = memo(
     }, [entries, answer])
     const currentSummary = active
       ? reasoning
-          .filter((entry) => entry.representation === "summary")
+          .filter((entry) => entry.format === "summary")
           .flatMap((entry) =>
             reasoningSections(entry.text).map((section) => section.summary),
           )
@@ -535,7 +535,7 @@ const TurnBlock = memo(
     // Live activity is visible, but completion starts with the process closed.
     const expanded = completed ? activityExpanded : !liveActivityCollapsed
     const hasEncryptedReasoning = reasoning.some(
-      (entry) => entry.representation === "redacted",
+      (entry) => entry.format === "redacted",
     )
     const hasDeferredActivity =
       activityPage !== undefined && activityPage !== "loaded"

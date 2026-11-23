@@ -741,9 +741,10 @@ function applyTransient(
         ...(item.type === "agent_message" && item.refusal === true
           ? { refusal: true }
           : {}),
-        ...(item.type === "reasoning" && item.representation !== undefined
-          ? { representation: item.representation }
+        ...(item.type === "reasoning" && item.format !== undefined
+          ? { format: item.format }
           : {}),
+        ...(item.type === "reasoning" ? { startedAt: event.createdAt } : {}),
         status: "streaming",
         at: event.createdAt,
       })
@@ -801,9 +802,8 @@ function applyTransient(
           ...(event.source === undefined ? {} : { source: event.source }),
           ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
           ...(event.refusal === true ? { refusal: true } : {}),
-          ...(event.representation === undefined
-            ? {}
-            : { representation: event.representation }),
+          ...(event.format === undefined ? {} : { format: event.format }),
+          ...(kind === "reasoning" ? { startedAt: event.createdAt } : {}),
           streamId: event.streamId,
           textOffset: event.offset,
           incomplete: event.offset > 0,
@@ -860,9 +860,7 @@ function applyTransient(
         ...(event.source === undefined ? {} : { source: event.source }),
         ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
         ...(event.refusal === true ? { refusal: true } : {}),
-        ...(event.representation === undefined
-          ? {}
-          : { representation: event.representation }),
+        ...(event.format === undefined ? {} : { format: event.format }),
         streamId: event.streamId,
         textOffset,
         incomplete: textOffset > 0,
@@ -1102,7 +1100,7 @@ function applyDurable(
         if (
           text.length === 0 &&
           sources.length === 0 &&
-          !(item.type === "reasoning" && item.representation === "redacted")
+          !(item.type === "reasoning" && item.format === "redacted")
         )
           return removeItemEntry(next, item.itemId)
         const entry: ExecutionEntry =
@@ -1124,12 +1122,16 @@ function applyDurable(
             : {
                 kind: "reasoning",
                 ...(item.source === undefined ? {} : { source: item.source }),
-                ...(item.representation === undefined
-                  ? {}
-                  : { representation: item.representation }),
+                ...(item.format === undefined ? {} : { format: item.format }),
                 ...(item.durationMs === undefined
                   ? {}
                   : { durationMs: item.durationMs }),
+                ...(item.startedAt === undefined
+                  ? {}
+                  : { startedAt: item.startedAt }),
+                ...(item.completedAt === undefined
+                  ? {}
+                  : { completedAt: item.completedAt }),
                 itemId: item.itemId,
                 turnId: event.data.turnId,
                 text,
@@ -1353,7 +1355,7 @@ function hasStreamOutput(
 ): boolean {
   return (
     entry.text.length > 0 ||
-    (entry.kind === "reasoning" && entry.representation === "redacted")
+    (entry.kind === "reasoning" && entry.format === "redacted")
   )
 }
 
@@ -1499,7 +1501,7 @@ function projectActiveActivity(
     if (
       entry.kind === "reasoning" &&
       entry.status === "streaming" &&
-      entry.representation !== "redacted"
+      entry.format !== "redacted"
     ) {
       streamingReasoning = true
     } else if (

@@ -117,10 +117,10 @@ describe("Kimi Responses profile", () => {
         ).toMatchObject([
           {
             text: "Inspect the ",
-            representation: "summary",
+            format: "summary",
             itemId: "rs_kimi",
           },
-          { text: "screenshot.", representation: "summary", itemId: "rs_kimi" },
+          { text: "screenshot.", format: "summary", itemId: "rs_kimi" },
         ])
         const items = events.filter((event) => event.type === "output_item")
         expect(items.map((item) => item.itemId)).toEqual(["rs_kimi", "fc_kimi"])
@@ -130,7 +130,7 @@ describe("Kimi Responses profile", () => {
             {
               type: "reasoning",
               text: "Inspect the screenshot.",
-              representation: "summary",
+              format: "summary",
             },
             {
               type: "tool_call",

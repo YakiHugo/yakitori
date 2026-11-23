@@ -210,7 +210,7 @@ it.each([
     expect(answer.response.content).toContainEqual({
       type: "reasoning",
       text: "private reasoning",
-      representation: "raw",
+      format: "raw",
     })
     expect(answer.response.native).toEqual([])
     const history = [
