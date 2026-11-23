@@ -104,6 +104,7 @@ export function ActivityBatch({
                 entry={entry}
                 workspaceRoot={workspaceRoot}
                 apiBase={apiBase}
+                separateMedia
                 onExpandedChange={(next) => {
                   if (next) setExpanded(true)
                 }}
