@@ -26,6 +26,7 @@ import { ApprovalRequests } from "./approval-bar.tsx"
 import { AgentMessageCell } from "./cells/agent-message-cell.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { HostedToolCell } from "./cells/hosted-tool-cell.tsx"
+import { ImageOutputCell } from "./cells/image-output-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
@@ -535,6 +536,8 @@ function TraceEntry({
       )
     case "hosted_tool":
       return <HostedToolCell tool={entry.tool} />
+    case "image_output":
+      return <ImageOutputCell image={entry.image} apiBase={apiBase} />
     case "permission":
       return <PermissionCell entry={entry} />
     case "turn_terminal":

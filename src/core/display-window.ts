@@ -38,6 +38,7 @@ export function isTranscriptRecord({ item }: StoredRolloutItem): boolean {
   return (
     execution.type === "agent_message" ||
     execution.type === "context_compaction" ||
+    execution.type === "image_output" ||
     (execution.type === "reasoning" && execution.text === "") ||
     ("name" in execution &&
       (execution.name === "request_user_input_async" ||

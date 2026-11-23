@@ -28,6 +28,7 @@ import { ActivityBatch } from "./activity-batch.tsx"
 import { AgentMessageCell } from "./cells/agent-message-cell.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { HostedToolCell } from "./cells/hosted-tool-cell.tsx"
+import { ImageOutputCell } from "./cells/image-output-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
@@ -467,6 +468,7 @@ const TurnBlock = memo(
           const pinned =
             entry.kind === "turn_terminal" ||
             entry.kind === "compaction" ||
+            entry.kind === "image_output" ||
             (entry.kind === "assistant" && entry.refusal) ||
             (entry.kind === "permission" && entry.state !== "resolved") ||
             (entry.kind === "tool" &&
@@ -759,6 +761,8 @@ const EntryCell = memo(function EntryCell({
       )
     case "hosted_tool":
       return <HostedToolCell tool={entry.tool} />
+    case "image_output":
+      return <ImageOutputCell image={entry.image} apiBase={apiBase} />
     case "permission":
       return <PermissionCell entry={entry} />
     case "turn_terminal":

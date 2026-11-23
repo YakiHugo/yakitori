@@ -131,6 +131,7 @@ export function executionEntryKey(entry: ExecutionEntry): string {
     case "plan":
     case "compaction":
     case "hosted_tool":
+    case "image_output":
       return entry.itemId
     case "tool":
       return entry.toolCallId
@@ -216,6 +217,7 @@ function executionEntryIdentity(entry: ExecutionEntry): string {
     case "plan":
     case "compaction":
     case "hosted_tool":
+    case "image_output":
       return `item:${entry.itemId}`
     case "tool":
       return `item:${entry.execution.itemId}`
@@ -1044,6 +1046,13 @@ function applyDurable(
       const item = event.data.item
       if (item.type === "hosted_tool")
         return upsertHostedTool(next, item, event.data.turnId)
+      if (item.type === "image_output")
+        return replaceItemEntry(next, item.itemId, {
+          kind: "image_output",
+          turnId: event.data.turnId,
+          itemId: item.itemId,
+          image: item.image,
+        })
       if (item.type === "context_compaction") {
         const { [item.itemId]: _, ...openCompactionItems } =
           next.openCompactionItems
@@ -1362,6 +1371,7 @@ function indexEntries(entries: readonly ExecutionEntry[]): {
       entry.kind === "plan" ||
       entry.kind === "compaction" ||
       entry.kind === "hosted_tool" ||
+      entry.kind === "image_output" ||
       entry.kind === "tool"
     ) {
       const itemId =

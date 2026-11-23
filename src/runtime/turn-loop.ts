@@ -1704,15 +1704,49 @@ async function executeTurnModelLoop(
           content.some(
             (block) =>
               block.type === "tool_call" ||
+              block.type === "image_output" ||
               (block.type === "text" && block.text.trim().length > 0),
           )
         )
           latency.firstUsefulOutputMs ??= elapsed()
+        const portable = content.some((block) => block.type === "image_output")
+          ? await Promise.all(
+              content.map(async (block, index): Promise<ModelContentBlock> => {
+                if (
+                  block.type !== "image_output" ||
+                  block.image.data === undefined
+                )
+                  return block
+                const assets = input.options.rolloutAssets
+                if (assets === undefined)
+                  throw new Error(
+                    "Provider image output requires rollout asset storage.",
+                  )
+                const bytes = Buffer.from(block.image.data, "base64")
+                const { reference } = await assets.saveToolFile(
+                  input.session.executionSnapshot(input.execution).metadata
+                    .rolloutId,
+                  itemId,
+                  `generated-image-${index + 1}.${block.image.mediaType.split("/")[1]}`,
+                  bytes,
+                )
+                return {
+                  type: "image_output",
+                  image: {
+                    type: "image",
+                    mediaType: block.image.mediaType,
+                    file: reference,
+                    sizeBytes: bytes.length,
+                  },
+                }
+              }),
+            )
+          : content
         const item = envelope(
           input.input.submissionId,
           {
             role: "assistant",
-            content,
+            content: portable,
             response: attempt.origin,
             ...(native === undefined ? {} : { native }),
           },
@@ -3054,6 +3088,7 @@ function* displayOutputParts(
   requestItemId: string,
 ) {
   const indexes = { assistant: 0, summary: 0, raw: 0, redacted: 0 }
+  let images = 0
   for (const block of content) {
     if (block.type === "text")
       yield {
@@ -3072,6 +3107,8 @@ function* displayOutputParts(
       }
     else if (block.type === "hosted_tool")
       yield { block, itemId: hostedToolItemId(requestItemId, block.id) }
+    else if (block.type === "image_output")
+      yield { block, itemId: `${itemId}:image:${images++}` }
   }
 }
 
@@ -3098,6 +3135,13 @@ function completedResponseItems(
     ({ block, itemId }): CompletedExecutionItem => {
       if (block.type === "hosted_tool")
         return { type: "hosted_tool", itemId, tool: block }
+      if (block.type === "image_output") {
+        if (block.image.file === undefined)
+          throw new Error(
+            "Provider image output must be stored before completion.",
+          )
+        return { type: "image_output", itemId, image: block.image }
+      }
       const time = reasoningTimes.get(itemId)
       reasoningTimes.delete(itemId)
       const durationMs =

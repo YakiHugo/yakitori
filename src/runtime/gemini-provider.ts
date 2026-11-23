@@ -14,6 +14,7 @@ import {
 } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { createGeminiGrounding } from "./gemini-citations.ts"
+import { modelImageOutput } from "./model-image-output.ts"
 import {
   GeminiIncompleteStreamError,
   GeminiProtocolError,
@@ -407,7 +408,6 @@ async function* streamGemini(
                 typeof part.thoughtSignature !== "string") ||
               (part.thought !== undefined &&
                 typeof part.thought !== "boolean") ||
-              part.inlineData !== undefined ||
               part.fileData !== undefined
             )
               throw new GeminiProtocolError(
@@ -522,6 +522,15 @@ async function* streamGemini(
                   : { toolKind: "custom", customInputFallbackKey: key }),
                 providerMetadata: metadata,
               })
+            } else if (isJsonObject(part.inlineData)) {
+              if (part.thought !== true)
+                content.push(
+                  modelImageOutput(
+                    GeminiProtocolError,
+                    part.inlineData.data,
+                    part.inlineData.mimeType,
+                  ),
+                )
             } else if (isJsonObject(part.executableCode)) {
               const code = part.executableCode.code
               codeToolId = `code-${nativeParts.length}`
