@@ -33,6 +33,10 @@ it("discloses static catalog, bearer-only US routing, long waits and no retries 
     />,
   )
   expect(screen.getByText(/static catalog/i)).toBeDefined()
+  expect(screen.getByText(/streamed responses/i)).toBeDefined()
+  expect(
+    screen.getByText(/bedrock:InvokeModelWithResponseStream/u),
+  ).toBeDefined()
   expect(
     screen.getByText(
       /bearer API key.*us-east-1.*not an AWS access key.*No IAM\/SigV4.*across US regions/i,

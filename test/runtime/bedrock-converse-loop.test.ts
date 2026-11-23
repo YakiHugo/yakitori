@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { expect, it } from "vitest"
 import { fetch as bedrockFetch } from "undici"
+import { expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { isJsonObject, type JsonObject } from "../../src/kernel/index.ts"
@@ -17,9 +17,10 @@ import {
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { bedrockReply } from "../fixtures/bedrock-eventstream.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
-it("persists buffered Converse tool rounds and resumes native history without repeating effects", async () => {
+it("persists streamed Converse tool rounds and resumes native history without repeating effects", async () => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-bedrock-loop-"))
   const model = "us.amazon.nova-2-lite-v1:0"
   const requests: JsonObject[] = []
@@ -39,21 +40,17 @@ it("persists buffered Converse tool rounds and resumes native history without re
       return
     }
     requests.push(body)
-    outgoing.writeHead(200, { "content-type": "application/json" })
+    outgoing.writeHead(200, {
+      "content-type": "application/vnd.amazon.eventstream",
+    })
     outgoing.end(
-      JSON.stringify({
-        output: {
-          message: {
-            role: "assistant",
-            content:
-              requests.length === 1
-                ? [call]
-                : [{ text: requests.length === 2 ? "Saved." : "Resumed." }],
-          },
-        },
-        stopReason: requests.length === 1 ? "tool_use" : "end_turn",
-        usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
-      }),
+      bedrockReply(
+        requests.length === 1
+          ? [call]
+          : [{ text: requests.length === 2 ? "Saved." : "Resumed." }],
+        requests.length === 1 ? "tool_use" : "end_turn",
+        { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+      ),
     )
   })
   server.listen(0, "127.0.0.1")
