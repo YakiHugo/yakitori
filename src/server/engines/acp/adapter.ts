@@ -29,12 +29,16 @@ type Session = {
   active?: { turnId: string; cancelling: boolean }
   connected: boolean
   loading?: boolean
+  controls: readonly AcpConfigControl[]
+  configuring?: boolean
+  preparingPrompt?: boolean
 }
 
 export type AcpEngineOptions = AcpCommand & {
   id: string
   onStderr?: (text: string) => void
   initializeTimeoutMs?: number
+  readAttachment?: (source: AssetSource) => Promise<Buffer>
 }
 
 /** Full-agent ACP v1 boundary; never used as a ModelProvider. */
@@ -125,11 +129,19 @@ export class AcpEngine implements EngineAdapter {
           throw new Error("External agent does not support ACP v1")
         const capabilities = object(result.agentCapabilities ?? {})
         const sessions = object(capabilities.sessionCapabilities ?? {})
+        const prompt = object(capabilities.promptCapabilities ?? {})
+        const promptCapabilities: EnginePromptCapabilities = {
+          ...(prompt.image === true ? { image: true } : {}),
+          ...(prompt.embeddedContext === true ? { embeddedContext: true } : {}),
+        }
         this.negotiated = {
           ...this.negotiated,
           load: capabilities.loadSession === true,
           resume: sessions.resume != null,
           list: sessions.list != null,
+          ...(Object.keys(promptCapabilities).length === 0
+            ? {}
+            : { prompt: promptCapabilities }),
         }
       })
       .catch((error: unknown) => {
@@ -201,6 +213,7 @@ export class AcpEngine implements EngineAdapter {
       requests: new Map(),
       permissions: new Map(),
       connected: false,
+      controls: [],
     }
     if (
       old &&
@@ -274,11 +287,74 @@ export class AcpEngine implements EngineAdapter {
     // Preserve initial modes/configuration without leaking the transport binding.
     const initialState = { ...result }
     delete initialState.sessionId
+    const update = {
+      sessionUpdate: "session_initialized",
+      ...initialState,
+      ...(this.negotiated.prompt === undefined
+        ? {}
+        : { promptCapabilities: this.negotiated.prompt }),
+    }
+    session.controls = applyAcpConfig(session.controls, update)
     this.emit(session, {
       type: "session.update",
-      update: { sessionUpdate: "session_initialized", ...initialState },
+      update,
     })
     return session.binding
+  }
+
+  async configure(
+    binding: EngineBinding,
+    configId: string,
+    value: string,
+  ): Promise<boolean> {
+    const session = this.requireSession(binding)
+    if (
+      session.active ||
+      session.configuring ||
+      session.preparingPrompt ||
+      !session.connected
+    )
+      return false
+    const control = session.controls.find((option) => option.id === configId)
+    if (
+      control === undefined ||
+      !control.options.some((option) => option.value === value)
+    )
+      return false
+    if (control.value === value) return true
+    session.configuring = true
+    const protocolParams = { sessionId: binding.engineSessionId }
+    try {
+      if (control.kind === "config") {
+        const result = object(
+          await this.requireConnection().request("session/set_config_option", {
+            ...protocolParams,
+            configId,
+            value,
+          }),
+        )
+        const update = {
+          sessionUpdate: "config_option_update",
+          configOptions: result.configOptions,
+        }
+        session.controls = applyAcpConfig(session.controls, update)
+        this.emit(session, { type: "session.update", update })
+      } else {
+        const mode = control.kind === "mode"
+        await this.requireConnection().request(
+          mode ? "session/set_mode" : "session/set_model",
+          { ...protocolParams, [mode ? "modeId" : "modelId"]: value },
+        )
+        const update = mode
+          ? { sessionUpdate: "current_mode_update", currentModeId: value }
+          : { sessionUpdate: "current_model_update", currentModelId: value }
+        session.controls = applyAcpConfig(session.controls, update)
+        this.emit(session, { type: "session.update", update })
+      }
+      return true
+    } finally {
+      delete session.configuring
+    }
   }
 
   async send(
@@ -298,21 +374,31 @@ export class AcpEngine implements EngineAdapter {
         status: "rejected",
         reason: "External session is disconnected; reconnect before sending",
       }
-    if (session.active)
+    if (session.active || session.configuring || session.preparingPrompt)
       return {
         status: "rejected",
         reason: "External agent already has an active prompt",
       }
-    if (
-      input.content &&
-      (input.content.attachments.length > 0 ||
-        (input.content.references?.length ?? 0) > 0)
-    ) {
+    let prompt: readonly Record<string, unknown>[]
+    session.preparingPrompt = true
+    try {
+      prompt = await this.preparePrompt(input)
+    } catch (error) {
       return {
         status: "rejected",
-        reason: "External ACP adapter currently accepts text prompts only",
+        reason:
+          error instanceof Error
+            ? error.message
+            : "Could not prepare the engine prompt.",
       }
+    } finally {
+      delete session.preparingPrompt
     }
+    if (!session.connected || this.closed)
+      return {
+        status: "rejected",
+        reason: "External session disconnected before sending.",
+      }
     const turnId = `acp_turn_${randomUUID()}`
     const result = { status: "accepted" as const, turnId }
     session.requests.set(input.requestId, result)
@@ -322,7 +408,7 @@ export class AcpEngine implements EngineAdapter {
     void this.requireConnection()
       .request("session/prompt", {
         sessionId: binding.engineSessionId,
-        prompt: [{ type: "text", text: input.text }],
+        prompt,
       })
       .then((value) => {
         const response = object(value)
@@ -362,6 +448,69 @@ export class AcpEngine implements EngineAdapter {
         })
       })
     return result
+  }
+
+  private async preparePrompt(
+    input: EngineInput,
+  ): Promise<readonly Record<string, unknown>[]> {
+    const content = input.content
+    if (content === undefined) return [{ type: "text", text: input.text }]
+    const capabilities = this.negotiated.prompt
+    const prompt: Record<string, unknown>[] = []
+    let offset = 0
+    for (const element of content.elements) {
+      const text = content.text.slice(offset, element.startOffset)
+      if (text) prompt.push({ type: "text", text })
+      const attachment = content.attachments[element.attachmentIndex]
+      if (
+        attachment === undefined ||
+        "url" in attachment.file ||
+        this.options.readAttachment === undefined
+      )
+        throw new Error(
+          "The attached file is unavailable to the external engine.",
+        )
+      const document = attachment.mediaType === "application/pdf"
+      if (document ? !capabilities?.embeddedContext : !capabilities?.image)
+        throw new Error(
+          document
+            ? "This engine does not accept attached documents."
+            : "This engine does not accept images.",
+        )
+      const data = (
+        await this.options.readAttachment(attachment.file)
+      ).toString("base64")
+      if (document) {
+        prompt.push({
+          type: "resource",
+          resource: {
+            uri: `yakitori://attachment/${encodeURIComponent(attachment.name)}`,
+            mimeType: attachment.mediaType,
+            blob: data,
+          },
+        })
+      } else
+        prompt.push({ type: "image", data, mimeType: attachment.mediaType })
+      offset = element.endOffset
+    }
+    const text = content.text.slice(offset)
+    if (text) prompt.push({ type: "text", text })
+    for (const reference of content.references ?? []) {
+      if (!capabilities?.embeddedContext)
+        throw new Error("This engine does not accept embedded context.")
+      prompt.push({
+        type: "resource",
+        resource: {
+          uri: `yakitori://excerpt/${encodeURIComponent(reference.id)}`,
+          mimeType: "text/plain",
+          text: [reference.comment, reference.text]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+      })
+    }
+    if (prompt.length === 0) throw new Error("The engine prompt is empty.")
+    return prompt
   }
 
   async cancel(
@@ -459,6 +608,7 @@ export class AcpEngine implements EngineAdapter {
       return
     }
     const turnId = session.active?.turnId
+    session.controls = applyAcpConfig(session.controls, update)
     this.emit(session, {
       type: "session.update",
       update,
@@ -519,3 +669,9 @@ export class AcpEngine implements EngineAdapter {
     session.permissions.clear()
   }
 }
+import {
+  applyAcpConfig,
+  type AcpConfigControl,
+} from "../../../protocol/acp-config.ts"
+import type { AssetSource } from "../../../protocol/asset-types.ts"
+import type { EnginePromptCapabilities } from "../../../protocol/engine.ts"

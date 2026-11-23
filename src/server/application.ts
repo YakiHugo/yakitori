@@ -336,6 +336,7 @@ export async function createYakitoriApplication(
       configurations: engineConfigurations,
       databasePath: join(rootDir, "external-sessions.sqlite"),
       workspace,
+      rolloutAssets: () => rolloutAssets,
       changed: (sessionId) =>
         broadcastNotification?.("engineSession/changed", { sessionId }),
     })
@@ -902,6 +903,13 @@ export async function createYakitoriApplication(
       })
     }
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
+    // Observed sessions own attachment files through their SQLite identities,
+    // so restore their leases before the native store collects orphan files.
+    const engineAssetOwners = new Set<string>()
+    for (const { id } of engineRegistry.list()) {
+      threadStore.retainEphemeralRolloutAssets(id)
+      engineAssetOwners.add(id)
+    }
     await threadStore.initialize()
     const ephemeralAssetOwners = new Map<string, () => void>()
     const draftAssetOwners = new Map<string, () => void>()
@@ -929,6 +937,13 @@ export async function createYakitoriApplication(
       },
       withMutationLease: async (rolloutId, mutate) => {
         if (
+          !engineAssetOwners.has(rolloutId) &&
+          engineRegistry.hasSession(rolloutId)
+        ) {
+          threadStore.retainEphemeralRolloutAssets(rolloutId)
+          engineAssetOwners.add(rolloutId)
+        }
+        if (
           rolloutId.startsWith("draft_") &&
           !draftAssetOwners.has(rolloutId)
         ) {
@@ -940,7 +955,8 @@ export async function createYakitoriApplication(
         return threadStore.withRolloutAssetMutation(rolloutId, async () => {
           if (
             ephemeralAssetOwners.has(rolloutId) ||
-            draftAssetOwners.has(rolloutId)
+            draftAssetOwners.has(rolloutId) ||
+            engineAssetOwners.has(rolloutId)
           )
             await mkdir(join(sessionStoreRoot, "rollouts", rolloutId), {
               recursive: true,
@@ -1548,7 +1564,10 @@ export async function createYakitoriApplication(
       broadcastNotification?.(sessionsActivityMethod, {
         activeSessionIds: runningSessionIds,
       })
-      for (const sessionId of new Set([...previousRunningSessionIds, ...running]))
+      for (const sessionId of new Set([
+        ...previousRunningSessionIds,
+        ...running,
+      ]))
         if (previousRunningSessionIds.has(sessionId) !== running.has(sessionId))
           broadcastNotification?.(sidebarChangedMethod, { sessionId })
       previousRunningSessionIds = running

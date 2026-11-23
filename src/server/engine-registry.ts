@@ -1,3 +1,4 @@
+import type { UserAttachment } from "../protocol/asset-types.ts"
 import type {
   EngineDescriptor,
   EngineRpcParams,
@@ -43,14 +44,19 @@ export class EngineRegistry {
     databasePath: string
     workspace: string
     changed: (sessionId: string) => void
+    rolloutAssets?: () => RolloutAssets
   }) {
     this.#workspace = options.workspace
     try {
       for (const config of options.configurations) {
+        const assets = options.rolloutAssets
         const adapter = createAcpEngine({
           id: config.id,
           command: config.command,
           ...(config.args === undefined ? {} : { args: [...config.args] }),
+          ...(assets === undefined
+            ? {}
+            : { readAttachment: (source) => assets().read(source) }),
         })
         this.#entries.set(config.id, {
           label: config.label,
@@ -60,6 +66,15 @@ export class EngineRegistry {
             engine: adapter,
             databasePath: options.databasePath,
             changed: options.changed,
+            ...(assets === undefined
+              ? {}
+              : {
+                  prepareAttachments: (
+                    id: string,
+                    requestId: string,
+                    attachments: readonly UserAttachment[],
+                  ) => assets().copyAttachments(id, requestId, attachments),
+                }),
           }),
         })
       }
@@ -142,10 +157,32 @@ export class EngineRegistry {
     return this.read(session.id)
   }
 
+  async inspect(engineId: string): Promise<EngineDescriptor> {
+    const entry = this.#entries.get(engineId)
+    if (!entry?.available)
+      throw new EngineRegistryError(
+        `External engine is not configured: ${engineId}`,
+      )
+    await entry.adapter.connect()
+    return {
+      id: engineId,
+      label: entry.label,
+      kind: "acp",
+      available: true,
+      capabilities: entry.adapter.capabilities,
+    }
+  }
+
   list(): readonly EngineSessionSummary[] {
     return [...this.#entries.values()]
       .flatMap(({ service }) => service.list().map(summary))
       .sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  hasSession(id: string): boolean {
+    return [...this.#entries.values()].some(({ service }) =>
+      service.hasSession(id),
+    )
   }
 
   read(id: string): EngineSessionSnapshot {
@@ -159,6 +196,7 @@ export class EngineRegistry {
     return this.#service(input.sessionId, true).send(input.sessionId, {
       requestId: input.requestId,
       text: input.text,
+      ...(input.content === undefined ? {} : { content: input.content }),
     })
   }
 
@@ -166,6 +204,14 @@ export class EngineRegistry {
     return this.#service(input.sessionId, true).cancel(
       input.sessionId,
       input.turnId,
+    )
+  }
+
+  configure(input: EngineRpcParams["engineSession/configure"]) {
+    return this.#service(input.sessionId, true).configure(
+      input.sessionId,
+      input.configId,
+      input.value,
     )
   }
 
@@ -196,7 +242,7 @@ export class EngineRegistry {
 
   #service(id: string, requireAvailable = false): ExternalSessionService {
     for (const { service, available, adapter } of this.#entries.values()) {
-      if (!service.read(id)) continue
+      if (!service.hasSession(id)) continue
       if (requireAvailable && !available)
         throw new EngineRegistryError(
           `Engine ${adapter.id} is not configured. Its observed history is still available.`,
@@ -211,3 +257,4 @@ function summary(session: ExternalAppSession): EngineSessionSummary {
   const { binding, ...metadata } = session
   return { ...metadata, engineId: binding.engineId, cwd: binding.cwd }
 }
+import type { RolloutAssets } from "../core/rollout-assets.ts"

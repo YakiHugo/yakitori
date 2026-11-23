@@ -1,4 +1,5 @@
 import type { EventMetadata, ModelSelection } from "../../protocol/events.ts"
+import type { EnginePromptCapabilities } from "../../protocol/engine.ts"
 import type { InputContent } from "../../protocol/user-input.ts"
 
 // An engine owns the complete agent loop and its context. Model providers are
@@ -18,6 +19,7 @@ export type EngineCapabilities = Readonly<{
   steer: boolean
   queue: boolean
   subagents: boolean
+  prompt?: EnginePromptCapabilities
 }>
 
 export type EngineInput = Readonly<{
@@ -102,6 +104,11 @@ export interface EngineAdapter {
   respondPermission(
     binding: EngineBinding,
     response: EnginePermissionResponse,
+  ): Promise<boolean>
+  configure?(
+    binding: EngineBinding,
+    configId: string,
+    value: string,
   ): Promise<boolean>
   subscribe(
     binding: EngineBinding,

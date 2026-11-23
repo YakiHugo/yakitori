@@ -178,6 +178,7 @@ export function ComposerSurface({
   placeholder = "Ask anything",
   className = "conversation-composer-footer pt-3 pb-3",
   allowCommands = true,
+  engineCommands = [],
   allowAttachments = true,
   sendLabel = "Send",
   stopLabel = "Interrupt",
@@ -226,6 +227,9 @@ export function ComposerSurface({
   placeholder?: string
   className?: string
   allowCommands?: boolean
+  engineCommands?:
+    | readonly Readonly<{ name: string; description: string }>[]
+    | undefined
   allowAttachments?: boolean
   sendLabel?: string
   stopLabel?: string
@@ -399,16 +403,24 @@ export function ComposerSurface({
           }),
         )
       : [
-          ...(allowCommands &&
-          trigger === "/" &&
+          ...(trigger === "/" &&
           tokenStart === 0 &&
           draft.slice(tokenEnd).replaceAll("\uFFFC", "").trim().length === 0
-            ? SLASH_COMMANDS.filter((command) =>
+            ? (allowCommands
+                ? SLASH_COMMANDS.map((command) => ({
+                    ...command,
+                    kind: "command" as const,
+                  }))
+                : engineCommands.map((command) => ({
+                    ...command,
+                    kind: "engine_command" as const,
+                  }))
+              ).filter((command) =>
                 command.name
                   .slice(1)
                   .toLowerCase()
                   .startsWith(query.toLowerCase()),
-              ).map((command) => ({ ...command, kind: "command" as const }))
+              )
             : []),
           ...matchingSkills,
         ]
@@ -416,6 +428,7 @@ export function ComposerSurface({
     token !== null &&
     !hasSelection &&
     dismissedQuery !== queryKey &&
+    (trigger !== "/" || allowCommands || engineCommands.length > 0) &&
     (trigger !== "@" || searchFiles !== undefined)
   const activeHighlight =
     highlight?.query === queryKey
@@ -626,6 +639,8 @@ export function ComposerSurface({
     setDismissedQuery(queryKey)
     setHighlight(undefined)
     if (item.kind === "command") runSlashCommand(item)
+    else if (item.kind === "engine_command")
+      editorRef.current?.replaceRange(tokenStart, tokenEnd, `${item.name} `)
     else if (item.kind === "file")
       editorRef.current?.replaceRange(
         tokenStart,

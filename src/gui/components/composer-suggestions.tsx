@@ -1,4 +1,10 @@
-import { FileText, Folder, type LucideIcon, Package } from "lucide-react"
+import {
+  FileText,
+  Folder,
+  type LucideIcon,
+  Package,
+  Terminal,
+} from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
 import type { ApiSkillSummary } from "../../protocol/application.ts"
 
@@ -9,6 +15,7 @@ export type ComposerSuggestion =
       description: string
       icon: LucideIcon
     }>
+  | Readonly<{ kind: "engine_command"; name: string; description: string }>
   | Readonly<{
       kind: "skill"
       name: string
@@ -127,6 +134,8 @@ export function ComposerSuggestions({
                 <Folder className="size-[14px]" />
               ) : item.kind === "file" ? (
                 <FileText className="size-[14px]" />
+              ) : item.kind === "engine_command" ? (
+                <Terminal className="size-[14px]" />
               ) : (
                 <item.icon className="size-[14px]" />
               )}

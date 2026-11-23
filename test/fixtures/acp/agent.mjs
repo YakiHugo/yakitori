@@ -14,6 +14,20 @@ const text = (sessionId, value) =>
   })
 let prompt
 let pendingPermission
+let effort = "fast"
+const configOptions = () => [
+  {
+    type: "select",
+    id: "thought_level",
+    name: "Reasoning level",
+    category: "thought_level",
+    currentValue: effort,
+    options: [
+      { value: "fast", name: "Fast" },
+      { value: "deep", name: "Deep" },
+    ],
+  },
+]
 createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line)
   if (m.method === "initialize") {
@@ -27,6 +41,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       protocolVersion: mode === "v2" ? 2 : 1,
       agentCapabilities: {
         ...(mode === "load" ? { loadSession: true } : {}),
+        ...(mode === "config"
+          ? { promptCapabilities: { image: true, embeddedContext: true } }
+          : {}),
         sessionCapabilities: mode === "resume" ? { resume: {}, list: {} } : {},
       },
       authMethods: [],
@@ -34,9 +51,24 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (m.method === "session/new") {
     update("external-session", {
       sessionUpdate: "available_commands_update",
-      availableCommands: [],
+      availableCommands:
+        mode === "config"
+          ? [{ name: "status", description: "Show engine status" }]
+          : [],
     })
-    reply(m.id, { sessionId: "external-session" })
+    reply(m.id, {
+      sessionId: "external-session",
+      ...(mode === "config" ? { configOptions: configOptions() } : {}),
+    })
+  } else if (m.method === "session/set_config_option") {
+    if (
+      mode !== "config" ||
+      m.params.configId !== "thought_level" ||
+      m.params.value !== "deep"
+    )
+      process.exit(17)
+    effort = m.params.value
+    reply(m.id, { configOptions: configOptions() })
   } else if (m.method === "session/resume") {
     if (mode !== "resume") process.exit(13)
     reply(m.id, {})
@@ -47,6 +79,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (m.method === "session/prompt") {
     prompt = m
     const content = m.params.prompt[0].text
+    if (content?.trim() === "Check the image") {
+      const image = m.params.prompt.find((part) => part.type === "image")
+      if (
+        mode !== "config" ||
+        image?.mimeType !== "image/png" ||
+        typeof image.data !== "string" ||
+        !image.data.startsWith("iVBORw0KGgo")
+      )
+        process.exit(18)
+      text(m.params.sessionId, "Engine received the image.")
+      reply(m.id, { stopReason: "end_turn" })
+      return
+    }
     if (content === "die") return process.exit(3)
     if (content.startsWith("descendant:")) {
       const [, pipes, heartbeat] = content.split(":")
