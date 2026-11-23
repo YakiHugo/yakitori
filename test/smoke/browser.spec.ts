@@ -1457,7 +1457,6 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
     if (pdf?.mediaType !== "application/pdf")
       throw new Error("Browser PDF fixture import failed")
     await runProviderFlow(page, testInfo, { browserPdf: pdf })
-    await runExternalEngineFlow(page)
     expect(errors).toEqual([])
   } finally {
     try {
@@ -1475,6 +1474,26 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
         await environment.cleanup()
       }
     }
+  }
+})
+
+test("external engines render observed activity and permissions through reloads", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await runExternalEngineFlow(page)
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
   }
 })
 

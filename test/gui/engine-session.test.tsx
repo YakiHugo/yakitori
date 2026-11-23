@@ -12,7 +12,7 @@ import {
   EngineConversation,
   EngineSelector,
 } from "../../src/gui/components/engine-session.tsx"
-import { projectEngineSession } from "../../src/gui/engine-session-view.ts"
+import { projectEngineSession } from "../../src/shared/acp-execution-view.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
 import { textInputDraft } from "../../src/gui/input-draft.ts"
 import {
@@ -181,22 +181,23 @@ describe("external engine workspace", () => {
     expect(useEngineStore.getState().draft.text).toBe("")
   })
 
-  it("projects the accepted input before an already completed answer and ignores load replay", () => {
+  it("projects the admission before an earlier observed answer without duplicating persisted chunks", () => {
     const view = projectEngineSession(
       snapshot([
         { type: "turn.status", turnId: "turn", status: "running" },
+        {
+          type: "session.update",
+          turnId: "turn",
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "answer" },
+          },
+        },
         {
           type: "message.delta",
           turnId: "turn",
           channel: "assistant",
           text: "answer",
-        },
-        permission,
-        {
-          type: "session.update",
-          turnId: "turn",
-          replayed: true,
-          update: { sessionUpdate: "tool_call", title: "Old replay" },
         },
         { type: "turn.status", turnId: "turn", status: "completed" },
         {
@@ -207,15 +208,9 @@ describe("external engine workspace", () => {
         },
       ]),
     )
-    expect(view.turns).toEqual([
-      {
-        id: "turn",
-        input: "question",
-        assistant: "answer",
-        reasoning: "",
-        updates: [],
-        status: "completed",
-      },
+    expect(view.executionView.entries).toMatchObject([
+      { kind: "user_input", text: "question" },
+      { kind: "assistant", text: "answer", status: "completed" },
     ])
     expect(view.permissions).toEqual([])
     expect(view.activeTurnId).toBeUndefined()
@@ -245,7 +240,10 @@ describe("external engine workspace", () => {
         : true,
     )
     render(<EngineConversation />)
-    expect(screen.getByText(/printf safe/)).toBeTruthy()
+    expect(
+      screen.getByRole("group", { name: "Permission · Run command" })
+        .textContent,
+    ).toContain("printf safe")
     expect(
       screen.queryByRole("button", { name: "Select model and effort" }),
     ).toBeNull()
@@ -258,6 +256,132 @@ describe("external engine workspace", () => {
       optionId: "allow",
     })
     expect(screen.queryByRole("button", { name: "Allow once" })).toBeNull()
+  })
+
+  it("keeps ACP text, tools, reasoning, and plans in order while a late tool update follows the next turn", () => {
+    const update = (
+      fields: Record<string, unknown>,
+      turnId = "turn",
+    ): EngineEvent => ({
+      type: "session.update",
+      turnId,
+      update: fields,
+    })
+    const chunk = (channel: string, text: string) =>
+      update({ sessionUpdate: channel, content: { type: "text", text } })
+    const view = projectEngineSession(
+      snapshot([
+        {
+          type: "input.submitted",
+          requestId: "one",
+          turnId: "turn",
+          text: "Check a file",
+        },
+        { type: "turn.status", turnId: "turn", status: "running" },
+        chunk("agent_message_chunk", "Starting. "),
+        update({
+          sessionUpdate: "tool_call",
+          toolCallId: "edit",
+          title: "Edit fixture",
+          kind: "edit",
+          status: "in_progress",
+        }),
+        chunk("agent_thought_chunk", "Check the change."),
+        update({
+          sessionUpdate: "plan",
+          entries: [{ content: "Read the fixture", status: "completed" }],
+        }),
+        chunk("agent_message_chunk", "The check is ready."),
+        { type: "turn.status", turnId: "turn", status: "completed" },
+        { type: "turn.status", turnId: "later", status: "running" },
+        update(
+          {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "edit",
+            status: "completed",
+            content: [
+              {
+                type: "diff",
+                path: "fixture.txt",
+                oldText: "old\n",
+                newText: "new\n",
+              },
+            ],
+          },
+          "later",
+        ),
+      ]),
+    )
+    expect(view.executionView.entries).toMatchObject([
+      { kind: "user_input", text: "Check a file" },
+      { kind: "assistant", text: "Starting. " },
+      {
+        kind: "tool",
+        origin: "engine",
+        toolCallId: "acp:edit",
+        turnId: "turn",
+        state: "completed",
+        execution: {
+          type: "file_change",
+          changes: [
+            {
+              path: "fixture.txt",
+              diff: { text: expect.stringContaining("-old\n+new") },
+            },
+          ],
+        },
+      },
+      { kind: "reasoning", text: "Check the change.", representation: "raw" },
+      {
+        kind: "plan",
+        plan: { plan: [{ step: "Read the fixture", status: "completed" }] },
+      },
+      { kind: "assistant", text: "The check is ready." },
+    ])
+    expect(view.activeTurnId).toBe("later")
+  })
+
+  it("adds missing loaded history and keeps the already observed turns once", () => {
+    const replay = (channel: string, text: string): EngineEvent => ({
+      type: "session.update",
+      replayed: true,
+      update: { sessionUpdate: channel, content: { type: "text", text } },
+    })
+    const loaded: EngineEvent[] = [
+      replay("user_message_chunk", "Older prompt"),
+      replay("agent_message_chunk", "Older answer"),
+      replay("user_message_chunk", "Observed prompt"),
+      replay("agent_message_chunk", "Observed answer"),
+      {
+        type: "session.update",
+        update: { sessionUpdate: "session_initialized" },
+      },
+    ]
+    const view = projectEngineSession(
+      snapshot([
+        {
+          type: "input.submitted",
+          requestId: "request",
+          turnId: "observed",
+          text: "Observed prompt",
+        },
+        {
+          type: "message.delta",
+          turnId: "observed",
+          channel: "assistant",
+          text: "Observed answer",
+        },
+        { type: "turn.status", turnId: "observed", status: "completed" },
+        ...loaded,
+        ...loaded,
+      ]),
+    )
+    expect(view.executionView.entries).toMatchObject([
+      { kind: "user_input", text: "Older prompt" },
+      { kind: "assistant", text: "Older answer", status: "completed" },
+      { kind: "user_input", text: "Observed prompt", inputId: "request" },
+      { kind: "assistant", text: "Observed answer" },
+    ])
   })
 
   it("keeps the turn active after cancel acknowledgement until a terminal snapshot", async () => {

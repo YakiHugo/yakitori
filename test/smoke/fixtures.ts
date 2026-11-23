@@ -1744,18 +1744,31 @@ export async function runExternalEngineFlow(page: Page): Promise<void> {
   ).toHaveCount(0)
   await composer.fill("cancel")
   await page.getByRole("button", { name: "Send", exact: true }).click()
-  await expect(responses).toHaveCount(2)
+  const current = page.getByRole("region", {
+    name: "Current response",
+    exact: true,
+  })
+  await expect(current.getByText("first", { exact: true })).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Interrupt", exact: true }),
   ).toBeVisible()
   await page.reload()
-  await expect(responses).toHaveCount(2)
+  await expect(current.getByText("first", { exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Interrupt", exact: true }).click()
+  await expect(responses).toHaveCount(2)
+  await responses
+    .last()
+    .getByRole("button", { name: /^Worked for/ })
+    .click()
   await expect(responses.last()).toContainText("cancellation tail")
   await expect(
     page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
   ).toHaveCount(0)
   await page.reload()
+  await responses
+    .last()
+    .getByRole("button", { name: /^Worked for/ })
+    .click()
   await expect(responses.last()).toContainText("cancellation tail")
   await expect(
     page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
@@ -1763,4 +1776,23 @@ export async function runExternalEngineFlow(page: Page): Promise<void> {
   await expect(
     page.getByRole("button", { name: "Select model and effort", exact: true }),
   ).toHaveCount(0)
+  await composer.fill("structured")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await expect(
+    responses.last().getByText("The ACP fixture is ready.", { exact: true }),
+  ).toBeVisible()
+  await responses
+    .last()
+    .getByRole("button", { name: /^Worked for/ })
+    .click()
+  await expect(
+    responses.last().getByRole("button", { name: /Edit.*fixture.txt/ }),
+  ).toBeVisible()
+  await responses
+    .last()
+    .getByRole("button", { name: "Updated plan · 1/1 completed" })
+    .click()
+  await expect(
+    responses.last().getByText("Check the fixture", { exact: true }),
+  ).toBeVisible()
 }

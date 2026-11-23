@@ -5,7 +5,7 @@ import type {
   EngineSessionSummary,
 } from "../../protocol/engine.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
-import { projectEngineSession } from "../engine-session-view.ts"
+import { projectEngineSession } from "../../shared/acp-execution-view.ts"
 import {
   hasInputDraft,
   sameInputDraft,

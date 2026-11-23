@@ -165,9 +165,7 @@ it("runs configured ACP through production RPC, persists observed history, and r
   })
   expect(snapshot.history).toBe("observed")
   expect(
-    snapshot.events.some(
-      ({ event }) => event.type === "message.delta" && event.text === "first",
-    ),
+    snapshot.events.some(({ event }) => observedText(event, "first")),
   ).toBe(true)
   expect(rpc.notifications).toContainEqual({ sessionId })
   expect(JSON.stringify(snapshot)).not.toContain("external-session")
@@ -420,9 +418,9 @@ it.each([
       expect(
         snapshot.events.some(
           ({ event }) =>
-            event.type === "message.delta" &&
+            event.type === "session.update" &&
             event.turnId === accepted.turnId &&
-            event.text === "first",
+            observedText(event, "first"),
         ),
       ).toBe(true)
     }
@@ -487,13 +485,13 @@ it.each([
         ),
       ).toBe(true)
       expect(
-        events.some(
-          ({ event }) =>
-            event.type === "message.delta" &&
-            event.text ===
-              (control === "permission"
-                ? "opaque:allow/once"
-                : "cancellation tail"),
+        events.some(({ event }) =>
+          observedText(
+            event,
+            control === "permission"
+              ? "opaque:allow/once"
+              : "cancellation tail",
+          ),
         ),
       ).toBe(true)
     })
@@ -513,3 +511,22 @@ it.each([
     database.close()
   }
 }, 20_000)
+
+type ObservedEvent = EngineSessionSnapshot["events"][number]["event"]
+
+function observedText(event: ObservedEvent, text: string): boolean {
+  if (
+    event.type !== "session.update" ||
+    event.update.sessionUpdate !== "agent_message_chunk"
+  )
+    return false
+  const content = event.update.content
+  return (
+    typeof content === "object" &&
+    content !== null &&
+    "type" in content &&
+    content.type === "text" &&
+    "text" in content &&
+    content.text === text
+  )
+}
