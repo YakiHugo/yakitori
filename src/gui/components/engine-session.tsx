@@ -164,6 +164,7 @@ export function EngineConversation() {
             <ConversationScopeContext.Provider
               value={{
                 sessionId: state.sessionId,
+                engineId: state.engineId,
                 threadId: state.sessionId ?? "",
                 apiBase,
                 workspaceRoot: state.snapshot?.session.cwd,

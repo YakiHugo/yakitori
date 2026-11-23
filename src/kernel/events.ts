@@ -370,9 +370,10 @@ function isModelOutputSource(value: unknown): boolean {
   return (
     value === undefined ||
     (isRecord(value) &&
-      onlyKeys(value, ["callId", "itemId"]) &&
+      onlyKeys(value, ["callId", "itemId", "provider"]) &&
       isString(value.callId) &&
-      isString(value.itemId))
+      isString(value.itemId) &&
+      (value.provider === undefined || isString(value.provider)))
   )
 }
 
@@ -428,8 +429,9 @@ function isStartedExecutionItem(value: unknown): value is StartedExecutionItem {
   if (!isRecord(value)) return false
   if (value.type === "hosted_tool")
     return (
-      onlyKeys(value, ["type", "itemId", "tool"]) &&
+      onlyKeys(value, ["type", "itemId", "provider", "tool"]) &&
       isString(value.itemId) &&
+      (value.provider === undefined || isString(value.provider)) &&
       isHostedToolBlock(value.tool)
     )
   if (value.type === "context_compaction") {
@@ -1446,4 +1448,5 @@ function isModelDocumentBlock(value: unknown): value is ModelDocumentBlock {
     (value.data === undefined || isString(value.data))
   )
 }
+
 import { isHostedToolBlock } from "../protocol/hosted-tool.ts"

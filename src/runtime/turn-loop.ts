@@ -2555,6 +2555,9 @@ async function consumeModelStream(input: {
             type: "hosted_tool",
             itemId,
             tool: event.tool,
+            ...(attempt === undefined
+              ? {}
+              : { provider: attempt.origin.provider }),
           })
         }
         continue
@@ -2583,6 +2586,7 @@ async function consumeModelStream(input: {
                   source: {
                     callId: attempt.origin.callId,
                     itemId: parentItemId,
+                    provider: attempt.origin.provider,
                   },
                 }),
             ...(event.type === "delta" && event.purpose !== undefined
@@ -3129,12 +3133,18 @@ function completedResponseItems(
       : {
           callId: response.item.response.callId,
           itemId: response.id,
+          provider: response.item.response.provider,
         }
   return Array.from(
     displayOutputParts(response.id, response.item.content, requestItemId),
     ({ block, itemId }): CompletedExecutionItem => {
       if (block.type === "hosted_tool")
-        return { type: "hosted_tool", itemId, tool: block }
+        return {
+          type: "hosted_tool",
+          itemId,
+          tool: block,
+          ...(source === undefined ? {} : { provider: source.provider }),
+        }
       if (block.type === "image_output") {
         if (block.image.file === undefined)
           throw new Error(

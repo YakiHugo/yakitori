@@ -5,6 +5,7 @@ import { selectCurrentThreadId, useAppStore } from "../store/app-store.ts"
 // Containers own lifecycle and capabilities; message renderers share this scope.
 export type ConversationScope = {
   sessionId: string | undefined
+  engineId?: string | undefined
   threadId: string
   apiBase: string
   workspaceRoot: string | undefined

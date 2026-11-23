@@ -307,6 +307,7 @@ export type ContextCompactionCompletedItem = Readonly<{
 export type HostedToolExecutionItem = Readonly<{
   type: "hosted_tool"
   itemId: string
+  provider?: string
   tool: HostedToolBlock
 }>
 export type ImageOutputExecutionItem = Readonly<{
@@ -447,6 +448,7 @@ export type AppSessionEventEnvelope =
         type: "session.cursor"
         data: Readonly<Record<string, never>>
       }>)
+
 import type { HostedToolBlock } from "./hosted-tool.ts"
 import type { ModelImageBlock } from "./conversation.ts"
 import type { AssetSource } from "./asset-types.ts"

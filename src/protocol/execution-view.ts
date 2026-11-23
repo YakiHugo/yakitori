@@ -41,6 +41,7 @@ export type ExecutionEntry =
       kind: "hosted_tool"
       itemId: string
       turnId: string
+      provider?: string
       tool: HostedToolBlock
     }>
   | Readonly<{

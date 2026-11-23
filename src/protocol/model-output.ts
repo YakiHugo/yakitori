@@ -4,6 +4,7 @@ export type ReasoningRepresentation = "summary" | "raw" | "redacted"
 export type ModelOutputSource = Readonly<{
   callId: string
   itemId: string
+  provider?: string
 }>
 
 export type ModelOutputPresentation = Readonly<{
