@@ -1,20 +1,14 @@
-import { supportsGeminiToolImages } from "./gemini-models.ts"
-import { inspectImageBytes } from "../kernel/image-metadata.ts"
-import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
-import {
-  JsonRequestBudgetError,
-  jsonRequestByteLength,
-} from "./json-request-budget.ts"
 import { randomUUID } from "node:crypto"
-import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
+import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import {
   isJsonObject,
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { createGeminiGrounding } from "./gemini-citations.ts"
-import { modelImageOutput } from "./model-image-output.ts"
+import { supportsGeminiToolImages } from "./gemini-models.ts"
 import {
   GeminiIncompleteStreamError,
   GeminiProtocolError,
@@ -22,10 +16,14 @@ import {
   readGeminiError,
 } from "./gemini-transport.ts"
 import {
+  JsonRequestBudgetError,
+  jsonRequestByteLength,
+} from "./json-request-budget.ts"
+import {
   flattenModelSystem,
   type ModelContentBlock,
-  type ModelImageBlock,
   type ModelFailureStage,
+  type ModelImageBlock,
   type ModelMessage,
   type ModelRequest,
   ModelStopReason,
@@ -41,6 +39,7 @@ import {
   providerErrorMessage,
 } from "./model-failure.ts"
 import { groupModelResponses } from "./model-history.ts"
+import { modelImageOutput } from "./model-image-output.ts"
 import {
   ModelHistoryScopeError,
   modelNativeItems,
@@ -59,6 +58,7 @@ import {
   supportsGeminiToolPdf,
   supportsGeminiUserPdf,
 } from "./native-pdf-capabilities.ts"
+import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
 import { parseRetryAfterMs } from "./retry-after.ts"
 
 export type GeminiProviderOptions = Readonly<{
@@ -331,6 +331,7 @@ async function* streamGemini(
     const itemId = `gemini_${randomUUID()}`
     let codeToolId: string | undefined
     let groundingTool: HostedToolBlock | undefined
+    const urlContextTools = new Map<string, HostedToolBlock>()
     let finishReason: string | undefined
     let blocked = false
     for await (const payload of geminiSse(response.body)) {
@@ -630,6 +631,47 @@ async function* streamGemini(
             }
           }
         }
+        if (
+          isJsonObject(candidate.urlContextMetadata) &&
+          Array.isArray(candidate.urlContextMetadata.urlMetadata)
+        ) {
+          for (const result of candidate.urlContextMetadata.urlMetadata) {
+            if (
+              !isJsonObject(result) ||
+              typeof result.retrievedUrl !== "string" ||
+              result.retrievedUrl.length === 0 ||
+              typeof result.urlRetrievalStatus !== "string"
+            )
+              continue
+            const url = result.retrievedUrl
+            const before = urlContextTools.get(url)
+            const resultStatus = result.urlRetrievalStatus
+            const tool: HostedToolBlock = {
+              type: "hosted_tool",
+              id: before?.id ?? `url-context-${urlContextTools.size}`,
+              kind: "web_fetch",
+              status:
+                resultStatus === "URL_RETRIEVAL_STATUS_SUCCESS"
+                  ? "completed"
+                  : resultStatus === "URL_RETRIEVAL_STATUS_UNSPECIFIED"
+                    ? "running"
+                    : "failed",
+              label: url,
+              ...(resultStatus === "URL_RETRIEVAL_STATUS_SUCCESS" ||
+              resultStatus === "URL_RETRIEVAL_STATUS_UNSPECIFIED"
+                ? {}
+                : {
+                    detail: resultStatus
+                      .replace(/^URL_RETRIEVAL_STATUS_/u, "")
+                      .toLowerCase(),
+                  }),
+            }
+            if (before?.status === tool.status && before.detail === tool.detail)
+              continue
+            urlContextTools.set(url, tool)
+            yield { type: "hosted_tool", tool }
+          }
+        }
         if (candidate.finishReason !== undefined) {
           if (
             typeof candidate.finishReason !== "string" ||
@@ -666,6 +708,7 @@ async function* streamGemini(
       )
     grounding.annotate(content)
     if (groundingTool !== undefined) content.push(groundingTool)
+    content.push(...urlContextTools.values())
     // Only a natural completed response may execute functions. A truncated or
     // filtered response never commits a possibly incomplete tool batch.
     const incompleteToolCalls =

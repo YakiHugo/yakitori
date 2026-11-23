@@ -1,19 +1,3 @@
-import {
-  hasOpenAIImagePreparation,
-  openAIVisionPolicy,
-} from "./openai-vision-models.ts"
-import {
-  CODEX_IMAGE_REQUEST_SAFETY_BYTES,
-  CodexImageRequestSizeError,
-  prepareCodexImage,
-  validateCodexImageRequest,
-} from "./codex-image-policy.ts"
-import {
-  OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
-  OpenAIImageRequestSizeError,
-  prepareOpenAIImage,
-  validateOpenAIImageRequest,
-} from "./openai-image-policy.ts"
 import OpenAI, { type ClientOptions, toFile } from "openai"
 import type {
   Tool as OpenAITool,
@@ -28,25 +12,31 @@ import { isJsonObject, isJsonValue } from "../kernel/index.ts"
 import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import {
-  JsonRequestBudgetError,
-  jsonRequestByteLength,
-} from "./json-request-budget.ts"
-import {
-  prepareGrokImage,
-  GROK_IMAGE_REQUEST_SAFETY_BYTES,
-  GrokImageRequestSizeError,
-} from "./grok-image-policy.ts"
-import { prepareKimiImageBytes } from "./kimi-image-policy.ts"
-import {
   requireChatGPTPlanNamespace,
   toChatGPTPlanRequest,
 } from "./chatgpt-plan-request.ts"
+import {
+  CODEX_IMAGE_REQUEST_SAFETY_BYTES,
+  CodexImageRequestSizeError,
+  prepareCodexImage,
+  validateCodexImageRequest,
+} from "./codex-image-policy.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
+import {
+  GROK_IMAGE_REQUEST_SAFETY_BYTES,
+  GrokImageRequestSizeError,
+  prepareGrokImage,
+} from "./grok-image-policy.ts"
+import {
+  JsonRequestBudgetError,
+  jsonRequestByteLength,
+} from "./json-request-budget.ts"
+import { prepareKimiImageBytes } from "./kimi-image-policy.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
-  type ModelMessage,
   type ModelImageBlock,
+  type ModelMessage,
   type ModelRequest,
   type ModelResponse,
   ModelStopReason,
@@ -57,13 +47,13 @@ import {
   type StreamFn,
 } from "./model.ts"
 import { resolveModelWireEffort } from "./model-catalog.ts"
+import { openAICitations } from "./model-citations.ts"
+import { cleanModelTextStream } from "./model-control-tokens.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
   providerErrorMessage,
 } from "./model-failure.ts"
-import { openAICitations } from "./model-citations.ts"
-import { cleanModelTextStream } from "./model-control-tokens.ts"
 import { modelImageOutput } from "./model-image-output.ts"
 import {
   ModelHistoryScopeError,
@@ -79,7 +69,18 @@ import {
   openAIToolChoice,
   validateModelRequestControls,
 } from "./model-request-controls.ts"
+import { createContainerImageReader } from "./openai-container-images.ts"
+import {
+  OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
+  OpenAIImageRequestSizeError,
+  prepareOpenAIImage,
+  validateOpenAIImageRequest,
+} from "./openai-image-policy.ts"
 import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
+import {
+  hasOpenAIImagePreparation,
+  openAIVisionPolicy,
+} from "./openai-vision-models.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
@@ -244,6 +245,12 @@ async function* streamOpenAIWire(
   let providerRequestId: string | undefined
   let failureStage: "connect" | "response_body" = "connect"
   let terminalUsage: ModelResponse["usage"]
+  const containerImages =
+    responseProfile === "openai" &&
+    requestProfile === undefined &&
+    request.compaction === undefined
+      ? createContainerImageReader(client, request.signal)
+      : undefined
   let terminalEvent:
     | Extract<ModelStreamEvent, { type: "response" | "failure" }>
     | undefined
@@ -978,6 +985,7 @@ async function* streamOpenAIWire(
                 ))
             )
               break
+            await containerImages?.load(item)
             const result = fromOpenAIOutput(
               [item],
               customFallbackKeys,
@@ -986,6 +994,7 @@ async function* streamOpenAIWire(
               request.target.model,
               new Set([outputItemId(item)].filter((id) => id !== undefined)),
               rawReasoning,
+              containerImages?.byItem,
             )
             if (result.incompleteToolCalls) break
             nextOutputIndex += 1
@@ -1134,6 +1143,8 @@ async function* streamOpenAIWire(
         if (failure !== undefined) {
           terminalEvent = failure
         } else {
+          if (containerImages !== undefined)
+            for (const item of response.output) await containerImages.load(item)
           terminalEvent = {
             type: "response",
             response: fromOpenAIResponse(
@@ -1145,6 +1156,7 @@ async function* streamOpenAIWire(
               completedIds,
               responseProfile,
               rawReasoning,
+              containerImages?.byItem,
             ),
           }
         }
@@ -1663,6 +1675,7 @@ export function fromOpenAIResponse(
   completedItemIds: ReadonlySet<string> = new Set(),
   responseProfile: OpenAIResponseProfile = "openai",
   rawReasoning?: ReadonlyMap<string, { parts: ReadonlyMap<number, string> }>,
+  containerImages?: ReturnType<typeof createContainerImageReader>["byItem"],
 ): ModelResponse {
   if (response.status === "cancelled") {
     throw new OpenAIProtocolError(
@@ -1720,6 +1733,7 @@ export function fromOpenAIResponse(
         )
       : completedItemIds,
     rawReasoning,
+    containerImages,
   )
   if (
     result.incompleteToolCalls &&
@@ -1865,6 +1879,7 @@ function fromOpenAIOutput(
   model: string,
   completedItemIds: ReadonlySet<string>,
   rawReasoning?: ReadonlyMap<string, { parts: ReadonlyMap<number, string> }>,
+  containerImages?: ReturnType<typeof createContainerImageReader>["byItem"],
 ): {
   content: ModelContentBlock[]
   incompleteToolCalls: boolean
@@ -2033,6 +2048,7 @@ function fromOpenAIOutput(
             : {}),
         })
       }
+      content.push(...(containerImages?.get(item.id) ?? []))
       continue
     }
     if (item.type === "custom_tool_call") {
@@ -2077,6 +2093,8 @@ function fromOpenAIOutput(
     const hosted = responsesHostedTool(item)
     if (hosted !== undefined) {
       content.push(hosted)
+      if (item.type === "code_interpreter_call")
+        content.push(...(containerImages?.get(item.id) ?? []))
       if (
         item.type === "image_generation_call" &&
         item.status === "completed" &&
@@ -2361,4 +2379,5 @@ function failureKindForProviderCode(
 function abortedResponse(usage?: ModelResponse["usage"]): ModelStreamEvent {
   return { type: "cancelled", ...(usage === undefined ? {} : { usage }) }
 }
+
 import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
