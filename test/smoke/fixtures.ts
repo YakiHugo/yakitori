@@ -1063,6 +1063,15 @@ export async function runProviderFlow(
         .filter({ hasText: "Mock[1][2] provider reply" })
       const activity = response.getByRole("button", { name: /^Worked for/ })
       await expect(activity).toHaveAttribute("aria-expanded", "false")
+      const image = response
+        .getByRole("region", { name: "Tool attachments" })
+        .getByRole("img")
+      await expect(image).toBeVisible()
+      await expect
+        .poll(() =>
+          image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+        )
+        .toBeGreaterThan(0)
       await activity.click()
       await response
         .getByRole("button", { name: /^View image smoke\.png/ })
@@ -1074,18 +1083,7 @@ export async function runProviderFlow(
       await expect(
         parts.getByText("Read image: smoke.png", { exact: true }),
       ).toBeVisible()
-      const image = parts.getByRole("img")
-      await expect(image).toBeVisible()
-      await expect
-        .poll(() =>
-          image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
-        )
-        .toBeGreaterThan(0)
-      expect(
-        await parts
-          .locator(":scope > *")
-          .evaluateAll((nodes) => nodes.map((node) => node.tagName)),
-      ).toEqual(["PRE", "IMG"])
+      await expect(response.getByRole("img")).toHaveCount(1)
     }
     await checkToolImage()
     const sources = page.getByRole("region", { name: "Sources", exact: true })
@@ -1367,7 +1365,7 @@ async function runOrderedInputFlow(
   testInfo: TestInfo,
 ): Promise<void> {
   const toolImage = page
-    .getByRole("region", { name: "Ordered tool result", exact: true })
+    .getByRole("region", { name: "Tool attachments", exact: true })
     .getByRole("img")
   const sourceUrl = await toolImage.getAttribute("src")
   if (sourceUrl === null) throw new Error("Smoke tool image URL is missing.")
