@@ -1,6 +1,7 @@
 import { ImageOff, LoaderCircle, PencilLine, Target } from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import { assetSourceKey } from "../../../protocol/asset-types.ts"
+import type { ReplayedInputPart } from "../../../protocol/execution-view.ts"
 import {
   inputContent,
   inputContentAttachments,
@@ -21,12 +22,14 @@ import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { ContextExcerpts } from "../context-excerpts.tsx"
 import { useConversationScope } from "../conversation-scope.tsx"
 import { ImageLightbox } from "../image-lightbox.tsx"
+import { openCitationLink } from "../markdown-citation.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "../pdf-attachment.tsx"
 import { parsePrompt } from "../prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
 import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
+import { ImageOutputCell } from "./image-output-cell.tsx"
 
 function MessageText({ text }: Readonly<{ text: string }>) {
   const paragraphs: ReactNode[] = []
@@ -109,6 +112,7 @@ export function UserMessageCell({
   }, [editing])
   const attachments = inputContentAttachments(entry.content)
   const contextAttachments = entry.contextAttachments ?? []
+  const displayParts = entry.replayedParts ?? inputDisplayParts(entry.content)
   const preview =
     previewIndex === undefined ? undefined : attachments[previewIndex]
 
@@ -124,7 +128,11 @@ export function UserMessageCell({
               <ContextExcerpts excerpts={contextAttachments} />
             </section>
           ) : null}
-          {inputDisplayParts(entry.content).map((part, index) => {
+          {displayParts.map((part, index) => {
+            if ("id" in part)
+              return (
+                <ReplayedInput key={part.id} part={part} apiBase={apiBase} />
+              )
             const key = `${entry.inputId}:${index}`
             if (part.type === "document")
               return (
@@ -288,6 +296,49 @@ export function UserMessageCell({
           name={preview.name}
           onClose={() => setPreviewIndex(undefined)}
         />
+      )}
+    </div>
+  )
+}
+
+function ReplayedInput({
+  part,
+  apiBase,
+}: Readonly<{
+  part: ReplayedInputPart
+  apiBase: string
+}>) {
+  if (part.type === "image")
+    return (
+      <ImageOutputCell
+        image={part.image}
+        apiBase={apiBase}
+        label="User image"
+      />
+    )
+  if (part.type === "text")
+    return (
+      <p className="message-bubble px-4 py-2.5 whitespace-pre-wrap">
+        {part.text}
+      </p>
+    )
+  return (
+    <div className="message-bubble px-4 py-2.5">
+      {part.source.url === undefined ? (
+        part.source.label
+      ) : (
+        <a
+          href={part.source.url}
+          onClick={openCitationLink}
+          className="underline"
+        >
+          {part.source.label}
+        </a>
+      )}
+      {part.text === undefined ? null : (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap">
+          {part.text}
+        </pre>
       )}
     </div>
   )

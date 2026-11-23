@@ -73,7 +73,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     reply(m.id, {
       protocolVersion: mode === "v2" ? 2 : 1,
       agentCapabilities: {
-        ...(mode === "load" ? { loadSession: true } : {}),
+        ...(["load", "load-media"].includes(mode) ? { loadSession: true } : {}),
         ...(mode === "config"
           ? { promptCapabilities: { image: true, embeddedContext: true } }
           : {}),
@@ -111,8 +111,31 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (mode !== "resume" && mode !== "config") process.exit(13)
     reply(m.id, {})
   } else if (m.method === "session/load") {
-    if (mode !== "load") process.exit(14)
-    text(m.params.sessionId, "replayed history")
+    if (mode === "load") text(m.params.sessionId, "replayed history")
+    else if (mode === "load-media") {
+      const user = (messageId, content) =>
+        update(m.params.sessionId, {
+          sessionUpdate: "user_message_chunk",
+          messageId,
+          content,
+        })
+      user("older-user", { type: "text", text: "First historical message" })
+      user("media-user", { type: "text", text: "Second historical message" })
+      user("media-user", {
+        type: "image",
+        mimeType: "image/png",
+        data: pngImageBase64,
+      })
+      user("media-user", {
+        type: "resource",
+        resource: {
+          uri: "https://example.test/history.txt",
+          mimeType: "text/plain",
+          text: "Historical attachment contents",
+        },
+      })
+      text(m.params.sessionId, "Replayed reply")
+    } else process.exit(14)
     reply(m.id, {})
   } else if (m.method === "session/prompt") {
     prompt = m

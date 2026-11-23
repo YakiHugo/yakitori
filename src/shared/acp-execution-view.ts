@@ -7,6 +7,7 @@ import type {
   CitationSource,
   ExecutionEntry,
   ExecutionView,
+  ReplayedInputPart,
   TurnTiming,
 } from "../protocol/execution-view.ts"
 import { createUserInput } from "../protocol/user-input.ts"
@@ -30,6 +31,7 @@ type Turn = {
   startedAt: string
   completedAt?: string
   input?: Extract<ExecutionEntry, { kind: "user_input" }>
+  inputMessageId?: string
   entries: ExecutionEntry[]
   openText?: number
 }
@@ -110,10 +112,15 @@ export function projectEngineSession(snapshot: EngineSessionSnapshot) {
   for (const turn of replayed.turns.values()) {
     const key = turnIdentity(turn)
     const match =
-      key === undefined
+      key === undefined && turn.inputMessageId === undefined
         ? -1
         : liveTurns.findIndex(
-            (live, index) => index >= liveIndex && turnIdentity(live) === key,
+            (live, index) =>
+              index >= liveIndex &&
+              (turn.inputMessageId !== undefined &&
+              live.inputMessageId !== undefined
+                ? turn.inputMessageId === live.inputMessageId
+                : key !== undefined && turnIdentity(live) === key),
           )
     if (match < 0) turns.push(turn)
     else {
@@ -277,13 +284,24 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
     if (event.type === "session.update") {
       const { update } = event
       const channel = update.sessionUpdate
+      const userMessageId =
+        channel === "user_message_chunk"
+          ? acpString(update.messageId)
+          : undefined
       if (replay && typeof channel === "string") {
         if (
           replayTurnId === undefined ||
-          (channel === "user_message_chunk" && replayChannel !== channel)
+          (channel === "user_message_chunk" &&
+            (userMessageId === undefined
+              ? replayChannel !== channel
+              : turns.get(replayTurnId)?.inputMessageId !== userMessageId))
         )
           replayTurnId = `acp:replay:${seq}`
-        replayChannel = channel
+        if (
+          channel === "user_message_chunk" ||
+          channel === "agent_message_chunk"
+        )
+          replayChannel = channel
       }
       const id = replay ? replayTurnId : (wireTurnId ?? activeTurnId)
       const turn = id === undefined ? undefined : turnFor(id, at)
@@ -323,6 +341,55 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       ) {
         const content = acpRecord(update.content)
         const { text, type } = content
+        if (channel === "user_message_chunk") {
+          if (userMessageId !== undefined) turn.inputMessageId = userMessageId
+          if (!replay) continue
+          const id = `acp:input-part:${seq}`
+          const parts: ReplayedInputPart[] = []
+          const textPart =
+            type === "text" && typeof text === "string" ? text : undefined
+          if (textPart !== undefined)
+            parts.push({ type: "text", id, text: textPart })
+          else {
+            const display = acpMessageContent(content, id)
+            if (display.image !== undefined)
+              parts.push({
+                type: "image",
+                id: `${id}:image`,
+                image: display.image,
+              })
+            if (display.source !== undefined) {
+              const text = acpRecord(content.resource).text
+              parts.push({
+                type: "resource",
+                id,
+                source: display.source,
+                ...(typeof text === "string" ? { text } : {}),
+              })
+            }
+          }
+          if (parts.length === 0) continue
+          const full = (turn.input?.text ?? "") + (textPart ?? "")
+          const earlier = turn.input?.replayedParts ?? []
+          const previous = earlier.at(-1)
+          const first = parts[0]
+          const replayedParts =
+            previous?.type === "text" && first?.type === "text"
+              ? [
+                  ...earlier.slice(0, -1),
+                  { ...previous, text: previous.text + first.text },
+                ]
+              : [...earlier, ...parts]
+          turn.input = {
+            kind: "user_input",
+            inputId: turn.id,
+            text: full,
+            content: createUserInput(full),
+            replayedParts,
+            at: turn.input?.at ?? at,
+          }
+          continue
+        }
         if (type !== "text" || typeof text !== "string") {
           if (channel !== "agent_message_chunk") continue
           const display = acpMessageContent(content, `acp:source:${seq}`)
@@ -343,18 +410,6 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
               image: display.image,
               label: "Engine image",
             })
-          }
-          continue
-        }
-        if (channel === "user_message_chunk") {
-          if (!replay) continue
-          const full = (turn.input?.text ?? "") + text
-          turn.input = {
-            kind: "user_input",
-            inputId: turn.id,
-            text: full,
-            content: createUserInput(full),
-            at,
           }
           continue
         }

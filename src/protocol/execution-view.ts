@@ -29,6 +29,13 @@ export type CitationSource = Readonly<{
   mentions?: readonly CitationMention[]
 }>
 
+export type ReplayedInputPart = Readonly<{ id: string }> &
+  (
+    | Readonly<{ type: "text"; text: string }>
+    | Readonly<{ type: "image"; image: ModelImageBlock }>
+    | Readonly<{ type: "resource"; source: CitationSource; text?: string }>
+  )
+
 export type ExecutionEntry =
   | Readonly<{
       kind: "image_output"
@@ -56,6 +63,7 @@ export type ExecutionEntry =
   | {
       readonly kind: "user_input"
       readonly contextAttachments?: readonly ContextExcerpt[]
+      readonly replayedParts?: readonly ReplayedInputPart[]
       readonly inputId: string
       readonly requestId?: string
       readonly questionId?: string
