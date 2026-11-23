@@ -360,6 +360,14 @@ type ToolMedia = Readonly<{
   parts: readonly ModelToolContentBlock[]
 }>
 
+type TurnRun =
+  | Readonly<{
+      kind: "activity"
+      id: string
+      entries: readonly ExecutionEntry[]
+    }>
+  | Readonly<{ kind: "output"; id: string; entry: ExecutionEntry | ToolMedia }>
+
 const TurnBlock = memo(
   function TurnBlock({
     blockKey,
@@ -449,7 +457,6 @@ const TurnBlock = memo(
         : undefined
     const [settledUnmarked, setSettledUnmarked] = useState<string>()
     useEffect(() => {
-      setSettledUnmarked(undefined)
       if (unmarked === undefined) return
       // Let adjacent tool and reasoning updates claim the process layout
       // before moving an unmarked reply. Text continues updating in place.
@@ -464,66 +471,116 @@ const TurnBlock = memo(
           : undefined),
       [finalAnswer, unmarked, settledUnmarked, livePieces],
     )
-    const { visibleAnswer, persistent, reasoning, timeline } = useMemo(() => {
+    const { visibleAnswer, runs, reasoning } = useMemo(() => {
       const answerInBlock = entries.some(
         (entry) =>
           entry.kind === "assistant" && entry.itemId === answer?.entry.itemId,
       )
       const visibleAnswer = answerInBlock ? answer?.entry : undefined
       const answerItemIds = new Set(answer?.itemIds)
-      const persistent = entries.flatMap<ExecutionEntry | ToolMedia>(
-        (entry) => {
-          if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
-            return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
-          }
-          const pinned =
-            entry.kind === "turn_terminal" ||
-            entry.kind === "compaction" ||
-            entry.kind === "image_output" ||
-            (entry.kind === "assistant" && entry.refusal) ||
-            (entry.kind === "permission" && entry.state !== "resolved") ||
-            (entry.kind === "tool" &&
-              entry.execution.name === "request_user_input_async" &&
-              !entry.resultError &&
-              parseUserQuestions(entry.output) !== undefined)
-          if (entry.kind === "tool") {
-            const parts = entry.resultContent?.filter(
-              (part) => part.type !== "text",
-            )
-            if (parts !== undefined && parts.length > 0)
-              return [
-                ...(pinned ? [entry] : []),
-                { kind: "tool_media", toolCallId: entry.toolCallId, parts },
-              ]
-          }
-          return pinned ? [entry] : []
-        },
-      )
+      if (
+        active &&
+        presentLiveAnswer &&
+        settledUnmarked !== undefined &&
+        unmarked !== settledUnmarked
+      ) {
+        // Keep an already visible opening in place when a later tool reveals
+        // that an unmarked reply was a preamble. Completion seals the answer.
+        let previewed = false
+        for (const entry of entries) {
+          if (
+            entry.kind !== "assistant" ||
+            entry.refusal ||
+            entry.purpose !== undefined
+          )
+            break
+          if (JSON.stringify([sessionId, entry.itemId]) === settledUnmarked)
+            previewed = true
+          if (previewed) answerItemIds.add(entry.itemId)
+        }
+      }
+      const runs: TurnRun[] = []
+      let activity: ExecutionEntry[] = []
+      let prose: FinalAnswer["pieces"][number][] = []
+      const flushActivity = () => {
+        const first = activity[0]
+        if (first === undefined) return
+        runs.push({
+          kind: "activity",
+          id: `activity:${executionEntryKey(first)}`,
+          entries: activity,
+        })
+        activity = []
+      }
+      const pushOutput = (entry: ExecutionEntry | ToolMedia) => {
+        flushActivity()
+        runs.push({
+          kind: "output",
+          id:
+            entry.kind === "tool_media"
+              ? `media:${entry.toolCallId}`
+              : executionEntryKey(entry),
+          entry,
+        })
+      }
+      const flushAnswer = () => {
+        const part = composeFinalAnswer(prose)
+        prose = []
+        if (part !== undefined) pushOutput(part.entry)
+      }
+      for (const entry of entries) {
+        if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
+          flushActivity()
+          prose.push(entry)
+          continue
+        }
+        flushAnswer()
+        const pinned =
+          entry.kind === "turn_terminal" ||
+          entry.kind === "compaction" ||
+          entry.kind === "image_output" ||
+          (entry.kind === "assistant" && entry.refusal) ||
+          (entry.kind === "permission" && entry.state !== "resolved") ||
+          (entry.kind === "tool" &&
+            entry.execution.name === "request_user_input_async" &&
+            !entry.resultError &&
+            parseUserQuestions(entry.output) !== undefined)
+        if (pinned) pushOutput(entry)
+        else if (
+          entry.kind !== "reasoning" ||
+          entry.format === "redacted" ||
+          entry.incomplete ||
+          entry.text.trim().length > 0
+        )
+          activity.push(entry)
+        if (entry.kind === "tool") {
+          const parts = entry.resultContent?.filter(
+            (part) => part.type !== "text",
+          )
+          if (parts !== undefined && parts.length > 0)
+            pushOutput({
+              kind: "tool_media",
+              toolCallId: entry.toolCallId,
+              parts,
+            })
+        }
+      }
+      flushAnswer()
+      flushActivity()
       const reasoning = entries.filter(
         (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
           entry.kind === "reasoning",
       )
-      const timeline = groupConversationActivity(
-        entries.filter(
-          (entry) =>
-            entry.kind !== "reasoning" ||
-            entry.format === "redacted" ||
-            entry.incomplete ||
-            entry.text.trim().length > 0,
-        ),
-      ).filter(
-        // Persistent cards retain their original batch boundary even when
-        // rendered outside the process disclosure so they stay actionable.
-        (item) =>
-          item.kind === "batch" ||
-          (!persistent.includes(item.entry) &&
-            !(
-              item.entry.kind === "assistant" &&
-              answerItemIds.has(item.entry.itemId)
-            )),
-      )
-      return { visibleAnswer, persistent, reasoning, timeline }
-    }, [entries, answer])
+      return { visibleAnswer, runs, reasoning }
+    }, [
+      entries,
+      answer,
+      active,
+      presentLiveAnswer,
+      settledUnmarked,
+      unmarked,
+      sessionId,
+    ])
     const currentSummary = active
       ? reasoning
           .filter((entry) => entry.format === "summary")
@@ -539,7 +596,15 @@ const TurnBlock = memo(
     )
     const hasDeferredActivity =
       activityPage !== undefined && activityPage !== "loaded"
-    const hasDisclosure = timeline.length > 0 || hasDeferredActivity
+    const firstActivity = runs.findIndex((run) => run.kind === "activity")
+    const layout: readonly TurnRun[] =
+      firstActivity < 0 && hasDeferredActivity
+        ? [{ kind: "activity", id: "deferred", entries: [] }, ...runs]
+        : runs
+    const activityIds = layout.flatMap((run, index) =>
+      run.kind === "activity" ? [`${contentId}-${index}`] : [],
+    )
+    const hasDisclosure = activityIds.length > 0
     const [loadingActivity, setLoadingActivity] = useState(false)
     const [activityError, setActivityError] = useState<string>()
     const loadActivity = useCallback(async () => {
@@ -574,31 +639,6 @@ const TurnBlock = memo(
         retry={retry}
       />
     )
-    const timelineContent = useMemo(
-      () =>
-        timeline.length > 0 ? (
-          <ol className="agent-timeline" aria-label="Agent activity">
-            {timeline.map((item) => (
-              <li
-                key={
-                  item.kind === "batch"
-                    ? item.id
-                    : executionEntryKey(item.entry)
-                }
-                className="agent-timeline-item"
-                data-kind={item.kind === "batch" ? "batch" : item.entry.kind}
-              >
-                {item.kind === "batch" ? (
-                  <ActivityBatch entries={item.entries} />
-                ) : (
-                  <EntryCell entry={item.entry} />
-                )}
-              </li>
-            ))}
-          </ol>
-        ) : null,
-      [timeline],
-    )
     return (
       <section
         className="conversation-response"
@@ -611,7 +651,7 @@ const TurnBlock = memo(
                 <button
                   type="button"
                   aria-expanded={expanded}
-                  aria-controls={contentId}
+                  aria-controls={activityIds.join(" ")}
                   aria-labelledby={labelId}
                   onClick={() =>
                     completed
@@ -659,56 +699,90 @@ const TurnBlock = memo(
                 </Tooltip>
               ) : null}
             </div>
-            {!hasDisclosure ? null : (
-              // Promoted answers leave this cached tree before it closes.
-              <TranscriptDisclosureContent
-                id={contentId}
-                open={expanded}
-                className="conversation-disclosure"
-                refreshWhenClosed={completed}
-              >
-                <div className="conversation-activity-content">
-                  {loadingActivity ? (
-                    <p role="status">Loading activity…</p>
-                  ) : null}
-                  {activityError ? <p role="alert">{activityError}</p> : null}
-                  {!hasDeferredActivity ||
-                  loadingActivity ||
-                  (activityPage === "unloaded" &&
-                    activityError === undefined) ? null : (
-                    <button
-                      className="text-caption text-muted-foreground"
-                      type="button"
-                      onClick={() => void loadActivity()}
-                    >
-                      {activityError === undefined
-                        ? "Load earlier activity"
-                        : "Retry"}
-                    </button>
-                  )}
-                  <TranscriptPresenterSlot
-                    name="turn_activity"
-                    context={{ entries, active, turnId }}
-                    fallback={timelineContent}
-                  />
-                </div>
-              </TranscriptDisclosureContent>
-            )}
           </div>
         ) : null}
-        {persistent.map((entry) =>
-          entry.kind === "tool_media" ? (
-            <ToolResultParts
-              key={`media:${entry.toolCallId}`}
-              label="Tool attachments"
-              parts={entry.parts}
-              toolCallId={entry.toolCallId}
-              apiBase={apiBase}
-            />
-          ) : (
-            <EntryCell key={executionEntryKey(entry)} entry={entry} />
-          ),
-        )}
+        {layout.map((run, index) => {
+          if (run.kind === "output") {
+            const entry = run.entry
+            return entry.kind === "tool_media" ? (
+              <ToolResultParts
+                key={run.id}
+                label="Tool attachments"
+                parts={entry.parts}
+                toolCallId={entry.toolCallId}
+                apiBase={apiBase}
+              />
+            ) : (
+              <EntryCell key={run.id} entry={entry} />
+            )
+          }
+          const activity = groupConversationActivity(run.entries)
+          const firstDisclosure = index === Math.max(0, firstActivity)
+          return (
+            <TranscriptDisclosureContent
+              key={run.id}
+              id={`${contentId}-${index}`}
+              open={expanded}
+              className="conversation-disclosure"
+              refreshWhenClosed={completed}
+            >
+              <div className="conversation-activity-content">
+                {firstDisclosure && loadingActivity ? (
+                  <p role="status">Loading activity…</p>
+                ) : null}
+                {firstDisclosure && activityError ? (
+                  <p role="alert">{activityError}</p>
+                ) : null}
+                {firstDisclosure &&
+                hasDeferredActivity &&
+                !loadingActivity &&
+                (activityPage !== "unloaded" || activityError !== undefined) ? (
+                  <button
+                    className="text-caption text-muted-foreground"
+                    type="button"
+                    onClick={() => void loadActivity()}
+                  >
+                    {activityError === undefined
+                      ? "Load earlier activity"
+                      : "Retry"}
+                  </button>
+                ) : null}
+                <TranscriptPresenterSlot
+                  name="turn_activity"
+                  context={{ entries: run.entries, active, turnId }}
+                  fallback={
+                    activity.length === 0 ? null : (
+                      <ol
+                        className="agent-timeline"
+                        aria-label="Agent activity"
+                      >
+                        {activity.map((item) => (
+                          <li
+                            key={
+                              item.kind === "batch"
+                                ? item.id
+                                : executionEntryKey(item.entry)
+                            }
+                            className="agent-timeline-item"
+                            data-kind={
+                              item.kind === "batch" ? "batch" : item.entry.kind
+                            }
+                          >
+                            {item.kind === "batch" ? (
+                              <ActivityBatch entries={item.entries} />
+                            ) : (
+                              <EntryCell entry={item.entry} />
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    )
+                  }
+                />
+              </div>
+            </TranscriptDisclosureContent>
+          )
+        })}
         {completed && visibleAnswer ? (
           <ResponseActions
             text={visibleAnswer.text}
