@@ -70,7 +70,7 @@ describe("Interactions hosted step continuation", () => {
         type: "hosted_tool",
         id: "code-1",
         status: "running",
-        detail: "print(42)",
+        sourceCode: "print(42)",
       },
       {
         type: "hosted_tool",

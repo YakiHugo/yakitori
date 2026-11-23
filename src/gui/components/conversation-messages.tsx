@@ -875,7 +875,7 @@ function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
         />
       )
     case "hosted_tool":
-      return <HostedToolCell tool={entry.tool} />
+      return <HostedToolCell entry={entry} />
     case "image_output":
       return (
         <ImageOutputCell

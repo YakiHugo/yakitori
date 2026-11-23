@@ -503,9 +503,13 @@ function interactionHostedTool(
   const id = value.call_id ?? value.id
   const input = isJsonObject(value.arguments) ? value.arguments : {}
   const result = value.result
+  const sourceCode =
+    kind === "code_execution" && typeof input.code === "string"
+      ? input.code
+      : undefined
   const resultItems = Array.isArray(result) ? result : [result]
   const detail = [
-    input.code,
+    sourceCode === undefined ? input.code : undefined,
     ...resultItems.flatMap((item) =>
       isJsonObject(item)
         ? [item.text ?? item.url ?? item.uri ?? item.output]
@@ -534,6 +538,7 @@ function interactionHostedTool(
           : "running",
     ...(typeof label === "string" && label.length > 0 ? { label } : {}),
     ...(detail ? { detail } : {}),
+    ...(sourceCode ? { sourceCode } : {}),
   }
 }
 

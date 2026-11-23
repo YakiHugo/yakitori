@@ -29,9 +29,9 @@ import { HostedToolCell } from "./cells/hosted-tool-cell.tsx"
 import { ImageOutputCell } from "./cells/image-output-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
+import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
-import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
 import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   Collapsible,
@@ -535,7 +535,7 @@ function TraceEntry({
         />
       )
     case "hosted_tool":
-      return <HostedToolCell tool={entry.tool} />
+      return <HostedToolCell entry={entry} />
     case "image_output":
       return <ImageOutputCell image={entry.image} apiBase={apiBase} />
     case "permission":
