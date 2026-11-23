@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
-import { projectEngineSession } from "../engine-session-view.ts"
+import { projectEngineSession } from "../../shared/acp-execution-view.ts"
 import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {
@@ -11,8 +11,11 @@ import {
   sendEngineInput,
   useEngineStore,
 } from "../store/engine-store.ts"
+import { presentTool } from "../tool-presentation.ts"
+import { ToolDetailView } from "./cells/tool-detail.tsx"
 import { ComposerSurface } from "./composer-surface.tsx"
-import { MarkdownView } from "./markdown.tsx"
+import { ConversationMessages } from "./conversation-messages.tsx"
+import { ConversationScopeContext } from "./conversation-scope.tsx"
 import { Select } from "./ui/select.tsx"
 
 export function EngineSelector() {
@@ -152,49 +155,20 @@ export function EngineConversation() {
               : "This engine does not advertise reconnecting existing sessions."}
           </p>
           {state.loading && <p role="status">Loading conversation…</p>}
-          {view?.turns.map((turn) => (
-            <article key={turn.id} className="space-y-3">
-              {turn.input && (
-                <div className="message-bubble whitespace-pre-wrap rounded-xl bg-muted p-3">
-                  {turn.input}
-                </div>
-              )}
-              {turn.reasoning && (
-                <details>
-                  <summary className="text-xs text-muted-foreground">
-                    Reasoning
-                  </summary>
-                  <MarkdownView
-                    text={turn.reasoning}
-                    className="markdown-compact"
-                    workspaceRoot={state.snapshot?.session.cwd}
-                  />
-                </details>
-              )}
-              {turn.assistant && (
-                <section aria-label="Response">
-                  <MarkdownView
-                    text={turn.assistant}
-                    workspaceRoot={state.snapshot?.session.cwd}
-                    streaming={view.activeTurnId === turn.id}
-                  />
-                </section>
-              )}
-              {turn.updates.length > 0 && (
-                <details>
-                  <summary className="text-xs text-muted-foreground">
-                    Engine activity
-                  </summary>
-                  <pre className="overflow-auto text-xs">
-                    {JSON.stringify(turn.updates, null, 2)}
-                  </pre>
-                </details>
-              )}
-              {turn.status && (
-                <p className="text-xs text-muted-foreground">{turn.status}</p>
-              )}
-            </article>
-          ))}
+          {view === undefined ? null : (
+            <ConversationScopeContext.Provider
+              value={{
+                sessionId: state.sessionId,
+                threadId: state.sessionId ?? "",
+                apiBase,
+                workspaceRoot: state.snapshot?.session.cwd,
+                editable: false,
+                interactiveQuestions: false,
+              }}
+            >
+              <ConversationMessages view={view.executionView} />
+            </ConversationScopeContext.Provider>
+          )}
           {view?.uncertain.map((request) => (
             <div
               key={request.requestId}
@@ -232,10 +206,11 @@ export function EngineConversation() {
           className="border-t bg-amber-50 px-5 py-3 dark:bg-amber-950/40"
         >
           <legend className="text-sm">{permission.description}</legend>
-          {permission.toolCall && (
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">
-              {JSON.stringify(permission.toolCall, null, 2)}
-            </pre>
+          {permission.tool === undefined ? null : (
+            <ToolDetailView
+              detail={presentTool(permission.tool).detail}
+              workspaceRoot={state.snapshot?.session.cwd}
+            />
           )}
           <div className="flex gap-2">
             {permission.options.map((option) => (

@@ -1,0 +1,354 @@
+import type { EngineEvent, EngineSessionSnapshot } from "../protocol/engine.ts"
+import type {
+  ExecutionEntry,
+  ExecutionView,
+  TurnTiming,
+} from "../protocol/execution-view.ts"
+import { createUserInput } from "../protocol/user-input.ts"
+import type { SessionPlan } from "../protocol/user-interaction.ts"
+import {
+  acpRecord,
+  acpString,
+  type AcpToolEntry,
+  projectAcpTool,
+} from "./acp-tool-activity.ts"
+import {
+  createExecutionViewState,
+  projectExecutionView,
+} from "./execution-view.ts"
+
+type ObservedEvent = EngineSessionSnapshot["events"][number]
+type Permission = Extract<EngineEvent, { type: "permission.requested" }>
+type TextEntry = Extract<ExecutionEntry, { kind: "assistant" | "reasoning" }>
+type Turn = {
+  id: string
+  startedAt: string
+  completedAt?: string
+  input?: Extract<ExecutionEntry, { kind: "user_input" }>
+  entries: ExecutionEntry[]
+  openText?: number
+}
+
+export function projectEngineSession(snapshot: EngineSessionSnapshot) {
+  const observed = projectObserved(
+    snapshot.events.filter(
+      ({ event }) => event.type !== "session.update" || !event.replayed,
+    ),
+  )
+  // session/load sends the whole transcript again. Only the latest complete
+  // batch is needed and locally observed turns have more detailed state.
+  const latestReplay: ObservedEvent[] = []
+  let collecting = false
+  for (const envelope of snapshot.events) {
+    const { event } = envelope
+    if (event.type === "session.update" && event.replayed) {
+      if (!collecting) latestReplay.length = 0
+      latestReplay.push(envelope)
+      collecting = true
+    } else if (
+      event.type === "session.update" &&
+      event.update.sessionUpdate === "session_initialized"
+    ) {
+      collecting = false
+    }
+  }
+  const replayed = projectObserved(latestReplay, true)
+  const turns: Turn[] = []
+  const liveTurns = [...observed.turns.values()]
+  let liveIndex = 0
+  for (const turn of replayed.turns.values()) {
+    const key = turnIdentity(turn)
+    const match =
+      key === undefined
+        ? -1
+        : liveTurns.findIndex(
+            (live, index) => index >= liveIndex && turnIdentity(live) === key,
+          )
+    if (match < 0) turns.push(turn)
+    else {
+      turns.push(...liveTurns.slice(liveIndex, match + 1))
+      liveIndex = match + 1
+    }
+  }
+  turns.push(...liveTurns.slice(liveIndex))
+  const base = projectExecutionView(createExecutionViewState())
+  const executionView: ExecutionView = {
+    ...base,
+    entries: turns.flatMap((turn) =>
+      turn.input === undefined ? turn.entries : [turn.input, ...turn.entries],
+    ),
+    turnTimings: Object.fromEntries(
+      turns.map((turn): [string, TurnTiming] => [
+        turn.id,
+        {
+          startedAt: turn.startedAt,
+          ...(turn.completedAt === undefined
+            ? {}
+            : { completedAt: turn.completedAt }),
+          ...(turn.input === undefined ? {} : { inputId: turn.input.inputId }),
+        },
+      ]),
+    ),
+    ...(observed.activeTurnId === undefined
+      ? {}
+      : { activeTurnId: observed.activeTurnId }),
+    workingDirectory: snapshot.session.cwd,
+  }
+  return {
+    executionView,
+    activeTurnId: observed.activeTurnId,
+    permissions: [...observed.permissions.values()].map((permission) => ({
+      ...permission,
+      tool: observed.tools.get(
+        acpString(permission.toolCall?.toolCallId) ?? permission.requestId,
+      )?.entry,
+    })),
+    uncertain: snapshot.requests.filter(
+      (request) => request.status === "unknown" || request.status === "pending",
+    ),
+  }
+}
+
+function turnIdentity(turn: Turn): string | undefined {
+  if (turn.input === undefined) return undefined
+  const text = turn.entries
+    .flatMap((entry) => (entry.kind === "assistant" ? [entry.text] : []))
+    .join("")
+  return text === "" ? undefined : JSON.stringify([turn.input.text, text])
+}
+
+function projectObserved(events: readonly ObservedEvent[], replay = false) {
+  const turns = new Map<string, Turn>()
+  const tools = new Map<
+    string,
+    {
+      wire: Record<string, unknown>
+      turn: Turn
+      index: number
+      entry: AcpToolEntry
+    }
+  >()
+  const permissions = new Map<string, Permission>()
+  const permissionEntries = new Map<string, { turn: Turn; index: number }>()
+  let activeTurnId: string | undefined
+  let replayTurnId: string | undefined
+  let replayChannel: string | undefined
+  const turnFor = (id: string, at: string) => {
+    const prior = turns.get(id)
+    if (prior !== undefined) return prior
+    const turn: Turn = { id, startedAt: at, entries: [] }
+    turns.set(id, turn)
+    return turn
+  }
+  const addText = (
+    turn: Turn,
+    kind: TextEntry["kind"],
+    text: string,
+    seq: number,
+    at: string,
+  ) => {
+    if (text.length === 0) return
+    const index = turn.openText
+    const prior = index === undefined ? undefined : turn.entries[index]
+    if (index !== undefined && prior?.kind === kind) {
+      turn.entries[index] = { ...prior, text: prior.text + text }
+      return
+    }
+    turn.openText = turn.entries.length
+    turn.entries.push({
+      kind,
+      itemId: `acp:text:${seq}`,
+      turnId: turn.id,
+      text,
+      status:
+        replay || turn.completedAt !== undefined ? "completed" : "streaming",
+      at,
+      ...(kind === "reasoning" ? { representation: "raw" } : {}),
+    })
+  }
+  const addTool = (
+    turn: Turn | undefined,
+    update: Record<string, unknown>,
+    id: string,
+    permission = false,
+  ) => {
+    const prior = tools.get(id)
+    const owner = prior?.turn ?? turn
+    if (owner === undefined) return
+    if (turn !== undefined) delete turn.openText
+    const fields = Object.fromEntries(
+      Object.entries(update).filter(([, value]) => value != null),
+    )
+    const wire = { ...prior?.wire, ...fields }
+    const index = prior?.index ?? owner.entries.length
+    const entry = projectAcpTool(
+      wire,
+      id,
+      owner.id,
+      permission || prior?.entry.execution.requiresPermission === true,
+    )
+    owner.entries[index] = entry
+    tools.set(id, { wire, turn: owner, index, entry })
+  }
+  const resolvePermission = (id: string, behavior?: string) => {
+    permissions.delete(id)
+    const location = permissionEntries.get(id)
+    if (location === undefined) return
+    const entry = location.turn.entries[location.index]
+    if (entry?.kind === "permission")
+      location.turn.entries[location.index] = {
+        ...entry,
+        state: "resolved",
+        ...(behavior === undefined ? {} : { behavior }),
+      }
+  }
+  let previousRawText:
+    | { turnId: string; kind: TextEntry["kind"]; text: string }
+    | undefined
+  for (const { event, seq, createdAt } of events) {
+    const at = new Date(createdAt).toISOString()
+    const formerText = previousRawText
+    previousRawText = undefined
+    if (event.type === "permission.resolved") {
+      resolvePermission(event.requestId, event.optionId)
+      continue
+    }
+    const wireTurnId = event.turnId
+    if (event.type === "session.update") {
+      const { update } = event
+      const channel = update.sessionUpdate
+      if (replay && typeof channel === "string") {
+        if (
+          replayTurnId === undefined ||
+          (channel === "user_message_chunk" && replayChannel !== channel)
+        )
+          replayTurnId = `acp:replay:${seq}`
+        replayChannel = channel
+      }
+      const id = replay ? replayTurnId : (wireTurnId ?? activeTurnId)
+      const turn = id === undefined ? undefined : turnFor(id, at)
+      if (channel === "tool_call" || channel === "tool_call_update") {
+        const toolCallId = acpString(update.toolCallId)
+        if (toolCallId !== undefined) addTool(turn, update, toolCallId)
+      } else if (
+        turn !== undefined &&
+        channel === "plan" &&
+        Array.isArray(update.entries)
+      ) {
+        delete turn.openText
+        const plan = update.entries.flatMap<SessionPlan["plan"][number]>(
+          (value) => {
+            const { content, status } = acpRecord(value)
+            if (
+              typeof content !== "string" ||
+              (status !== "pending" &&
+                status !== "in_progress" &&
+                status !== "completed")
+            )
+              return []
+            return [{ step: content, status }]
+          },
+        )
+        turn.entries.push({
+          kind: "plan",
+          turnId: turn.id,
+          itemId: `acp:plan:${seq}`,
+          plan: { kind: "plan", plan },
+        })
+      } else if (
+        turn !== undefined &&
+        (channel === "agent_message_chunk" ||
+          channel === "agent_thought_chunk" ||
+          channel === "user_message_chunk")
+      ) {
+        const { text, type } = acpRecord(update.content)
+        if (type !== "text" || typeof text !== "string") continue
+        if (channel === "user_message_chunk") {
+          if (!replay) continue
+          const full = (turn.input?.text ?? "") + text
+          turn.input = {
+            kind: "user_input",
+            inputId: turn.id,
+            text: full,
+            content: createUserInput(full),
+            at,
+          }
+          continue
+        }
+        const kind =
+          channel === "agent_message_chunk" ? "assistant" : "reasoning"
+        addText(turn, kind, text, seq, at)
+        previousRawText = { turnId: turn.id, kind, text }
+      }
+      continue
+    }
+    const turn = turnFor(event.turnId, at)
+    if (event.type === "message.delta") {
+      if (
+        formerText?.kind === event.channel &&
+        formerText.text === event.text &&
+        formerText.turnId === turn.id
+      )
+        continue
+      addText(turn, event.channel, event.text, seq, at)
+    } else if (event.type === "input.submitted") {
+      turn.input = {
+        kind: "user_input",
+        inputId: event.requestId,
+        requestId: event.requestId,
+        text: event.text,
+        content: createUserInput(event.text),
+        at,
+      }
+    } else if (event.type === "permission.requested") {
+      if (permissions.has(event.requestId)) continue
+      delete turn.openText
+      const id = acpString(event.toolCall?.toolCallId) ?? event.requestId
+      if (event.toolCall !== undefined) addTool(turn, event.toolCall, id, true)
+      permissions.set(event.requestId, event)
+      permissionEntries.set(event.requestId, {
+        turn,
+        index: turn.entries.length,
+      })
+      turn.entries.push({
+        kind: "permission",
+        turnId: turn.id,
+        permissionRequestId: event.requestId,
+        toolCallId: `acp:${id}`,
+        action: event.description,
+        state: "requested",
+      })
+    } else if (event.type === "turn.status") {
+      if (event.status === "accepted" || event.status === "running") {
+        activeTurnId = turn.id
+        continue
+      }
+      delete turn.openText
+      turn.completedAt = at
+      if (activeTurnId === turn.id) activeTurnId = undefined
+      for (const [id, permission] of permissions)
+        if (permission.turnId === turn.id) resolvePermission(id)
+      turn.entries = turn.entries.map((entry) =>
+        entry.kind === "assistant" || entry.kind === "reasoning"
+          ? { ...entry, status: "completed" }
+          : entry,
+      )
+      if (event.status !== "completed")
+        turn.entries.push({
+          kind: "turn_terminal",
+          turnId: turn.id,
+          state: event.status === "disconnected" ? "interrupted" : event.status,
+          message:
+            event.message ??
+            (event.status === "disconnected"
+              ? "The engine disconnected."
+              : event.status === "failed"
+                ? "The engine reported an error."
+                : "The engine cancelled the response."),
+        })
+    }
+  }
+  for (const turn of turns.values())
+    if (replay) turn.completedAt = turn.startedAt
+  return { turns, tools, permissions, activeTurnId }
+}

@@ -74,9 +74,11 @@ describe("external ACP v1 process boundary", () => {
     ).toEqual(["accepted", "running", "completed"])
     expect(events).toContainEqual(
       expect.objectContaining({
-        type: "message.delta",
-        text: "first",
-        channel: "assistant",
+        type: "session.update",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "first" },
+        },
       }),
     )
     expect(events).toContainEqual(
@@ -85,6 +87,7 @@ describe("external ACP v1 process boundary", () => {
         update: expect.objectContaining({ sessionUpdate: "tool_call" }),
       }),
     )
+    expect(events.some((event) => event.type === "message.delta")).toBe(false)
   })
 
   it("preserves opaque permission choices and sends the selected option back", async () => {
@@ -129,8 +132,11 @@ describe("external ACP v1 process boundary", () => {
       .toBe(true)
     expect(events).toContainEqual(
       expect.objectContaining({
-        type: "message.delta",
-        text: "opaque:allow/once",
+        type: "session.update",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "opaque:allow/once" },
+        },
       }),
     )
   })
@@ -143,7 +149,13 @@ describe("external ACP v1 process boundary", () => {
     const accepted = await adapter.send(binding, { requestId: "r1", text })
     if (accepted.status !== "accepted") throw new Error("Not accepted")
     await expect
-      .poll(() => events.some((event) => event.type === "message.delta"))
+      .poll(() =>
+        events.some(
+          (event) =>
+            event.type === "session.update" &&
+            event.update.sessionUpdate === "agent_message_chunk",
+        ),
+      )
       .toBe(true)
     expect(await adapter.cancel(binding, accepted.turnId)).toEqual({
       status: "requested",
@@ -166,7 +178,10 @@ describe("external ACP v1 process boundary", () => {
       .toBe(true)
     const tail = events.findIndex(
       (event) =>
-        event.type === "message.delta" && event.text === "cancellation tail",
+        event.type === "session.update" &&
+        event.update.sessionUpdate === "agent_message_chunk" &&
+        JSON.stringify(event.update.content) ===
+          JSON.stringify({ type: "text", text: "cancellation tail" }),
     )
     const terminal = events.findIndex(
       (event) => event.type === "turn.status" && event.status === "cancelled",
@@ -402,8 +417,11 @@ describe("external ACP v1 process boundary", () => {
       .toBe(true)
     expect(events).toContainEqual(
       expect.objectContaining({
-        type: "message.delta",
-        text: "partial: 焼き鳥",
+        type: "session.update",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "partial: 焼き鳥" },
+        },
       }),
     )
   })

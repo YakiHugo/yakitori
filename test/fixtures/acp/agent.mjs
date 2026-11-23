@@ -115,6 +115,34 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           ],
         },
       })
+    } else if (content === "structured") {
+      update(m.params.sessionId, {
+        sessionUpdate: "tool_call",
+        toolCallId: "edit_fixture",
+        title: "Edit the fixture",
+        kind: "edit",
+        status: "completed",
+        content: [
+          {
+            type: "diff",
+            path: "fixture.txt",
+            oldText: "before\n",
+            newText: "after\n",
+          },
+        ],
+      })
+      update(m.params.sessionId, {
+        sessionUpdate: "plan",
+        entries: [
+          {
+            content: "Check the fixture",
+            status: "completed",
+            priority: "high",
+          },
+        ],
+      })
+      text(m.params.sessionId, "The ACP fixture is ready.")
+      reply(m.id, { stopReason: "end_turn" })
     } else if (content === "invalid-stop") reply(m.id, {})
     else if (content === "cancel") {
       /* only finish after cancel notification */

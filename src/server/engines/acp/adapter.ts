@@ -465,24 +465,6 @@ export class AcpEngine implements EngineAdapter {
       ...(turnId ? { turnId } : {}),
       ...(session.loading ? { replayed: true } : {}),
     })
-    if (
-      turnId &&
-      (update.sessionUpdate === "agent_message_chunk" ||
-        update.sessionUpdate === "agent_thought_chunk")
-    ) {
-      const content = object(update.content)
-      if (content.type === "text" && typeof content.text === "string") {
-        this.emit(session, {
-          type: "message.delta",
-          turnId,
-          text: content.text,
-          channel:
-            update.sessionUpdate === "agent_thought_chunk"
-              ? "reasoning"
-              : "assistant",
-        })
-      }
-    }
   }
 
   private async request(method: string, value: unknown): Promise<unknown> {
