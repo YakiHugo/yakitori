@@ -6,6 +6,7 @@ import type {
 import type {
   AppSessionEventEnvelope,
   EventEnvelope,
+  HostedToolExecutionItem,
   TokenUsage,
   TurnMetrics,
   TurnOutcome,
@@ -129,6 +130,7 @@ export function executionEntryKey(entry: ExecutionEntry): string {
     case "reasoning":
     case "plan":
     case "compaction":
+    case "hosted_tool":
       return entry.itemId
     case "tool":
       return entry.toolCallId
@@ -213,6 +215,7 @@ function executionEntryIdentity(entry: ExecutionEntry): string {
     case "reasoning":
     case "plan":
     case "compaction":
+    case "hosted_tool":
       return `item:${entry.itemId}`
     case "tool":
       return `item:${entry.execution.itemId}`
@@ -709,6 +712,8 @@ function applyTransient(
     if (state.turnTimings[event.turnId]?.completedAt !== undefined) return state
     state = clearActiveRetry(state, event.turnId)
     const item = event.item
+    if (item.type === "hosted_tool")
+      return upsertHostedTool(state, item, event.turnId)
     if (item.type === "context_compaction") {
       return {
         ...state,
@@ -1014,6 +1019,8 @@ function applyDurable(
     case "item.started": {
       next = clearActiveRetry(next, event.data.turnId)
       const item = event.data.item
+      if (item.type === "hosted_tool")
+        return upsertHostedTool(next, item, event.data.turnId)
       if (item.type === "context_compaction") {
         return {
           ...next,
@@ -1035,6 +1042,8 @@ function applyDurable(
     case "item.completed": {
       next = clearActiveRetry(next, event.data.turnId)
       const item = event.data.item
+      if (item.type === "hosted_tool")
+        return upsertHostedTool(next, item, event.data.turnId)
       if (item.type === "context_compaction") {
         const { [item.itemId]: _, ...openCompactionItems } =
           next.openCompactionItems
@@ -1164,6 +1173,24 @@ function applyDurable(
   }
 }
 
+function upsertHostedTool(
+  state: ExecutionViewState,
+  item: HostedToolExecutionItem,
+  turnId: string,
+): ExecutionViewState {
+  const index = state.itemEntryIndexes[item.itemId]
+  const prior = index === undefined ? undefined : state.entries[index]
+  return replaceItemEntry(state, item.itemId, {
+    kind: "hosted_tool",
+    itemId: item.itemId,
+    turnId,
+    tool:
+      prior?.kind === "hosted_tool"
+        ? { ...prior.tool, ...item.tool }
+        : item.tool,
+  })
+}
+
 function finishTurn(
   state: ExecutionViewState,
   turnId: string,
@@ -1178,6 +1205,8 @@ function finishTurn(
     )
     .map((entry): ExecutionEntry => {
       if (!("turnId" in entry) || entry.turnId !== turnId) return entry
+      if (entry.kind === "hosted_tool" && entry.tool.status === "running")
+        return { ...entry, tool: { ...entry.tool, status: "interrupted" } }
       if (entry.kind === "tool" && entry.state === "requested") {
         return {
           ...entry,
@@ -1332,6 +1361,7 @@ function indexEntries(entries: readonly ExecutionEntry[]): {
       entry.kind === "reasoning" ||
       entry.kind === "plan" ||
       entry.kind === "compaction" ||
+      entry.kind === "hosted_tool" ||
       entry.kind === "tool"
     ) {
       const itemId =

@@ -6,6 +6,7 @@ import {
   jsonRequestByteLength,
 } from "./json-request-budget.ts"
 import { randomUUID } from "node:crypto"
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
 import {
   isJsonObject,
   type JsonObject,
@@ -327,6 +328,8 @@ async function* streamGemini(
     let candidateMetadata: JsonObject = {}
     const ids = new Set<string>()
     const itemId = `gemini_${randomUUID()}`
+    let codeToolId: string | undefined
+    let groundingTool: HostedToolBlock | undefined
     let finishReason: string | undefined
     let blocked = false
     for await (const payload of geminiSse(response.body)) {
@@ -519,13 +522,72 @@ async function* streamGemini(
                   : { toolKind: "custom", customInputFallbackKey: key }),
                 providerMetadata: metadata,
               })
+            } else if (isJsonObject(part.executableCode)) {
+              const code = part.executableCode.code
+              codeToolId = `code-${nativeParts.length}`
+              const tool: HostedToolBlock = {
+                type: "hosted_tool",
+                id: codeToolId,
+                kind: "code_execution",
+                status: "running",
+                ...(typeof code === "string" && code !== ""
+                  ? { detail: code }
+                  : {}),
+              }
+              content.push(tool)
+              yield { type: "hosted_tool", tool }
+            } else if (isJsonObject(part.codeExecutionResult)) {
+              const result = part.codeExecutionResult
+              const previous = content.findLast(
+                (block) =>
+                  block.type === "hosted_tool" && block.id === codeToolId,
+              )
+              const detail = [
+                previous?.type === "hosted_tool" ? previous.detail : undefined,
+                typeof result.output === "string" ? result.output : undefined,
+              ]
+                .filter(Boolean)
+                .join("\n\n")
+              const tool: HostedToolBlock = {
+                type: "hosted_tool",
+                id: codeToolId ?? `code-${nativeParts.length}`,
+                kind: "code_execution",
+                status:
+                  typeof result.outcome === "string" &&
+                  result.outcome !== "OUTCOME_OK"
+                    ? "failed"
+                    : "completed",
+                ...(detail ? { detail } : {}),
+              }
+              codeToolId = undefined
+              content.push(tool)
+              yield { type: "hosted_tool", tool }
             } else if (
-              typeof part.thoughtSignature === "string" ||
-              isJsonObject(part.executableCode) ||
-              isJsonObject(part.codeExecutionResult) ||
               isJsonObject(part.toolCall) ||
               isJsonObject(part.toolResponse)
             ) {
+              const result = isJsonObject(part.toolResponse)
+              const value = result ? part.toolResponse : part.toolCall
+              if (!isJsonObject(value))
+                throw new GeminiProtocolError(
+                  "Invalid Gemini hosted tool part.",
+                )
+              const name = value.toolType ?? value.name
+              const tool: HostedToolBlock = {
+                type: "hosted_tool",
+                id:
+                  typeof value.id === "string" && value.id !== ""
+                    ? value.id
+                    : `tool-${nativeParts.length}`,
+                kind: "lookup",
+                status: result ? "completed" : "running",
+                ...(typeof name === "string" && name !== ""
+                  ? { label: name }
+                  : {}),
+              }
+              content.push(tool)
+              yield { type: "hosted_tool", tool }
+            } else if (typeof part.thoughtSignature === "string") {
             } else {
               // Audio/video, generated images, and built-in tools need explicit
               // canonical support; do not silently report a successful response.
@@ -538,6 +600,27 @@ async function* streamGemini(
           firstPart,
           nativeParts.length - firstPart,
         )
+        if (isJsonObject(candidate.groundingMetadata)) {
+          const queries = candidate.groundingMetadata.webSearchQueries
+          if (Array.isArray(queries)) {
+            const label = queries
+              .filter(
+                (value): value is string =>
+                  typeof value === "string" && value !== "",
+              )
+              .join(", ")
+            if (label !== "" && label !== groundingTool?.label) {
+              groundingTool = {
+                type: "hosted_tool",
+                id: "grounding-search",
+                kind: "web_search",
+                status: "completed",
+                label,
+              }
+              yield { type: "hosted_tool", tool: groundingTool }
+            }
+          }
+        }
         if (candidate.finishReason !== undefined) {
           if (
             typeof candidate.finishReason !== "string" ||
@@ -573,6 +656,7 @@ async function* streamGemini(
         "Gemini could not complete a valid response.",
       )
     grounding.annotate(content)
+    if (groundingTool !== undefined) content.push(groundingTool)
     // Only a natural completed response may execute functions. A truncated or
     // filtered response never commits a possibly incomplete tool batch.
     const incompleteToolCalls =

@@ -626,6 +626,8 @@ async function* streamAnthropic(
           completed: false,
           invalidInput: false,
         })
+        const hosted = anthropicHostedTool(event.content_block)
+        if (hosted !== undefined) yield { type: "hosted_tool", tool: hosted }
         if (event.content_block.type === "redacted_thinking")
           yield {
             type: "reasoning_delta",
@@ -737,6 +739,9 @@ async function* streamAnthropic(
             request.continuationScope,
             thinkingDisplay,
           ).content
+        for (const block of pending.content ?? [])
+          if (block.type === "hosted_tool")
+            yield { type: "hosted_tool", tool: block }
         if (request.streamOutputItems && request.compaction === undefined) {
           for (;;) {
             const completed = blocks.get(nextOutputIndex)
@@ -1185,6 +1190,55 @@ function markLastModelContentBlockCacheable(
   }
 }
 
+function anthropicHostedTool(value: unknown): HostedToolBlock | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") return undefined
+  const call = value.type === "server_tool_use"
+  if (!call && !value.type.endsWith("_tool_result")) return undefined
+  const id = call ? value.id : value.tool_use_id
+  if (typeof id !== "string" || id.length === 0) return undefined
+  const name = call && typeof value.name === "string" ? value.name : value.type
+  const kind: HostedToolBlock["kind"] = name.startsWith("web_search")
+    ? "web_search"
+    : name.startsWith("web_fetch")
+      ? "web_fetch"
+      : name.includes("code_execution")
+        ? "code_execution"
+        : "lookup"
+  const input = isRecord(value.input) ? value.input : {}
+  const payload = value.content
+  const result = isRecord(payload) ? payload : {}
+  const label = input.query ?? input.url
+  const detail = Array.isArray(payload)
+    ? payload
+        .flatMap((item) =>
+          isRecord(item) && typeof item.url === "string" ? [item.url] : [],
+        )
+        .join("\n")
+    : [
+        input.command,
+        input.code,
+        result.url,
+        result.stdout,
+        result.stderr,
+        result.error_code,
+      ]
+        .filter(
+          (part): part is string => typeof part === "string" && part.length > 0,
+        )
+        .join("\n")
+  const failed =
+    typeof result.error_code === "string" ||
+    (typeof result.return_code === "number" && result.return_code !== 0)
+  return {
+    type: "hosted_tool",
+    id,
+    kind,
+    status: call ? "running" : failed ? "failed" : "completed",
+    ...(typeof label === "string" && label.length > 0 ? { label } : {}),
+    ...(detail ? { detail } : {}),
+  }
+}
+
 export function fromAnthropicMessage(
   message: {
     readonly content: readonly unknown[]
@@ -1320,6 +1374,11 @@ export function fromAnthropicMessage(
       })
       continue
     }
+    const hosted = anthropicHostedTool(block)
+    if (hosted !== undefined) {
+      content.push(hosted)
+      continue
+    }
     if (
       typeof block.type === "string" &&
       (block.type === "server_tool_use" || block.type.endsWith("_tool_result"))
@@ -1401,7 +1460,7 @@ function toAnthropicReasoningBlock(
 }
 
 function toAnthropicAssistantBlock(
-  block: ModelContentBlock,
+  block: ReturnType<typeof portableModelContent>[number],
   provider: string,
   continuationScope?: string,
 ): BetaContentBlockParam | undefined {
@@ -1640,3 +1699,4 @@ function validateAnthropicModelRequest(
       `${model} maxOutputTokens must be between 1 and ${contract.configuration.maxOutputTokens}.`,
     )
 }
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

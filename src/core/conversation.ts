@@ -62,6 +62,7 @@ export type ModelContentBlock =
   | ModelReasoningBlock
   | ModelCompactionBlock
   | ModelToolCallBlock
+  | HostedToolBlock
 export type ModelHistoryContext =
   | Readonly<{ type: "compaction" }>
   | Readonly<{ type: "agent_message" }>
@@ -169,3 +170,4 @@ export type ModelMessage =
   | ModelDeveloperMessage
   | ModelAssistantMessage
   | ModelToolResultMessage
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

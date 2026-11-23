@@ -27,6 +27,7 @@ import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { ActivityBatch } from "./activity-batch.tsx"
 import { AgentMessageCell } from "./cells/agent-message-cell.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
+import { HostedToolCell } from "./cells/hosted-tool-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { CompactionCell, PlanCell } from "./cells/session-progress-cell.tsx"
@@ -756,6 +757,8 @@ const EntryCell = memo(function EntryCell({
           separateMedia
         />
       )
+    case "hosted_tool":
+      return <HostedToolCell tool={entry.tool} />
     case "permission":
       return <PermissionCell entry={entry} />
     case "turn_terminal":

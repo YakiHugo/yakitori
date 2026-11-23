@@ -17,6 +17,51 @@ import {
 } from "../../src/runtime/openai-provider.ts"
 
 describe("provider output completeness", () => {
+  it("streams and commits a provider search as read-only activity and keeps its native replay", async () => {
+    const search = {
+      type: "web_search_call",
+      id: "search_1",
+      status: "completed",
+      action: {
+        type: "search",
+        query: "example query",
+        sources: [{ type: "url", url: "https://example.test/" }],
+      },
+    }
+    const events = await collect(
+      openaiStream([
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { ...search, status: "in_progress" },
+        },
+        { type: "response.output_item.done", output_index: 0, item: search },
+        openaiFinish(undefined, [search]),
+      ]),
+      request("openai"),
+    )
+    const tool = {
+      type: "hosted_tool",
+      id: "search_1",
+      kind: "web_search",
+      status: "completed",
+      label: "example query",
+      detail: "https://example.test/",
+    }
+    expect(events.filter((event) => event.type === "hosted_tool")).toEqual([
+      { type: "hosted_tool", tool: { ...tool, status: "running" } },
+      { type: "hosted_tool", tool },
+    ])
+    expect(events.find((event) => event.type === "output_item")).toMatchObject({
+      content: [tool],
+      native: [{ value: search }],
+    })
+    expect(events.at(-1)).toMatchObject({
+      type: "response",
+      response: { content: [tool], stopReason: ModelStopReason.EndTurn },
+    })
+  })
+
   it("holds split control tokens in a Responses stream and remaps citation spans on commit", async () => {
     const marker = "\uE200cite\uE202turn0search0\uE201"
     const rawText = `See ${marker}report<|eos|>`

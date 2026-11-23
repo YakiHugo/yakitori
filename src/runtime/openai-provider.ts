@@ -781,10 +781,7 @@ async function* streamOpenAIWire(
         )
       // These are semantic payloads, not ignorable progress notifications.
       // Their asset contracts need dedicated IR support.
-      if (
-        event.type.startsWith("response.audio.") ||
-        event.type.startsWith("response.image_generation_call.")
-      )
+      if (event.type.startsWith("response.audio."))
         throw new OpenAIProtocolError(
           `Unsupported OpenAI content event: ${event.type}.`,
         )
@@ -800,6 +797,18 @@ async function* streamOpenAIWire(
         )
       if (event.type === "response.output_item.added") {
         startedItems.set(event.output_index, event.item)
+        const tool = responsesHostedTool(event.item)
+        if (tool !== undefined) yield { type: "hosted_tool", tool }
+        continue
+      }
+      if (event.type === "response.image_generation_call.partial_image") {
+        if (
+          typeof event.item_id !== "string" ||
+          !Number.isSafeInteger(event.output_index) ||
+          typeof event.partial_image_b64 !== "string"
+        )
+          throw new OpenAIProtocolError("Invalid OpenAI partial image event.")
+        // Only the completed provider artifact belongs in the saved conversation.
         continue
       }
       if (
@@ -952,6 +961,8 @@ async function* streamOpenAIWire(
       if (event.type === "response.output_item.done") {
         if (completedItems.has(event.output_index)) continue
         completedItems.set(event.output_index, event.item)
+        const hosted = responsesHostedTool(event.item)
+        if (hosted !== undefined) yield { type: "hosted_tool", tool: hosted }
         if (request.streamOutputItems && request.compaction === undefined) {
           // Preserve provider output order even when completed items arrive out of order.
           for (;;) {
@@ -960,7 +971,10 @@ async function* streamOpenAIWire(
               item === undefined ||
               ("status" in item &&
                 item.status !== undefined &&
-                item.status !== "completed")
+                item.status !== "completed" &&
+                !["failed", "interrupted"].includes(
+                  responsesHostedTool(item)?.status ?? "",
+                ))
             )
               break
             const result = fromOpenAIOutput(
@@ -1763,6 +1777,85 @@ function outputItemId(item: Response["output"][number]): string | undefined {
   )
 }
 
+function responsesHostedTool(
+  item: Response["output"][number],
+): HostedToolBlock | undefined {
+  let kind: HostedToolBlock["kind"]
+  let label: string | null | undefined
+  let detail: string | null | undefined
+  const rawStatus = "status" in item ? item.status : undefined
+  let status: HostedToolBlock["status"] =
+    rawStatus === undefined || rawStatus === "completed"
+      ? "completed"
+      : rawStatus === "failed"
+        ? "failed"
+        : rawStatus === "incomplete"
+          ? "interrupted"
+          : "running"
+  switch (item.type) {
+    case "web_search_call":
+      kind =
+        item.action?.type === "open_page" ||
+        item.action?.type === "find_in_page"
+          ? "web_fetch"
+          : "web_search"
+      if (item.action?.type === "search") {
+        label = item.action.queries?.join(", ") || item.action.query
+        detail = item.action.sources?.map(({ url }) => url).join("\n")
+      } else if (item.action != null) label = item.action.url
+      break
+    case "file_search_call":
+      kind = "file_search"
+      label = item.queries?.join(", ")
+      detail = item.results
+        ?.flatMap(({ filename }) => (filename ? [filename] : []))
+        .join("\n")
+      break
+    case "code_interpreter_call":
+      kind = "code_execution"
+      detail = [
+        item.code,
+        ...(item.outputs ?? []).flatMap((output) =>
+          output.type === "logs" ? [output.logs] : [],
+        ),
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+      break
+    case "image_generation_call":
+      kind = "image_generation"
+      break
+    case "mcp_call":
+      kind = "mcp"
+      label = `${item.server_label} · ${item.name}`
+      detail = item.error ?? item.output
+      if (item.error) status = "failed"
+      break
+    case "mcp_list_tools":
+      kind = "mcp"
+      label = item.server_label
+      break
+    case "mcp_approval_request":
+      kind = "mcp"
+      label = `${item.server_label} · ${item.name}`
+      detail = "The provider requested approval."
+      status = "interrupted"
+      break
+    default:
+      return undefined
+  }
+  if (typeof item.id !== "string" || item.id.length === 0)
+    throw new OpenAIProtocolError("Hosted tool output is missing its item ID.")
+  return {
+    type: "hosted_tool",
+    id: item.id,
+    kind,
+    status,
+    ...(label ? { label } : {}),
+    ...(detail ? { detail } : {}),
+  }
+}
+
 function fromOpenAIOutput(
   output: Response["output"],
   customFallbackKeys: ReadonlyMap<string, string>,
@@ -1980,21 +2073,12 @@ function fromOpenAIOutput(
       })
       continue
     }
-    // Hosted tools execute at the provider. Their native items are replayed,
-    // but never grant authority to run a local harness tool.
-    if (
-      [
-        "web_search_call",
-        "file_search_call",
-        "code_interpreter_call",
-        "image_generation_call",
-        "mcp_call",
-        "mcp_list_tools",
-        "mcp_approval_request",
-        "tool_search_output",
-      ].includes(item.type)
-    )
+    const hosted = responsesHostedTool(item)
+    if (hosted !== undefined) {
+      content.push(hosted)
       continue
+    }
+    if (item.type === "tool_search_output") continue
     if (item.type !== "function_call")
       throw new OpenAIProtocolError(
         `Unsupported OpenAI output type: ${item.type}.`,
@@ -2270,3 +2354,4 @@ function failureKindForProviderCode(
 function abortedResponse(usage?: ModelResponse["usage"]): ModelStreamEvent {
   return { type: "cancelled", ...(usage === undefined ? {} : { usage }) }
 }
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

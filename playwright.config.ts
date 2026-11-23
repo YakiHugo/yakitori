@@ -28,6 +28,7 @@ export default defineConfig({
         "chatgpt-connections.spec.ts",
         "rendering.spec.ts",
         "gemini-citations.spec.ts",
+        "hosted-tools.spec.ts",
         "account-financials.spec.ts",
         "title-model.spec.ts",
         "app-update-renderer.spec.ts",

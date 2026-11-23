@@ -222,7 +222,11 @@ async function* runModelRequest(
                 : undefined
           if (usage !== undefined)
             observedUsage = { ...observedUsage, ...usage }
-          if (event.type === "delta" || event.type === "reasoning_delta") {
+          if (
+            event.type === "delta" ||
+            event.type === "reasoning_delta" ||
+            event.type === "hosted_tool"
+          ) {
             outputObserved = true
             yield event
             continue

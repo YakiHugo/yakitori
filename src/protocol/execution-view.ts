@@ -27,6 +27,12 @@ export type CitationSource = Readonly<{
 
 export type ExecutionEntry =
   | Readonly<{
+      kind: "hosted_tool"
+      itemId: string
+      turnId: string
+      tool: HostedToolBlock
+    }>
+  | Readonly<{
       kind: "agent_input"
       inputId: string
       requestId: string
@@ -193,3 +199,4 @@ export type ExecutionView = Readonly<{
   activeActivity?: ActiveTurnActivity
   activeRetry?: ActiveModelRetry
 }>
+import type { HostedToolBlock } from "./hosted-tool.ts"
