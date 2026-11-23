@@ -53,6 +53,7 @@ export function createSessionLivePresentation(
               ...(event.purpose === undefined
                 ? {}
                 : { purpose: event.purpose }),
+              ...(event.refusal === true ? { refusal: true as const } : {}),
               ...(event.representation === undefined
                 ? {}
                 : { representation: event.representation }),
@@ -73,6 +74,7 @@ export function createSessionLivePresentation(
           delta: event.delta,
           ...(event.source === undefined ? {} : { source: event.source }),
           ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
+          ...(event.refusal === true ? { refusal: true as const } : {}),
           ...(event.representation === undefined
             ? {}
             : { representation: event.representation }),

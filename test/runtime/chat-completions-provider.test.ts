@@ -1491,6 +1491,40 @@ describe("Chat Completions provider", () => {
     )
   })
 
+  it("keeps a streamed refusal apart from the existing answer and preserves native replay", async () => {
+    await withServer(
+      (_incoming, outgoing) =>
+        send(outgoing, [
+          chunk({ content: "Context. " }),
+          chunk({ refusal: "I cannot answer that." }, "stop"),
+        ]),
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(request({ streamOutputItems: true })),
+        )
+        expect(events.filter((event) => event.type === "delta")).toMatchObject([
+          { text: "Context. " },
+          { text: "I cannot answer that.", refusal: true, partIndex: 1 },
+        ])
+        expect(terminal(events)).toMatchObject({
+          stopReason: ModelStopReason.ContentFilter,
+          content: [
+            { type: "text", text: "Context. " },
+            { type: "text", text: "I cannot answer that.", refusal: true },
+          ],
+          native: [
+            {
+              value: {
+                content: "Context. ",
+                refusal: "I cannot answer that.",
+              },
+            },
+          ],
+        })
+      },
+    )
+  })
+
   it("streams and commits structured reasoning without displaying encrypted data or mirrored text", async () => {
     await withServer(
       (_incoming, outgoing) =>

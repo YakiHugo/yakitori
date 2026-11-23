@@ -18,6 +18,7 @@ type RenderingApp = {
   imageDataURL: string
   send(prompt: string): Promise<void>
   append(prompt: string, text: string): Promise<void>
+  refuse(prompt: string, text: string): Promise<void>
   think(
     prompt: string,
     value: string | readonly Record<string, string | number>[],
@@ -212,6 +213,14 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
                 ? "reasoning_content"
                 : "reasoning_details",
             ),
+          )
+        },
+        async refuse(prompt, text) {
+          await expect.poll(() => streams.has(prompt)).toBe(true)
+          const stream = streams.get(prompt)
+          if (!stream) throw new Error("Rendering stream disappeared.")
+          stream.response.write(
+            chunk(stream.completionId, text, false, "refusal"),
           )
         },
         async callTool(prompt, name, input, count = 1) {
@@ -2129,4 +2138,27 @@ test("preserves streamed reasoning and the final answer through completion and r
   await expect(
     page.getByText("Checking the complete reasoning body.", { exact: true }),
   ).toBeVisible()
+})
+
+test("keeps provider refusal recognizable live and on reopened transcripts", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "A refusal fixture"
+  const message = "I cannot answer this fixture."
+  await renderingApp.send(prompt)
+  await renderingApp.refuse(prompt, message)
+  const live = page.getByRole("region", { name: "Current response" })
+  await expect(
+    live.getByText("Provider refusal", { exact: true }),
+  ).toBeVisible()
+  await expect(live.getByText(message, { exact: true })).toBeVisible()
+  await renderingApp.finish(prompt)
+  const completed = page.getByRole("region", { name: "Response", exact: true })
+  await expect(completed.getByText(message, { exact: true })).toBeVisible()
+  await renderingApp.reopen()
+  await expect(
+    completed.getByText("Provider refusal", { exact: true }),
+  ).toBeVisible()
+  await expect(completed.getByText(message, { exact: true })).toBeVisible()
 })

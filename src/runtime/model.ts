@@ -230,6 +230,7 @@ export type ModelStreamDeltaEvent = Readonly<{
   itemId?: string
   partIndex?: number
   purpose?: AssistantTextPurpose
+  refusal?: true
 }>
 
 export type ModelStreamReasoningDeltaEvent = Readonly<{

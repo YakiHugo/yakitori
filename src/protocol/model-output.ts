@@ -9,6 +9,7 @@ export type ModelOutputSource = Readonly<{
 export type ModelOutputPresentation = Readonly<{
   source?: ModelOutputSource
   purpose?: AssistantTextPurpose
+  refusal?: true
   representation?: ReasoningRepresentation
 }>
 

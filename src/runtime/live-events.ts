@@ -65,6 +65,7 @@ export function createCoalescingDeltaPublisher(
       itemId: input.itemId,
       ...(input.source === undefined ? {} : { source: input.source }),
       ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+      ...(input.refusal === true ? { refusal: true as const } : {}),
       ...(input.representation === undefined
         ? {}
         : { representation: input.representation }),

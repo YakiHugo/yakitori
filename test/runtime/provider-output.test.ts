@@ -1087,12 +1087,16 @@ describe("provider output completeness", () => {
       ]),
       request("openai"),
     )
+    expect(events.find((event) => event.type === "delta")).toMatchObject({
+      text: "Cannot help",
+      refusal: true,
+    })
     expect(events.at(-1)).toMatchObject({
       type: "response",
       response: {
         stopReason: ModelStopReason.ContentFilter,
         rawStopReason: "refusal",
-        content: [{ type: "text", text: "Cannot help" }],
+        content: [{ type: "text", text: "Cannot help", refusal: true }],
       },
     })
   })

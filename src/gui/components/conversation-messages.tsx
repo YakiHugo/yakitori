@@ -174,7 +174,9 @@ export function ConversationMessages({
         block.turnId !== view.activeTurnId ||
         block.entries.every(
           (entry) =>
-            entry.kind === "assistant" && entry.purpose !== "commentary",
+            entry.kind === "assistant" &&
+            !entry.refusal &&
+            entry.purpose !== "commentary",
         ),
     )
   const finalAnswers = useMemo(() => {
@@ -220,7 +222,7 @@ export function ConversationMessages({
       if (itemIds.some((id) => !assistants.has(id))) continue
       const pieces = itemIds
         .flatMap((id) => answerTextParts(assistants.get(id) ?? []))
-        .filter((entry) => entry.turnId === turnId)
+        .filter((entry) => entry.turnId === turnId && !entry.refusal)
       if (pieces.length === 0) continue
       const previous = previousAnswers.current.get(turnId)
       const answer =
@@ -407,7 +409,9 @@ const TurnBlock = memo(
       if (!presentLiveAnswer) return []
       const assistants = entries.filter(
         (entry): entry is FinalAnswer["pieces"][number] =>
-          entry.kind === "assistant" && entry.purpose !== "commentary",
+          entry.kind === "assistant" &&
+          !entry.refusal &&
+          entry.purpose !== "commentary",
       )
       const explicit = assistants.filter(
         (entry) => entry.purpose === "final_answer",
@@ -451,6 +455,7 @@ const TurnBlock = memo(
         }
         return entry.kind === "turn_terminal" ||
           entry.kind === "compaction" ||
+          (entry.kind === "assistant" && entry.refusal) ||
           (entry.kind === "permission" && entry.state !== "resolved") ||
           (entry.kind === "tool" &&
             entry.execution.name === "request_user_input_async" &&
