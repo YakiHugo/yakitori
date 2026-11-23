@@ -77,7 +77,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         ...(mode === "config"
           ? { promptCapabilities: { image: true, embeddedContext: true } }
           : {}),
-        sessionCapabilities: mode === "resume" ? { resume: {}, list: {} } : {},
+        sessionCapabilities: ["resume", "config"].includes(mode)
+          ? { resume: {}, list: {} }
+          : {},
       },
       authMethods: [],
       ...(mode === "steering"
@@ -106,7 +108,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     effort = m.params.value
     reply(m.id, { configOptions: configOptions() })
   } else if (m.method === "session/resume") {
-    if (mode !== "resume") process.exit(13)
+    if (mode !== "resume" && mode !== "config") process.exit(13)
     reply(m.id, {})
   } else if (m.method === "session/load") {
     if (mode !== "load") process.exit(14)
@@ -115,6 +117,20 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (m.method === "session/prompt") {
     prompt = m
     const content = m.params.prompt[0].text
+    if (content === "Use the quote") {
+      const resource = m.params.prompt.find(
+        (part) => part.type === "resource",
+      )?.resource
+      if (
+        mode !== "config" ||
+        resource?.mimeType !== "text/plain" ||
+        resource.text !== "Engine received the image."
+      )
+        process.exit(19)
+      text(m.params.sessionId, "Engine received the quote.")
+      reply(m.id, { stopReason: "end_turn" })
+      return
+    }
     if (content?.trim() === "Check the image") {
       const image = m.params.prompt.find((part) => part.type === "image")
       if (
@@ -203,6 +219,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         title: "Edit the fixture",
         kind: "edit",
         status: "completed",
+        locations: [
+          { path: "/fixture/fixture.txt", line: 2 },
+          { path: "/fixture/related.txt", line: 7 },
+          { path: "/fixture/fixture.txt", line: 2 },
+        ],
         content: [
           {
             type: "diff",

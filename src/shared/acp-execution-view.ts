@@ -381,6 +381,9 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
         requestId: event.requestId,
         text: event.text,
         content: event.content ?? createUserInput(event.text),
+        ...(event.content?.references === undefined
+          ? {}
+          : { contextAttachments: event.content.references }),
         at,
       }
     } else if (event.type === "permission.requested") {

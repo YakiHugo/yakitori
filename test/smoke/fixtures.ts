@@ -1788,6 +1788,17 @@ export async function runExternalEngineFlow(page: Page): Promise<void> {
   ).toBeVisible()
   await responses
     .last()
+    .getByRole("button", { name: /Edit.*fixture.txt/ })
+    .click()
+  const locations = responses
+    .last()
+    .getByRole("region", { name: "Tool file locations" })
+  await expect(locations.getByRole("button")).toHaveText([
+    "/fixture/fixture.txt:2",
+    "/fixture/related.txt:7",
+  ])
+  await responses
+    .last()
     .getByRole("button", { name: "Updated plan · 1/1 completed" })
     .click()
   await expect(

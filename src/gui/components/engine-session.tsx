@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react"
-import { discardDraftAttachments } from "../composer-attachments.ts"
+import { flushSync } from "react-dom"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../../shared/acp-execution-view.ts"
+import { discardDraftAttachments } from "../composer-attachments.ts"
 import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {
@@ -14,10 +15,12 @@ import {
   useEngineStore,
 } from "../store/engine-store.ts"
 import { presentTool } from "../tool-presentation.ts"
-import { ToolDetailView } from "./cells/tool-detail.tsx"
+import { ToolDetailView, ToolFileLocations } from "./cells/tool-detail.tsx"
 import { ComposerSurface } from "./composer-surface.tsx"
 import { ConversationMessages } from "./conversation-messages.tsx"
 import { ConversationScopeContext } from "./conversation-scope.tsx"
+import { ExcerptSourceLayer, requestExcerptEdit } from "./excerpt-source.tsx"
+import { SelectionActions } from "./selection-actions.tsx"
 import { Select } from "./ui/select.tsx"
 
 export function EngineSelector() {
@@ -115,6 +118,9 @@ export function EngineConversation() {
   const [configuring, setConfiguring] = useState(false)
   const promptCapabilities =
     view?.chrome.prompt ?? descriptor?.capabilities.prompt
+  const supportsContextExcerpts = promptCapabilities?.embeddedContext === true
+  const excerpts = state.draft.references ?? []
+  const excerptOwnerId = `engine:${state.sessionId ?? state.engineId}`
   const scroll = useRef<HTMLElement>(null)
   const pinned = useRef(true)
   // biome-ignore lint/correctness/useExhaustiveDependencies: new observed output changes the scroll height.
@@ -213,10 +219,16 @@ export function EngineConversation() {
         >
           <legend className="text-sm">{permission.description}</legend>
           {permission.tool === undefined ? null : (
-            <ToolDetailView
-              detail={presentTool(permission.tool).detail}
-              workspaceRoot={state.snapshot?.session.cwd}
-            />
+            <>
+              <ToolFileLocations
+                locations={permission.tool.locations}
+                workspaceRoot={state.snapshot?.session.cwd}
+              />
+              <ToolDetailView
+                detail={presentTool(permission.tool).detail}
+                workspaceRoot={state.snapshot?.session.cwd}
+              />
+            </>
           )}
           <div className="flex gap-2">
             {permission.options.map((option) => (
@@ -240,23 +252,81 @@ export function EngineConversation() {
           </div>
         </fieldset>
       ))}
+      {supportsContextExcerpts && state.sessionId !== undefined ? (
+        <>
+          <ExcerptSourceLayer
+            items={excerpts.map((excerpt, index) => ({
+              excerpt,
+              number: index + 1,
+              ownerId: excerptOwnerId,
+              conversation: "engine conversation",
+            }))}
+          />
+          <SelectionActions
+            sourceRoot={scroll}
+            onAddToConversation={(excerpt) => {
+              if (useEngineStore.getState().sessionId !== state.sessionId)
+                return
+              flushSync(() =>
+                useEngineStore.setState(({ draft }) => ({
+                  draft: inputContent(draft, [
+                    ...(draft.references ?? []),
+                    excerpt,
+                  ]),
+                })),
+              )
+              requestExcerptEdit({
+                ownerId: excerptOwnerId,
+                excerptId: excerpt.id,
+                creating: true,
+              })
+            }}
+          />
+        </>
+      ) : null}
       <ComposerSurface
         sessionId={state.sessionId}
         editorKey={state.sessionId ?? state.engineId}
         draft={state.draft}
-        excerpts={[]}
+        excerptOwnerId={excerptOwnerId}
+        excerpts={excerpts}
         sessionSkills={[]}
         apiBase={apiBase}
         historyParts={[]}
-        setPromptDraft={(draft) => useEngineStore.setState({ draft })}
-        removePromptExcerpt={() => {}}
-        updatePromptExcerpt={() => {}}
+        setPromptDraft={(draft) =>
+          useEngineStore.setState((current) => ({
+            draft: inputContent(draft, current.draft.references),
+          }))
+        }
+        removePromptExcerpt={(id) =>
+          useEngineStore.setState(({ draft }) => ({
+            draft: inputContent(
+              draft,
+              draft.references?.filter((excerpt) => excerpt.id !== id),
+            ),
+          }))
+        }
+        updatePromptExcerpt={(excerpt) =>
+          useEngineStore.setState(({ draft }) => ({
+            draft: inputContent(
+              draft,
+              draft.references?.map((current) =>
+                current.id === excerpt.id ? excerpt : current,
+              ),
+            ),
+          }))
+        }
         onSubmit={(draft) => {
           if (!view?.activeTurnId && !uncertain) {
-            const content = inputContent(draft)
+            const content = inputContent(
+              draft,
+              excerpts.length > 0 ? excerpts : undefined,
+            )
             void sendEngineInput(
               inputContentText(content),
-              content.attachments.length > 0 ? content : undefined,
+              content.attachments.length > 0 || excerpts.length > 0
+                ? content
+                : undefined,
             )
           }
         }}

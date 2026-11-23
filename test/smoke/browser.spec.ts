@@ -1497,7 +1497,7 @@ test("external engines render observed activity and permissions through reloads"
   }
 })
 
-test("ACP negotiates image input, configuration and available commands", async ({
+test("ACP negotiates image and quote input, configuration and available commands", async ({
   page,
 }) => {
   const environment = await createSmokeEnvironment()
@@ -1540,9 +1540,28 @@ test("ACP negotiates image input, configuration and available commands", async (
       page.getByRole("button", { name: "Preview smoke.png", exact: true }),
     ).toBeVisible()
     await page.getByRole("button", { name: "Send", exact: true }).click()
+    const imageReply = page.getByText("Engine received the image.", {
+      exact: true,
+    })
+    await expect(imageReply).toBeVisible()
+    await imageReply.evaluate((element) => {
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      window.getSelection()?.removeAllRanges()
+      window.getSelection()?.addRange(range)
+      element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
+    })
+    await page.getByRole("button", { name: "Add to chat", exact: true }).click()
+    await composer.fill("Use the quote")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const quoted = page.getByRole("region", { name: "Message sources" })
     await expect(
-      page.getByText("Engine received the image.", { exact: true }),
+      page.getByText("Engine received the quote.", { exact: true }),
     ).toBeVisible()
+    await quoted.getByRole("button", { name: "1 annotation" }).click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations" }),
+    ).toContainText("Engine received the image.")
     const control = page.getByRole("combobox", {
       name: "Reasoning level",
       exact: true,
@@ -1559,8 +1578,12 @@ test("ACP negotiates image input, configuration and available commands", async (
     server = await start(port)
     await page.reload()
     await expect(
-      page.getByText("Engine received the image.", { exact: true }),
+      page.getByText("Engine received the quote.", { exact: true }),
     ).toBeVisible()
+    await quoted.getByRole("button", { name: "1 annotation" }).click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations" }),
+    ).toContainText("Engine received the image.")
     const image = page.getByRole("img", { name: "smoke.png", exact: true })
     await expect(image).toBeVisible()
     await expect

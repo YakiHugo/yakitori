@@ -100,7 +100,11 @@ export type ToolPresentation = {
   readonly detail?: ToolDetail
 }
 
-export function presentTool(entry: ToolEntry): ToolPresentation {
+export function presentTool(tool: ToolEntry): ToolPresentation {
+  const entry =
+    tool.streamOutput === undefined
+      ? tool
+      : { ...tool, resultText: tool.streamOutput }
   switch (entry.execution.type) {
     case "command_execution":
       return presentRunCommand(entry, entry.execution)

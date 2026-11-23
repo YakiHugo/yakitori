@@ -32,7 +32,7 @@ import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { TranscriptPresenterSlot } from "../transcript-presenters.tsx"
 import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 import { UserQuestionsCell } from "./session-progress-cell.tsx"
-import { ToolDetailView } from "./tool-detail.tsx"
+import { ToolDetailView, ToolFileLocations } from "./tool-detail.tsx"
 import { ToolResultParts } from "./tool-result-parts.tsx"
 import "../activity-timeline.css"
 
@@ -204,6 +204,7 @@ export function ToolCell({
           <ChevronRight aria-hidden="true" className="tool-chevron" />
         </CollapsibleTrigger>
         {presentation.target === undefined ||
+        (presentation.target.kind === "file" && entry.locations?.length) ||
         (collaboration !== undefined && onOpenSession === undefined) ? null : (
           <ResourceAction
             target={presentation.target}
@@ -256,6 +257,10 @@ export function ToolCell({
               {collaboration.request}
             </p>
           )}
+          <ToolFileLocations
+            locations={entry.locations}
+            workspaceRoot={workspaceRoot}
+          />
           <TranscriptPresenterSlot
             name="tool_detail"
             context={{ entry, presentation }}

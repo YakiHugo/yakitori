@@ -17,11 +17,21 @@ export function projectAcpTool(
 ): AcpToolEntry {
   const input = acpRecord(wire.rawInput)
   const title = acpString(wire.title)
-  const location = Array.isArray(wire.locations)
-    ? wire.locations
-        .map(acpRecord)
-        .find(({ path }) => acpString(path) !== undefined)
-    : undefined
+  const locations = new Map<string, { path: string; line?: number }>()
+  for (const entry of Array.isArray(wire.locations) ? wire.locations : []) {
+    const { path, line } = acpRecord(entry)
+    if (typeof path !== "string" || !path.trim() || path.includes("\0"))
+      continue
+    const target =
+      typeof line === "number" &&
+      Number.isInteger(line) &&
+      line > 0 &&
+      line <= 0xffffffff
+        ? { path, line }
+        : { path }
+    locations.set(JSON.stringify(target), target)
+  }
+  const location = locations.values().next().value
   const path = acpString(location?.path ?? input.path)
   const line = location?.line
   const parts = Array.isArray(wire.content) ? wire.content.map(acpRecord) : []
@@ -151,8 +161,13 @@ export function projectAcpTool(
       requiresPermission,
     },
     state,
+    ...(locations.size === 0 ? {} : { locations: [...locations.values()] }),
     ...(images.length === 0 ? {} : { resultContent: images }),
-    ...(resultText === undefined ? {} : { resultText }),
+    ...(resultText === undefined
+      ? {}
+      : state === "requested"
+        ? { streamOutput: resultText }
+        : { resultText }),
     ...(state === "failed" ? { resultError: true } : {}),
   }
 }
