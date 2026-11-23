@@ -1,9 +1,9 @@
 import { realpath, stat } from "node:fs/promises"
-import { EngineRegistryError, type EngineRegistry } from "../engine-registry.ts"
-import { INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
-import { type RpcMethodDefinition, RpcMethodError } from "./methods.ts"
 import type { EngineRpcParams } from "../../protocol/engine.ts"
 import { inputContentText, isInputContent } from "../../protocol/user-input.ts"
+import { type EngineRegistry, EngineRegistryError } from "../engine-registry.ts"
+import { INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
+import { type RpcMethodDefinition, RpcMethodError } from "./methods.ts"
 
 function string(params: Record<string, unknown>, key: string): string {
   const value = params[key]
@@ -68,6 +68,17 @@ export const engineMethods: readonly RpcMethodDefinition[] = [
     registry.inspect(string(params, "engineId")),
   ),
   entry("engineSession/list", (registry) => ({ sessions: registry.list() })),
+  entry("engineSession/search", (registry, params) => {
+    const term = string(params, "term").trim()
+    const offset = params.offset ?? 0
+    if (
+      typeof offset !== "number" ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0
+    )
+      throw new EngineRegistryError("Invalid search offset.")
+    return registry.search(term, offset)
+  }),
   entry("engineSession/create", async (registry, params) => {
     const cwd = optional(params, "cwd")
     let resolved: string | undefined

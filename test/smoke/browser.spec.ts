@@ -1491,6 +1491,22 @@ test("external engines render observed activity and permissions through reloads"
     })
     await page.goto(server.url)
     await runExternalEngineFlow(page)
+    await page
+      .getByRole("button", { name: "Search sessions", exact: true })
+      .click()
+    const search = page.getByRole("dialog", { name: "Search sessions" })
+    await search
+      .getByRole("textbox", { name: "Search sessions" })
+      .fill("The ACP fixture is ready.")
+    await search
+      .getByRole("button", { name: /The ACP fixture is ready/ })
+      .click()
+    await expect(search).toHaveCount(0)
+    await expect(
+      page
+        .getByRole("region", { name: "Engine conversation" })
+        .getByText("The ACP fixture is ready.", { exact: true }),
+    ).toBeVisible()
   } finally {
     await server?.stop()
     await environment.cleanup()
