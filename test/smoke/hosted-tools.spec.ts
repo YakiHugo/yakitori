@@ -45,13 +45,14 @@ function message(text: string) {
   }
 }
 
-for (const output of ["search", "image"] as const) {
+for (const output of ["search", "image", "chart"] as const) {
   test(`shows hosted ${output} while running and restores it after reopening`, async ({
     page,
   }) => {
     const environment = await createSmokeEnvironment()
     let server: ServerProcess | undefined
     let running: ServerResponse | undefined
+    let chartDownloads = 0
     const search = {
       type: "web_search_call",
       id: "fixture_search",
@@ -61,15 +62,36 @@ for (const output of ["search", "image"] as const) {
     const initial =
       output === "search"
         ? search
-        : {
-            type: "image_generation_call",
-            id: "fixture_image",
-            status: "in_progress",
-            result: null,
-          }
+        : output === "image"
+          ? {
+              type: "image_generation_call",
+              id: "fixture_image",
+              status: "in_progress",
+              result: null,
+            }
+          : {
+              type: "code_interpreter_call",
+              id: "fixture_interpreter",
+              status: "in_progress",
+              container_id: "cntr_fixture",
+              code: null,
+              outputs: null,
+            }
     const label =
-      output === "search" ? `Search web · ${query}` : "Generate image"
+      output === "search"
+        ? `Search web · ${query}`
+        : output === "image"
+          ? "Generate image"
+          : "Run code"
     const endpoint = createServer((request, response) => {
+      if (
+        request.url === "/v1/containers/cntr_fixture/files/cfile_chart/content"
+      ) {
+        chartDownloads += 1
+        response.writeHead(200, { "content-type": "image/png" })
+        response.end(Buffer.from(pngImageBase64, "base64"))
+        return
+      }
       if (request.url === "/v1/models") {
         response.writeHead(200, { "content-type": "application/json" })
         response.end(JSON.stringify({ data: [{ id: "hosted-fixture" }] }))
@@ -155,13 +177,41 @@ for (const output of ["search", "image"] as const) {
                 sources: [{ type: "url", url: source }],
               },
             }
-          : { ...initial, status: "completed", result: pngImageBase64 }
+          : output === "image"
+            ? { ...initial, status: "completed", result: pngImageBase64 }
+            : { ...initial, status: "completed", code: "draw_fixture()" }
       send(running, {
         type: "response.output_item.done",
         output_index: 0,
         item: completedTool,
       })
-      finish(running, [completedTool, message(answer)])
+      const reply =
+        output === "chart"
+          ? {
+              ...message(answer),
+              content: [
+                {
+                  type: "output_text",
+                  text: answer,
+                  annotations: [
+                    {
+                      type: "container_file_citation",
+                      container_id: "cntr_fixture",
+                      file_id: "cfile_chart",
+                      filename: "chart.png",
+                    },
+                  ],
+                },
+              ],
+            }
+          : message(answer)
+      if (output === "chart")
+        send(running, {
+          type: "response.output_item.done",
+          output_index: 1,
+          item: reply,
+        })
+      finish(running, [completedTool, reply])
       running = undefined
 
       const completed = page.getByRole("region", {
@@ -170,7 +220,7 @@ for (const output of ["search", "image"] as const) {
       })
       const checkHistory = async () => {
         await expect(completed.getByText(answer, { exact: true })).toBeVisible()
-        if (output === "image") {
+        if (output === "image" || output === "chart") {
           const image = completed.getByRole("img", { name: "Generated image" })
           await expect(image).toBeVisible()
           await expect
@@ -196,6 +246,7 @@ for (const output of ["search", "image"] as const) {
       server = await start(port)
       await page.reload()
       await checkHistory()
+      expect(chartDownloads).toBe(output === "chart" ? 1 : 0)
     } finally {
       running?.end()
       await server?.stop()

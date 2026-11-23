@@ -1,9 +1,3 @@
-import {
-  pngImageBase64,
-  webpImageBase64,
-  jpegImageBase64,
-  gifImageBase64,
-} from "../fixtures/images.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import {
   createServer,
@@ -29,6 +23,12 @@ import {
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import {
+  gifImageBase64,
+  jpegImageBase64,
+  pngImageBase64,
+  webpImageBase64,
+} from "../fixtures/images.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 const signedParts = [
@@ -43,6 +43,56 @@ const signedParts = [
 ]
 
 describe("native Gemini provider", () => {
+  it("keeps URL Context fetches and their statuses in completed display content", async () => {
+    const retrievedUrl = "https://example.test/guide"
+    await withServer(
+      async (_incoming, outgoing) => {
+        send(outgoing, [
+          {
+            candidates: [
+              {
+                ...chunk([{ text: "The guide is ready." }], "STOP")
+                  .candidates[0],
+                urlContextMetadata: {
+                  urlMetadata: [
+                    {
+                      retrievedUrl,
+                      urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ])
+      },
+      async (baseURL) => {
+        const stream = createGeminiProvider({
+          apiKey: "key",
+          baseURL,
+          model: "gemini-test",
+        })
+        const events = await Array.fromAsync(stream(request()))
+        const tool = {
+          type: "hosted_tool",
+          kind: "web_fetch",
+          status: "completed",
+          label: retrievedUrl,
+        }
+        expect(events).toContainEqual({
+          type: "hosted_tool",
+          tool: expect.objectContaining(tool),
+        })
+        expect(events.at(-1)).toMatchObject({
+          type: "response",
+          response: {
+            content: expect.arrayContaining([expect.objectContaining(tool)]),
+          },
+        })
+      },
+    )
+  })
+
   it("projects grounding accumulated across SSE events onto the coalesced answer", async () => {
     const textParts = [{ text: "前😀" }, { text: "答案" }]
     await withServer(
