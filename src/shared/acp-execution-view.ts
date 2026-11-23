@@ -199,6 +199,27 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
     turns.set(id, turn)
     return turn
   }
+  const closeText = (turn: Turn, at: string) => {
+    const index = turn.openText
+    if (index === undefined) return
+    delete turn.openText
+    const entry = turn.entries[index]
+    if (
+      (entry?.kind !== "assistant" && entry?.kind !== "reasoning") ||
+      entry.status !== "streaming"
+    )
+      return
+    if (entry.kind === "reasoning" && entry.startedAt !== undefined) {
+      // ACP provides chunks without an end timestamp. A new entry or the
+      // terminal update closes the locally observed interval.
+      turn.entries[index] = {
+        ...entry,
+        status: "completed",
+        completedAt: at,
+        durationMs: Math.max(0, Date.parse(at) - Date.parse(entry.startedAt)),
+      }
+    } else turn.entries[index] = { ...entry, status: "completed" }
+  }
   const addText = (
     turn: Turn,
     kind: TextEntry["kind"],
@@ -220,6 +241,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       }
       return
     }
+    closeText(turn, at)
     turn.openText = turn.entries.length
     turn.entries.push({
       kind,
@@ -229,7 +251,14 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       status:
         replay || turn.completedAt !== undefined ? "completed" : "streaming",
       at,
-      ...(kind === "reasoning" ? { format: "raw" } : {}),
+      ...(kind === "reasoning"
+        ? {
+            format: "raw",
+            ...(replay || turn.completedAt !== undefined
+              ? {}
+              : { startedAt: at }),
+          }
+        : {}),
       ...(source === undefined ? {} : { sources: [source] }),
     })
   }
@@ -237,12 +266,13 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
     turn: Turn | undefined,
     update: Record<string, unknown>,
     id: string,
+    at: string,
     permission = false,
   ) => {
     const prior = tools.get(id)
     const owner = prior?.turn ?? turn
     if (owner === undefined) return
-    if (turn !== undefined) delete turn.openText
+    if (turn !== undefined) closeText(turn, at)
     const fields = Object.fromEntries(
       Object.entries(update).filter(([, value]) => value != null),
     )
@@ -307,13 +337,13 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       const turn = id === undefined ? undefined : turnFor(id, at)
       if (channel === "tool_call" || channel === "tool_call_update") {
         const toolCallId = acpString(update.toolCallId)
-        if (toolCallId !== undefined) addTool(turn, update, toolCallId)
+        if (toolCallId !== undefined) addTool(turn, update, toolCallId, at)
       } else if (
         turn !== undefined &&
         channel === "plan" &&
         Array.isArray(update.entries)
       ) {
-        delete turn.openText
+        closeText(turn, at)
         const plan = update.entries.flatMap<SessionPlan["plan"][number]>(
           (value) => {
             const { content, status } = acpRecord(value)
@@ -402,7 +432,7 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
             display.source,
           )
           if (display.image !== undefined) {
-            delete turn.openText
+            closeText(turn, at)
             turn.entries.push({
               kind: "image_output",
               itemId: `acp:image:${seq}`,
@@ -443,9 +473,10 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
       }
     } else if (event.type === "permission.requested") {
       if (permissions.has(event.requestId)) continue
-      delete turn.openText
+      closeText(turn, at)
       const id = acpString(event.toolCall?.toolCallId) ?? event.requestId
-      if (event.toolCall !== undefined) addTool(turn, event.toolCall, id, true)
+      if (event.toolCall !== undefined)
+        addTool(turn, event.toolCall, id, at, true)
       permissions.set(event.requestId, event)
       permissionEntries.set(event.requestId, {
         turn,
@@ -464,16 +495,11 @@ function projectObserved(events: readonly ObservedEvent[], replay = false) {
         activeTurnId = turn.id
         continue
       }
-      delete turn.openText
+      closeText(turn, at)
       turn.completedAt = at
       if (activeTurnId === turn.id) activeTurnId = undefined
       for (const [id, permission] of permissions)
         if (permission.turnId === turn.id) resolvePermission(id)
-      turn.entries = turn.entries.map((entry) =>
-        entry.kind === "assistant" || entry.kind === "reasoning"
-          ? { ...entry, status: "completed" }
-          : entry,
-      )
       if (event.status !== "completed")
         turn.entries.push({
           kind: "turn_terminal",

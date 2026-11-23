@@ -58,6 +58,10 @@ test("shows ACP images and resources live and after reopening", async ({
       .fill("output-media")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     await checkImage(live)
+    await live.getByRole("button", { name: "1 tool call", exact: true }).click()
+    await expect(
+      live.getByRole("button", { name: /^Thought for / }),
+    ).toBeVisible()
     await checkImage(history)
     await checkSources()
     const port = new URL(server.url).port
@@ -66,6 +70,12 @@ test("shows ACP images and resources live and after reopening", async ({
     await page.reload()
     await checkImage(history)
     await checkSources()
+    await history.getByRole("button", { name: /^Worked for/ }).click()
+    await history
+      .getByRole("button", { name: "1 tool call", exact: true })
+      .click()
+    await history.getByRole("button", { name: /^Thought for / }).click()
+    await expect(history.getByText("Plan the ACP fixture image.")).toBeVisible()
   } finally {
     await server?.stop()
     await environment.cleanup()
