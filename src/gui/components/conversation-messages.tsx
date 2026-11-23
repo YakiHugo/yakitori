@@ -760,8 +760,7 @@ const EntryCell = memo(function EntryCell({
 })
 
 function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
-  const { workspaceRoot, sessionId, apiBase, capabilities } =
-    useConversationScope()
+  const { workspaceRoot, sessionId, apiBase } = useConversationScope()
   const openAgent = async (agentId: string) => {
     if (sessionId) useWorkspaceStore.getState().openAgents(sessionId, agentId)
   }
@@ -773,9 +772,7 @@ function DefaultEntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
         <AssistantMessageCell
           entry={entry}
           workspaceRoot={workspaceRoot}
-          sessionId={
-            capabilities.supportsContextExcerpts ? sessionId : undefined
-          }
+          sessionId={sessionId}
           apiBase={apiBase}
         />
       )
