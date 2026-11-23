@@ -44,6 +44,7 @@ export type LiveDisplayItemStarted = {
         readonly itemId: string
         readonly source?: ModelOutputPresentation["source"]
         readonly purpose?: ModelOutputPresentation["purpose"]
+        readonly refusal?: true
       }
     | {
         readonly type: "reasoning"

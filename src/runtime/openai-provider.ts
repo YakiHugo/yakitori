@@ -910,6 +910,7 @@ async function* streamOpenAIWire(
             : purpose === undefined
               ? {}
               : { purpose }),
+          ...(event.type === "response.refusal.delta" ? { refusal: true } : {}),
           ...(request.streamOutputItems && event.item_id !== undefined
             ? { itemId: event.item_id }
             : {}),
@@ -1915,6 +1916,7 @@ function fromOpenAIOutput(
         content.push({
           type: "text",
           text: part.type === "output_text" ? part.text : part.refusal,
+          ...(part.type === "refusal" ? { refusal: true } : {}),
           ...(annotations.length === 0 ? {} : { annotations }),
           ...(item.phase === "commentary" || item.phase === "final_answer"
             ? { purpose: item.phase }

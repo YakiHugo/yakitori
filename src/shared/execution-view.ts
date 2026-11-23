@@ -731,6 +731,9 @@ function applyTransient(
         ...(item.type === "agent_message" && item.purpose !== undefined
           ? { purpose: item.purpose }
           : {}),
+        ...(item.type === "agent_message" && item.refusal === true
+          ? { refusal: true }
+          : {}),
         ...(item.type === "reasoning" && item.representation !== undefined
           ? { representation: item.representation }
           : {}),
@@ -767,6 +770,7 @@ function applyTransient(
           text: event.delta,
           ...(event.source === undefined ? {} : { source: event.source }),
           ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
+          ...(event.refusal === true ? { refusal: true } : {}),
           ...(event.representation === undefined
             ? {}
             : { representation: event.representation }),
@@ -825,6 +829,7 @@ function applyTransient(
         text,
         ...(event.source === undefined ? {} : { source: event.source }),
         ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
+        ...(event.refusal === true ? { refusal: true } : {}),
         ...(event.representation === undefined
           ? {}
           : { representation: event.representation }),
@@ -1067,6 +1072,7 @@ function applyDurable(
                 ...(item.content[0]?.purpose === undefined
                   ? {}
                   : { purpose: item.content[0].purpose }),
+                ...(item.content[0]?.refusal === true ? { refusal: true } : {}),
                 ...(sources.length === 0 ? {} : { sources }),
                 itemId: item.itemId,
                 turnId: event.data.turnId,

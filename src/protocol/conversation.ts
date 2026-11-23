@@ -17,6 +17,7 @@ export type ModelTextBlock = Readonly<{
 export type ModelAssistantTextBlock = ModelTextBlock &
   Readonly<{
     purpose?: AssistantTextPurpose
+    refusal?: true
     annotations?: readonly ModelCitation[]
   }>
 

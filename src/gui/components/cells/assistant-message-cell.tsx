@@ -25,6 +25,9 @@ export function AssistantMessageCell({
   const citationListId = useId()
   return (
     <div
+      className={cn(
+        entry.refusal && "border-s-2 border-muted-foreground/35 ps-3",
+      )}
       {...contextSourceAttributes(
         sessionId
           ? {
@@ -37,6 +40,11 @@ export function AssistantMessageCell({
       )}
     >
       <LiveTextNotice entry={entry} />
+      {entry.refusal ? (
+        <p className="mb-1 text-caption font-medium text-muted-foreground">
+          Provider refusal
+        </p>
+      ) : null}
       <MarkdownView
         apiBase={apiBase}
         className={cn(

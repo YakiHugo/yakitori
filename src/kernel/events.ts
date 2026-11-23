@@ -931,12 +931,14 @@ function isModelContentBlock(value: unknown): boolean {
         "text",
         "providerMetadata",
         "purpose",
+        "refusal",
         "annotations",
       ]) &&
       isString(text) &&
       (value.purpose === undefined ||
         value.purpose === "commentary" ||
         value.purpose === "final_answer") &&
+      (value.refusal === undefined || value.refusal === true) &&
       (value.providerMetadata === undefined ||
         isJsonObject(value.providerMetadata)) &&
       (value.annotations === undefined ||

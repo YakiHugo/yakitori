@@ -50,6 +50,7 @@ export type ExecutionEntry =
       readonly kind: "assistant"
       readonly source?: ModelOutputPresentation["source"]
       readonly purpose?: ModelOutputPresentation["purpose"]
+      readonly refusal?: true
       readonly sources?: readonly CitationSource[]
       readonly itemId: string
       readonly turnId: string

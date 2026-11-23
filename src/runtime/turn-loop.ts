@@ -2535,6 +2535,9 @@ async function consumeModelStream(input: {
             ...(event.type === "delta" && event.purpose !== undefined
               ? { purpose: event.purpose }
               : {}),
+            ...(event.type === "delta" && event.refusal === true
+              ? { refusal: true }
+              : {}),
             ...(event.type === "reasoning_delta" &&
             event.representation !== undefined
               ? { representation: event.representation }

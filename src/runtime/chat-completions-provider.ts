@@ -447,7 +447,25 @@ async function* streamChatCompletions(
     providerRequestId = response.headers.get("x-request-id") ?? undefined
     stage = "response_body"
     let completionId: string | undefined
-    let text = ""
+    const answerParts: { text: string; refusal: boolean }[] = []
+    const answerDelta = (text: string, refusal: boolean): ModelStreamEvent => {
+      let part = answerParts.at(-1)
+      if (part === undefined || part.refusal !== refusal) {
+        part = { text: "", refusal }
+        answerParts.push(part)
+      }
+      part.text += text
+      const partIndex = answerParts.length - 1
+      return {
+        type: "delta",
+        text,
+        ...(refusal ? { refusal: true } : {}),
+        ...(partIndex === 0 ? {} : { partIndex }),
+        ...(request.streamOutputItems && completionId !== undefined
+          ? { itemId: `${completionId}_0` }
+          : {}),
+      }
+    }
     const reasoningParts: {
       text: string
       representation: ReasoningRepresentation
@@ -660,7 +678,6 @@ async function* streamChatCompletions(
             if (part.type === "text" && typeof part.text === "string") {
               fragment = part.text
               type = "delta"
-              text += fragment
             } else if (part.type === "thinking") {
               if (
                 !Array.isArray(part.thinking) ||
@@ -701,14 +718,7 @@ async function* streamChatCompletions(
             if (type === "reasoning_delta") {
               plainReasoning ??= addReasoningPart("raw")
               yield reasoningDelta(plainReasoning, fragment)
-            } else
-              yield {
-                type: "delta",
-                text: fragment,
-                ...(request.streamOutputItems && completionId !== undefined
-                  ? { itemId: `${completionId}_0` }
-                  : {}),
-              }
+            } else yield answerDelta(fragment, false)
           }
         }
         const plainFragments = new Set<string>()
@@ -739,7 +749,6 @@ async function* streamChatCompletions(
             }
             continue
           } else {
-            text += fragment
             if (field === "refusal") refusal += fragment
             else {
               nativeText += fragment
@@ -751,15 +760,7 @@ async function* streamChatCompletions(
             }
           }
           if (fragment.length > 0)
-            yield {
-              type,
-              text: fragment,
-              ...(request.streamOutputItems && completionId !== undefined
-                ? {
-                    itemId: `${completionId}_0`,
-                  }
-                : {}),
-            }
+            yield answerDelta(fragment, field === "refusal")
         }
         if (delta.tool_calls !== undefined) {
           if (!Array.isArray(delta.tool_calls))
@@ -890,13 +891,43 @@ async function* streamChatCompletions(
               },
             }),
       })
-    if (text.length > 0 || annotations.length > 0) {
-      const citations = openAICitations(annotations, text)
+    const plain = answerParts.filter((part) => !part.refusal)
+    const citations = openAICitations(
+      annotations,
+      plain.map((part) => part.text).join(""),
+    )
+    if (annotations.length > 0 && plain.length === 0)
+      answerParts.push({ text: "", refusal: false })
+    let plainOffset = 0
+    let firstPlain = true
+    for (const { text, refusal } of answerParts) {
+      if (refusal) {
+        content.push({ type: "text", text, refusal: true })
+        continue
+      }
+      const partCitations = citations.flatMap(
+        ({ responseSpan, ...citation }) => {
+          if (responseSpan === undefined) return firstPlain ? [citation] : []
+          const start = Math.max(plainOffset, responseSpan.start)
+          const end = Math.min(plainOffset + text.length, responseSpan.end)
+          return start >= end
+            ? []
+            : [
+                {
+                  ...citation,
+                  responseSpan: {
+                    start: start - plainOffset,
+                    end: end - plainOffset,
+                  },
+                },
+              ]
+        },
+      )
       content.push({
         type: "text",
         text,
-        ...(citations.length === 0 ? {} : { annotations: citations }),
-        ...(annotations.length === 0
+        ...(partCitations.length === 0 ? {} : { annotations: partCitations }),
+        ...(annotations.length === 0 || !firstPlain
           ? {}
           : {
               providerMetadata: {
@@ -904,6 +935,8 @@ async function* streamChatCompletions(
               },
             }),
       })
+      plainOffset += text.length
+      firstPlain = false
     }
     let incompleteToolCalls = false
     const ids = new Set<string>()
@@ -975,7 +1008,7 @@ async function* streamChatCompletions(
     const stopReason =
       finishReason === "length"
         ? ModelStopReason.Length
-        : finishReason === "content_filter"
+        : finishReason === "content_filter" || (refusal.length > 0 && !hasCalls)
           ? ModelStopReason.ContentFilter
           : hasCalls
             ? ModelStopReason.ToolUse

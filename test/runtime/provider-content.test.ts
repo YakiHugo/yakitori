@@ -121,6 +121,7 @@ it("retains refusal provenance without turning it into a tool or losing visible 
     {
       type: "text",
       text: "Cannot comply",
+      refusal: true,
       providerMetadata: { openai: { part: { type: "refusal" } } },
     },
   ])
