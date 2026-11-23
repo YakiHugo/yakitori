@@ -304,6 +304,11 @@ export type ContextCompactionCompletedItem = Readonly<{
   status: typeof ItemStatus.Completed | typeof ItemStatus.Failed
   error?: KernelError
 }>
+export type HostedToolExecutionItem = Readonly<{
+  type: "hosted_tool"
+  itemId: string
+  tool: HostedToolBlock
+}>
 export type ToolExecutionItemBase = Readonly<{
   itemId: string
   toolCallId: string
@@ -379,7 +384,10 @@ export type ToolExecutionItem = ToolExecutionItemBase & ToolExecutionDescriptor
 // self-contained ItemCompleted facts.
 export type StreamedStartedItem = ContextCompactionStartedItem
 
-export type StartedExecutionItem = StreamedStartedItem | ToolExecutionItem
+export type StartedExecutionItem =
+  | StreamedStartedItem
+  | ToolExecutionItem
+  | HostedToolExecutionItem
 
 export type ItemStartedEvent = Readonly<{
   type: typeof EventType.ItemStarted
@@ -390,6 +398,7 @@ export type CompletedExecutionItem =
   | AgentMessageExecutionItem
   | ReasoningExecutionItem
   | ContextCompactionCompletedItem
+  | HostedToolExecutionItem
   | (ToolExecutionItem &
       Readonly<{
         resultItemId: string
@@ -432,3 +441,4 @@ export type AppSessionEventEnvelope =
         type: "session.cursor"
         data: Readonly<Record<string, never>>
       }>)
+import type { HostedToolBlock } from "./hosted-tool.ts"

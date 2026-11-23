@@ -65,6 +65,20 @@ describe("Interactions hosted step continuation", () => {
         ],
       },
     ])
+    expect(response.content).toMatchObject([
+      {
+        type: "hosted_tool",
+        id: "code-1",
+        status: "running",
+        detail: "print(42)",
+      },
+      {
+        type: "hosted_tool",
+        id: "code-1",
+        status: "completed",
+        detail: "42\n",
+      },
+    ])
     expectNativeReplay(response, [
       {
         type: "code_execution_call",
@@ -223,7 +237,9 @@ function finishSteps(
 
 function expectNativeReplay(response: ModelResponse, expected: JsonObject[]) {
   expect(response.stopReason).toBe(ModelStopReason.EndTurn)
-  expect(response.content).toEqual([])
+  expect(response.content.map((part) => part.type)).toEqual(
+    expected.map(() => "hosted_tool"),
+  )
   expect(response.native?.map((item) => item.value)).toEqual(expected)
   expect(
     toGeminiInteractionInput(

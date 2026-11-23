@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util"
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"
 import {
   isJsonObject,
   type JsonObject,
@@ -212,7 +213,8 @@ export function createGeminiInteractionOutput(
           (step) => step.value.type === value.type,
         ).length
         steps.push({ value, closed: false, partIndex })
-        return []
+        const tool = interactionHostedTool(value, index, false)
+        return tool === undefined ? [] : [{ type: "hosted_tool", tool }]
       }
       const step = steps[index]
       if (step === undefined || step.closed)
@@ -221,7 +223,8 @@ export function createGeminiInteractionOutput(
         )
       if (payload.event_type === "step.stop") {
         step.closed = true
-        return []
+        const tool = interactionHostedTool(step.value, index, true)
+        return tool === undefined ? [] : [{ type: "hosted_tool", tool }]
       }
       if (payload.event_type !== "step.delta" || !isJsonObject(payload.delta))
         throw new GeminiProtocolError(
@@ -303,7 +306,8 @@ export function createGeminiInteractionOutput(
       ) {
         // Hosted steps are provider data, never authority to execute local tools.
         mergeHostedDelta(value, delta)
-        return []
+        const tool = interactionHostedTool(value, index, false)
+        return tool === undefined ? [] : [{ type: "hosted_tool", tool }]
       }
       throw new GeminiProtocolError(
         `Unsupported Interactions delta: ${delta.type}.`,
@@ -333,7 +337,7 @@ export function createGeminiInteractionOutput(
       const content: ModelContentBlock[] = []
       const native: JsonObject[] = []
       const callIds = new Set<string>()
-      for (const step of steps) {
+      for (const [index, step] of steps.entries()) {
         if (step.value.type === "function_call" && incomplete) {
           incompleteToolCalls = true
           continue
@@ -400,10 +404,14 @@ export function createGeminiInteractionOutput(
               ? {}
               : { toolKind: "custom", customInputFallbackKey: key }),
           })
-        } else if (!hostedSteps.includes(String(value.type)))
-          throw new GeminiProtocolError(
-            `Unsupported Interactions output: ${value.type}.`,
-          )
+        } else {
+          const tool = interactionHostedTool(value, index, step.closed)
+          if (tool === undefined)
+            throw new GeminiProtocolError(
+              `Unsupported Interactions output: ${value.type}.`,
+            )
+          content.push(tool)
+        }
         native.push(value)
       }
       if (status === "requires_action" && callIds.size === 0)
@@ -432,6 +440,61 @@ export function createGeminiInteractionOutput(
         ...(incompleteToolCalls ? { incompleteToolCalls: true } : {}),
       }
     },
+  }
+}
+
+function interactionHostedTool(
+  value: JsonObject,
+  index: number,
+  closed: boolean,
+): HostedToolBlock | undefined {
+  const type = String(value.type)
+  if (!hostedSteps.includes(type)) return undefined
+  const kind: HostedToolBlock["kind"] = type.startsWith("google_search")
+    ? "web_search"
+    : type.startsWith("url_context")
+      ? "web_fetch"
+      : type.startsWith("file_search")
+        ? "file_search"
+        : type.startsWith("code_execution")
+          ? "code_execution"
+          : type.startsWith("mcp_server")
+            ? "mcp"
+            : "lookup"
+  const id = value.call_id ?? value.id
+  const input = isJsonObject(value.arguments) ? value.arguments : {}
+  const result = value.result
+  const resultItems = Array.isArray(result) ? result : [result]
+  const detail = [
+    input.code,
+    ...resultItems.flatMap((item) =>
+      isJsonObject(item)
+        ? [item.text ?? item.url ?? item.uri ?? item.output]
+        : [item],
+    ),
+  ]
+    .filter(
+      (item): item is string => typeof item === "string" && item.length > 0,
+    )
+    .join("\n")
+  const rawLabel = input.queries ?? input.urls ?? input.query ?? value.name
+  const label = Array.isArray(rawLabel)
+    ? rawLabel
+        .filter((item): item is string => typeof item === "string")
+        .join(", ")
+    : rawLabel
+  return {
+    type: "hosted_tool",
+    id: typeof id === "string" && id.length > 0 ? id : `step-${index}`,
+    kind,
+    status:
+      value.is_error === true
+        ? "failed"
+        : closed && type.endsWith("_result")
+          ? "completed"
+          : "running",
+    ...(typeof label === "string" && label.length > 0 ? { label } : {}),
+    ...(detail ? { detail } : {}),
   }
 }
 

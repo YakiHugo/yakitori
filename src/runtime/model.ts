@@ -279,6 +279,7 @@ export type ModelStreamRetryEvent = Readonly<{
 
 export type ModelStreamEvent =
   | ModelStreamDeltaEvent
+  | Readonly<{ type: "hosted_tool"; tool: HostedToolBlock }>
   | ModelStreamReasoningDeltaEvent
   | ModelStreamOutputItemEvent
   | ModelStreamResponseEvent
@@ -299,3 +300,4 @@ export function requireModelDocumentData(document: ModelDocumentBlock): string {
   if (document.data !== undefined) return document.data
   throw new Error("Model request contains an unresolved Session PDF.")
 }
+import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

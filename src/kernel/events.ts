@@ -426,6 +426,12 @@ function isReasoningItem(
 
 function isStartedExecutionItem(value: unknown): value is StartedExecutionItem {
   if (!isRecord(value)) return false
+  if (value.type === "hosted_tool")
+    return (
+      onlyKeys(value, ["type", "itemId", "tool"]) &&
+      isString(value.itemId) &&
+      isHostedToolBlock(value.tool)
+    )
   if (value.type === "context_compaction") {
     return onlyKeys(value, ["type", "itemId"]) && isString(value.itemId)
   }
@@ -438,6 +444,7 @@ function isCompletedExecutionItem(
   if (!isRecord(value)) return false
   if (value.type === "agent_message") return isAgentMessageItem(value)
   if (value.type === "reasoning") return isReasoningItem(value)
+  if (value.type === "hosted_tool") return isStartedExecutionItem(value)
   if (value.type === "context_compaction") {
     return (
       onlyKeys(value, ["type", "itemId", "status", "error"]) &&
@@ -923,6 +930,7 @@ function isFileObservationRange(
 
 function isModelContentBlock(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.type)) return false
+  if (value.type === "hosted_tool") return isHostedToolBlock(value)
   if (value.type === "text") {
     const { text } = value
     return (
@@ -1428,3 +1436,4 @@ function isModelDocumentBlock(value: unknown): value is ModelDocumentBlock {
     (value.data === undefined || isString(value.data))
   )
 }
+import { isHostedToolBlock } from "../protocol/hosted-tool.ts"

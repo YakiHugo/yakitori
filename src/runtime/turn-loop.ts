@@ -1729,7 +1729,7 @@ async function executeTurnModelLoop(
         await input.session.recordConversationItems(input.execution, [item])
         await input.session.recordItemCompletions(
           input.execution,
-          completedResponseItems(item, reasoningTimes),
+          completedResponseItems(item, responseItemId, reasoningTimes),
         )
         if (content.some((block) => block.type === "tool_call")) {
           answerItemIds.length = 0
@@ -1794,6 +1794,8 @@ async function executeTurnModelLoop(
         get itemId() {
           return responseItemId
         },
+        emitHostedTool: (item) =>
+          input.session.emitItemStarted(input.execution, item),
         emitModelStream: (event) => {
           if (event.kind === "assistant" && event.delta.trim().length > 0)
             latency.firstUsefulOutputMs ??= elapsed()
@@ -2359,6 +2361,7 @@ async function consumeModelStream(input: {
   readonly stream: StreamFn
   readonly itemId?: string
   readonly emitModelStream?: WithoutExecution<Session["emitModelStream"]>
+  readonly emitHostedTool?: WithoutExecution<Session["emitItemStarted"]>
   readonly emitWarning?: WithoutExecution<Session["emitWarning"]>
   readonly onOperationalFailure: TurnLoopOperationalFailureReporter | undefined
   readonly onOutputItem?: (
@@ -2502,8 +2505,24 @@ async function consumeModelStream(input: {
         if (itemId === undefined)
           throw new Error("Committed output requires a display item id.")
         await input.onOutputItem(event.content, itemId, event.native)
-        for (const part of displayOutputParts(itemId, event.content))
+        for (const part of displayOutputParts(
+          itemId,
+          event.content,
+          input.itemId ?? itemId,
+        ))
           provisionalItems.delete(part.itemId)
+        continue
+      }
+      if (event.type === "hosted_tool") {
+        if (input.itemId !== undefined && input.emitHostedTool !== undefined) {
+          const itemId = hostedToolItemId(input.itemId, event.tool.id)
+          provisionalItems.add(itemId)
+          input.emitHostedTool({
+            type: "hosted_tool",
+            itemId,
+            tool: event.tool,
+          })
+        }
         continue
       }
       if (event.type !== "response") {
@@ -3032,6 +3051,7 @@ async function compactLiveHistory(
 function* displayOutputParts(
   itemId: string,
   content: readonly ModelContentBlock[],
+  requestItemId: string,
 ) {
   const indexes = { assistant: 0, summary: 0, raw: 0, redacted: 0 }
   for (const block of content) {
@@ -3050,11 +3070,18 @@ function* displayOutputParts(
           block.representation,
         ),
       }
+    else if (block.type === "hosted_tool")
+      yield { block, itemId: hostedToolItemId(requestItemId, block.id) }
   }
+}
+
+function hostedToolItemId(requestItemId: string, toolId: string): string {
+  return `${requestItemId}:hosted:${toolId}`
 }
 
 function completedResponseItems(
   response: ResponseItemEnvelope,
+  requestItemId: string,
   reasoningTimes: Map<string, { first: number; last: number }>,
 ): readonly CompletedExecutionItem[] {
   if (response.item.role !== "assistant") return []
@@ -3067,8 +3094,10 @@ function completedResponseItems(
           itemId: response.id,
         }
   return Array.from(
-    displayOutputParts(response.id, response.item.content),
+    displayOutputParts(response.id, response.item.content, requestItemId),
     ({ block, itemId }): CompletedExecutionItem => {
+      if (block.type === "hosted_tool")
+        return { type: "hosted_tool", itemId, tool: block }
       const time = reasoningTimes.get(itemId)
       reasoningTimes.delete(itemId)
       const durationMs =
