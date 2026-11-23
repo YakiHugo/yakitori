@@ -54,7 +54,7 @@ export function createSessionEventHub(
   const maxDisplayItems = 256
   type DisplayDelta = Extract<
     LiveSessionEvent,
-    { type: "assistant.delta" | "reasoning.delta" }
+    { type: "assistant.delta" | "reasoning.delta" | "tool.output.delta" }
   >
   const display = new Map<string, DisplayDelta>()
   let displayCharacters = 0
@@ -203,7 +203,11 @@ export function createSessionEventHub(
       }
     },
     publishTransient(event) {
-      if (event.type === "assistant.delta" || event.type === "reasoning.delta")
+      if (
+        event.type === "assistant.delta" ||
+        event.type === "reasoning.delta" ||
+        event.type === "tool.output.delta"
+      )
         retainDisplay(event)
       if (event.type === "item.discarded") removeDisplay(keyOf(event))
       if (event.type === "turn.finished")

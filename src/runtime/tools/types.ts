@@ -39,6 +39,7 @@ export type ToolExecutionContext = Readonly<{
   turnId?: string
   rolloutAssets?: RolloutAssets
   signal?: AbortSignal
+  onOutput?: (delta: string) => void
   visibleFileObservations?: VisibleFileObservations
   agentControl?: BoundAgentControl
   threadCollaboration?: BoundThreadCollaboration
