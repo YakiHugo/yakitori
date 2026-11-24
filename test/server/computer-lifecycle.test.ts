@@ -229,7 +229,9 @@ describe("computer ownership through application turn lifecycle", () => {
         await input(context.application, second.session.id, "other-session")
         await idle(context.application, second.session.id)
         expect(
-          context.toolResults.some((result) => result.includes("busy")),
+          context.toolResults.some((result) =>
+            result.includes("cleanup is unconfirmed"),
+          ),
         ).toBe(true)
         await expect(
           context.application.threadManager.closeThread(first.session.id),

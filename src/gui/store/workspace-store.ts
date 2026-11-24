@@ -79,6 +79,7 @@ type WorkspaceStore = {
   openSkill(path: string, name: string, projectId?: string): void
   setFileDirty(id: string, dirty: boolean): void
   openBrowser(url: string): void
+  adoptBrowserPopup(tabId: string, openerTabId: string): void
   openAgents(sourceSessionId: string, agentId?: string): void
   selectAgent(tabId: string, agentId?: string): void
   askInSideChat(
@@ -370,6 +371,27 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       tabs: get().tabs.map((tab) =>
         tab.id === id ? { ...current, dirty } : tab,
       ),
+    })
+  },
+  adoptBrowserPopup(tabId, openerTabId) {
+    const { tabs } = get()
+    if (tabs.some((tab) => tab.id === tabId)) return
+    const opener = tabs.find(
+      (tab) => tab.id === openerTabId && tab.kind === "browser",
+    )
+    if (!opener) return
+    set({
+      tabs: [
+        ...tabs,
+        {
+          id: tabId,
+          kind: "browser",
+          title: "Browser popup",
+          ...(opener.workspaceSessionId === undefined
+            ? {}
+            : { workspaceSessionId: opener.workspaceSessionId }),
+        },
+      ],
     })
   },
   openBrowser(initialUrl) {

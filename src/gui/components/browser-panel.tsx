@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   ArrowRight,
+  Hand,
   ExternalLink,
   Globe,
   LoaderCircle,
@@ -15,6 +16,8 @@ import type {
   WorkspaceBrowserState,
 } from "../../desktop/workspace-browser-types.ts"
 import { normalizeBrowserUrl } from "../../desktop/workspace-browser-url.ts"
+import { getAppRpcClient } from "../lib/rpc-client.ts"
+import { useAppStore } from "../store/app-store.ts"
 
 export type BrowserPanelProps = Readonly<{
   tabId: string
@@ -44,6 +47,7 @@ export function BrowserPanel({
   const [error, setError] = useState<string>()
   const [viewportError, setViewportError] = useState<string>()
   const [ready, setReady] = useState(false)
+  const [takingOver, setTakingOver] = useState(false)
   const [preview, setPreview] = useState<string>()
   const viewport = useRef<HTMLDivElement>(null)
   const initial = useRef(initialUrl)
@@ -284,6 +288,34 @@ export function BrowserPanel({
             <ArrowRight size={14} />
           )}
         </button>
+        {bridge && (
+          <button
+            type="button"
+            className="sidebar-icon"
+            aria-label="Take over browser tab"
+            title="Stop the turn controlling this tab"
+            disabled={!ready || takingOver}
+            onClick={() =>
+              void perform(async () => {
+                setTakingOver(true)
+                try {
+                  await getAppRpcClient(useAppStore.getState().apiBase).request(
+                    "browser/takeover",
+                    { tabId },
+                  )
+                } finally {
+                  setTakingOver(false)
+                }
+              })
+            }
+          >
+            {takingOver ? (
+              <LoaderCircle size={14} className="animate-spin" />
+            ) : (
+              <Hand size={14} />
+            )}
+          </button>
+        )}
       </form>
       {bridge && state.url && (
         <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-[11px] text-muted-foreground">

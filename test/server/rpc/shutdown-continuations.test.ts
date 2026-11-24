@@ -42,6 +42,7 @@ describe("existing-work controls during process drain", () => {
         .map((entry) => entry.method)
         .sort(),
     ).toEqual([
+      "browser/takeover",
       "computer/preview/stop",
       "computer/takeover",
       "engineSession/cancel",

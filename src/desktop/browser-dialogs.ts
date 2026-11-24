@@ -23,6 +23,8 @@ export class BrowserDialogs {
         expired: boolean
         state: "waiting" | "answering" | "answered" | "mismatch"
         observed?: JsonObject
+        browserAccepted?: boolean
+        nativeUnloadAllowed?: boolean
       })
     | undefined
   #reply: Promise<void> | undefined
@@ -54,6 +56,19 @@ export class BrowserDialogs {
         params.frameId === scope.document.frameId)
     ) {
       scope.expired = true
+      return
+    }
+    if (
+      method === "Page.javascriptDialogClosed" &&
+      scope.state === "answering" &&
+      scope.response.type === "beforeunload" &&
+      scope.response.accept &&
+      "frameId" in params &&
+      params.frameId === scope.document.frameId &&
+      "result" in params &&
+      params.result === true
+    ) {
+      scope.browserAccepted = true
       return
     }
     if (
@@ -162,9 +177,28 @@ export class BrowserDialogs {
     if (this.#failure)
       throw new BrowserControlError(
         "browser_cleanup_failed",
-        "JavaScript dialog response completion could not be confirmed. Computer input remains quarantined until cleanup succeeds.",
+        "JavaScript dialog response completion could not be confirmed. The tab remains quarantined until cleanup succeeds.",
         { cause: this.#failure },
       )
+  }
+
+  allowNavigationUnload(fromUrl: string): boolean {
+    const scope = this.#scope
+    if (
+      !scope ||
+      scope.closed.aborted ||
+      scope.expired ||
+      scope.nativeUnloadAllowed ||
+      scope.frame ||
+      scope.document.url !== fromUrl ||
+      scope.response.type !== "beforeunload" ||
+      !scope.response.accept ||
+      scope.observed?.inScope !== true ||
+      !(scope.state === "answered" || scope.browserAccepted)
+    )
+      return false
+    scope.nativeUnloadAllowed = true
+    return true
   }
 
   inspect(): JsonObject {

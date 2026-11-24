@@ -10,11 +10,7 @@ import {
 import { isJsonObject } from "../protocol/json.ts"
 import { resolveReadPath } from "../runtime/tools/path-policy.ts"
 import { plainToolName } from "../runtime/tools/tool-name.ts"
-import type {
-  RuntimeTool,
-  ToolExecutionContext,
-  ToolFailure,
-} from "../runtime/tools/types.ts"
+import type { RuntimeTool } from "../runtime/tools/types.ts"
 import { inspectUploadDirectory } from "./browser-upload-directory.ts"
 
 function parseUploadInput(input: unknown) {
@@ -56,11 +52,7 @@ function parseUploadInput(input: unknown) {
   }
 }
 
-export function createBrowserUploadTool(
-  browser: DesktopBrowser,
-  admit: (context: ToolExecutionContext) => Promise<ToolFailure | undefined>,
-  markCleanupPending: (context: ToolExecutionContext) => void,
-): RuntimeTool {
+export function createBrowserUploadTool(browser: DesktopBrowser): RuntimeTool {
   return {
     toolName: plainToolName("browser_upload"),
     description:
@@ -122,9 +114,7 @@ export function createBrowserUploadTool(
     async execute(input, context) {
       context.signal?.throwIfAborted()
       try {
-        const request = parseUploadInput(input),
-          refusal = await admit(context)
-        if (refusal) return refusal
+        const request = parseUploadInput(input)
         if (!context.threadId || !context.turnId)
           throw new Error("Browser uploads require an owning session and turn.")
         if (request.directory) {
@@ -224,7 +214,6 @@ export function createBrowserUploadTool(
         return { ok: true, output: result, content: JSON.stringify(result) }
       } catch (cause) {
         if (!(cause instanceof BrowserControlError)) throw cause
-        if (cause.code === "browser_cleanup_failed") markCleanupPending(context)
         return {
           ok: false,
           code: cause.code,

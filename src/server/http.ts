@@ -11,6 +11,7 @@ import type { ModelRoutePreviewer } from "../protocol/model-routing.ts"
 import type { AttachmentUploads } from "./attachment-uploads.ts"
 import type { ChatGPTConnections } from "./chatgpt-connections.ts"
 import type { ComputerControl } from "./computer-control.ts"
+import type { BrowserControl } from "./browser-control.ts"
 import type { ComputerPreviewService } from "./computer-preview.ts"
 import type { EngineRegistry } from "./engine-registry.ts"
 import { createSessionEventHub, type SessionEventHub } from "./event-hub.ts"
@@ -57,6 +58,7 @@ type YakitoriHttpServerCommonOptions = {
   ) => Promise<ApiReadSubscriptionResponse>
   readonly userConfig?: UserConfigStore
   readonly computerControl?: ComputerControl
+  readonly browserControl?: BrowserControl
   readonly computerPreview?: ComputerPreviewService
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
@@ -162,6 +164,9 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       ...(options.computerControl === undefined
         ? {}
         : { computerControl: options.computerControl }),
+      ...(options.browserControl === undefined
+        ? {}
+        : { browserControl: options.browserControl }),
       ...(options.computerPreview === undefined
         ? {}
         : { computerPreview: options.computerPreview }),

@@ -14,6 +14,7 @@ import type {
   SessionUnsubscribeParams,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
+import type { BrowserControl } from "../browser-control.ts"
 import type { ComputerControl } from "../computer-control.ts"
 import type { ComputerPreviewService } from "../computer-preview.ts"
 
@@ -108,6 +109,7 @@ import type { UserConfigStore } from "../user-config.ts"
 import type { SessionInteractions } from "../user-interactions.ts"
 import { requireUserModelPreference } from "../user-model-preference.ts"
 import { readWorkspaceFile, WorkspaceError } from "../workspace.ts"
+import { browserTakeoverMethod } from "./browser-methods.ts"
 import { chatGPTMethods } from "./chatgpt-methods.ts"
 import { computerMethods } from "./computer-methods.ts"
 import { engineMethods } from "./engine-methods.ts"
@@ -132,6 +134,7 @@ export type RpcMethodOutcome = Readonly<{
 
 export type RpcMethodContext = Readonly<{
   computerControl?: ComputerControl
+  browserControl?: BrowserControl
   computerPreview?: ComputerPreviewService
   mcp?: McpService
   providerConfiguration?: ProviderService
@@ -598,6 +601,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...chatGPTMethods,
   ...workspaceRpcMethods,
   ...computerMethods,
+  browserTakeoverMethod,
   {
     method: "server/ping",
     shutdownContinuation: true,

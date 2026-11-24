@@ -3191,7 +3191,7 @@ describe("application composition", () => {
     "browser_dialog",
     "browser_download",
     "browser_drag",
-  ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
+  ])("dispatches browser tools while native input is owned or disconnected (tool=%s)", async (browserTool) => {
     const browserInput =
       browserTool === "browser_drag"
         ? {
@@ -3286,7 +3286,7 @@ describe("application composition", () => {
             },
           ],
         },
-        { content: [{ type: "text", text: "Browser is busy" }] },
+        { content: [{ type: "text", text: "Browser ran" }] },
         {
           stopReason: ModelStopReason.ToolUse,
           content: [
@@ -3298,7 +3298,7 @@ describe("application composition", () => {
             },
           ],
         },
-        { content: [{ type: "text", text: "Browser remains disconnected" }] },
+        { content: [{ type: "text", text: "Browser still runs" }] },
       ])
       let inspections = 0
       const application = await createYakitoriApplication({
@@ -3344,10 +3344,7 @@ describe("application composition", () => {
           }),
         )
         await waitForThreadIdle(application, reader)
-        expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
-          "Computer use is busy in another conversation",
-        )
-        expect(inspections).toBe(0)
+        expect(inspections).toBe(1)
         await rpcRequest(baseUrl, "computer/takeover", {})
         await waitForThreadIdle(application, owner)
         expectOk(
@@ -3360,10 +3357,7 @@ describe("application composition", () => {
           }),
         )
         await waitForThreadIdle(application, reader)
-        expect(JSON.stringify(provider.requests[5]?.messages)).toContain(
-          "Connect computer use before inspecting desktop browser tabs",
-        )
-        expect(inspections).toBe(0)
+        expect(inspections).toBe(2)
       } finally {
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
@@ -3380,7 +3374,7 @@ describe("application composition", () => {
     "browser_navigate",
     "browser_download",
     "browser_drag",
-  ])("blocks native and browser input after %s cleanup fails until release is confirmed", async (browserTool) => {
+  ])("quarantines only the affected tab after %s cleanup fails", async (browserTool) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release, called } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
@@ -3407,7 +3401,7 @@ describe("application composition", () => {
                   "browser_download_00000000-0000-4000-8000-000000000001",
               }
             : browserTool === "browser"
-              ? { action: "list" }
+              ? { action: "observe", target }
               : browserTool === "browser_capture"
                 ? { action: "capture", target, mode: "viewport" }
                 : browserTool === "browser_navigate"
@@ -3454,7 +3448,7 @@ describe("application composition", () => {
               type: "tool_call",
               id: "try_browser",
               name: "browser",
-              input: { action: "list" },
+              input: { action: "observe", target },
             },
           ],
         },
@@ -3466,7 +3460,7 @@ describe("application composition", () => {
               type: "tool_call",
               id: "after_cleanup",
               name: "browser",
-              input: { action: "list" },
+              input: { action: "observe", target },
             },
           ],
         },
@@ -3512,16 +3506,11 @@ describe("application composition", () => {
         )
         await cleaning.promise
         expect(provider.callCount).toBe(4)
-        expect(JSON.stringify(provider.requests[2]?.messages)).toContain(
-          "Computer input cleanup is unconfirmed",
-        )
         expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
-          "Computer input cleanup is unconfirmed",
+          "This tab cannot be operated",
         )
         expect(requests).toBe(1)
-        await expect(readFile(called, "utf8")).rejects.toMatchObject({
-          code: "ENOENT",
-        })
+        expect(await readFile(called, "utf8")).toBe("called")
         expect(application.threadManager.getThread(sessionId)?.status).toBe(
           "active",
         )
@@ -3545,10 +3534,8 @@ describe("application composition", () => {
     })
   })
 
-  it("waits for browser cleanup acknowledgement before completing computer takeover", async () => {
+  it("takes over an owned browser tab without a computer connection and waits for browser cleanup", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
-      const { release } = await writeComputerMcpFixture(rootDir)
-      await writeFile(release, "release")
       const cleaning = Promise.withResolvers<void>(),
         releaseCleanup = Promise.withResolvers<void>()
       const provider = createFauxProvider([
@@ -3559,7 +3546,15 @@ describe("application composition", () => {
               type: "tool_call",
               id: "browser_owner",
               name: "browser",
-              input: { action: "list" },
+              input: {
+                action: "observe",
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+              },
             },
           ],
         },
@@ -3604,23 +3599,17 @@ describe("application composition", () => {
         await expect.poll(() => provider.callCount).toBe(2)
         expect(requestOwner).toMatchObject({ sessionId })
         let completed = false
-        takeover = rpcRequest(baseUrl, "computer/takeover", {}).then(
-          (value) => {
-            completed = true
-            return value
-          },
-        )
+        takeover = rpcRequest(baseUrl, "browser/takeover", {
+          tabId: "owned",
+        }).then((value) => {
+          completed = true
+          return value
+        })
         await cleaning.promise
         expect(cleanupOwner).toEqual(requestOwner)
         expect(completed).toBe(false)
-        expect(await rpcRequest(baseUrl, "computer/status", {})).toMatchObject({
-          inputOwner: { sessionId },
-        })
         releaseCleanup.resolve()
-        expect(await takeover).toMatchObject({
-          connected: false,
-          takenOver: true,
-        })
+        expect(await takeover).toEqual({})
         await waitForThreadIdle(application, sessionId)
         expect(
           await rpcRequest(baseUrl, "computer/status", {}),

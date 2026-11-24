@@ -1080,6 +1080,7 @@ it("rebinds native shortcuts to the selected session and releases listeners on u
   vi.stubGlobal("yakitoriDesktop", {
     browser: {
       onShowRequest: () => () => {},
+      onState: () => () => {},
       claimShow: async () => false,
       completeShow: async () => false,
       onShortcut: (listener: (action: "new-side-chat") => void) => {

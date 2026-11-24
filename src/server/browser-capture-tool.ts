@@ -6,16 +6,9 @@ import {
 } from "../protocol/desktop-browser.ts"
 import { mediaPresentation } from "../runtime/tools/result-output.ts"
 import { plainToolName } from "../runtime/tools/tool-name.ts"
-import type {
-  RuntimeTool,
-  ToolExecutionContext,
-  ToolFailure,
-} from "../runtime/tools/types.ts"
+import type { RuntimeTool } from "../runtime/tools/types.ts"
 
-export function createBrowserCaptureTool(
-  browser: DesktopBrowser,
-  admit: (context: ToolExecutionContext) => Promise<ToolFailure | undefined>,
-): RuntimeTool {
+export function createBrowserCaptureTool(browser: DesktopBrowser): RuntimeTool {
   return {
     toolName: plainToolName("browser_capture"),
     description:
@@ -70,8 +63,6 @@ export function createBrowserCaptureTool(
         const { rolloutAssets, rolloutId, toolCallId } = context
         if (!rolloutAssets || !rolloutId || !toolCallId)
           throw new Error("Browser screenshots require rollout asset storage.")
-        const refusal = await admit(context)
-        if (refusal) return refusal
         if (!context.threadId || !context.turnId)
           throw new Error(
             "Browser captures require an owning session and turn.",

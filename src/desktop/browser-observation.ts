@@ -128,6 +128,10 @@ export class BrowserDocumentConnection {
     return this.#closed || this.#contents.isDestroyed()
   }
 
+  allowNavigationUnload(fromUrl: string): boolean {
+    return this.#dialogs.allowNavigationUnload(fromUrl)
+  }
+
   assertInputIdle(): void {
     this.#mutations.assertCompleted()
     if (

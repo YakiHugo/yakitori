@@ -869,7 +869,7 @@ export function parseBrowserChooserRequest(
 }
 
 export type BrowserViewRequest = Readonly<{
-  action: "show"
+  action: "show" | "close"
   target: BrowserTarget
   fromUrl: string
 }>
@@ -877,7 +877,7 @@ export type BrowserViewRequest = Readonly<{
 export function parseBrowserViewRequest(value: unknown): BrowserViewRequest {
   if (
     !isJsonObject(value) ||
-    value.action !== "show" ||
+    (value.action !== "show" && value.action !== "close") ||
     Object.keys(value).length !== 3 ||
     !["action", "target", "fromUrl"].every((key) =>
       Object.hasOwn(value, key),
@@ -887,7 +887,7 @@ export function parseBrowserViewRequest(value: unknown): BrowserViewRequest {
   )
     throw new BrowserControlError(
       "invalid_arguments",
-      "Use show with an exact target and its current fromUrl from browser list.",
+      "Use show or close with an exact target and its current fromUrl from browser list.",
     )
   const observed = parseBrowserObservationRequest({
     action: "observe",
@@ -895,7 +895,11 @@ export function parseBrowserViewRequest(value: unknown): BrowserViewRequest {
   })
   if (observed.action !== "observe")
     throw new Error("Invalid browser target parser result.")
-  return { action: "show", target: observed.target, fromUrl: value.fromUrl }
+  return {
+    action: value.action,
+    target: observed.target,
+    fromUrl: value.fromUrl,
+  }
 }
 
 const requestMutates: Record<BrowserRequest["action"], boolean> = {
@@ -917,6 +921,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   upload: true,
   upload_directory: true,
   show: true,
+  close: true,
   chooser_arm: true,
   chooser_inspect: false,
   chooser_disarm: true,
@@ -962,7 +967,10 @@ export function parseBrowserRequest(value: unknown): BrowserRequest {
     )
   )
     return parseBrowserChooserRequest(value)
-  if (isJsonObject(value) && value.action === "show")
+  if (
+    isJsonObject(value) &&
+    (value.action === "show" || value.action === "close")
+  )
     return parseBrowserViewRequest(value)
   if (isJsonObject(value) && value.action === "upload_directory")
     return parseBrowserDirectoryUploadRequest(value)

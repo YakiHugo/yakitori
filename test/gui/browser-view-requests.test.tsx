@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type {
   WorkspaceBrowserShowRequest,
   WorkspaceBrowserShowResult,
+  WorkspaceBrowserState,
 } from "../../src/desktop/workspace-browser-types.ts"
 import { connectBrowserViewRequests } from "../../src/gui/browser-view-requests.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
@@ -34,6 +35,7 @@ afterEach(() => {
 })
 function fixture() {
   let listener: ((request: WorkspaceBrowserShowRequest) => void) | undefined
+  let tabListener: ((state: WorkspaceBrowserState) => void) | undefined
   const claim = Promise.withResolvers<boolean>(),
     acked = Promise.withResolvers<WorkspaceBrowserShowResult>()
   const bridge = {
@@ -41,6 +43,12 @@ function fixture() {
       listener = fn
       return () => {
         listener = undefined
+      }
+    },
+    onState(fn: (state: WorkspaceBrowserState) => void) {
+      tabListener = fn
+      return () => {
+        tabListener = undefined
       }
     },
     claimShow: vi.fn(async () => claim.promise),
@@ -65,8 +73,39 @@ function fixture() {
       if (!listener) throw new Error("No display listener")
       listener(input)
     },
+    tab(state: WorkspaceBrowserState) {
+      if (!tabListener) throw new Error("No tab state listener")
+      tabListener(state)
+    },
   }
 }
+
+it("adds a native popup beside its opener without switching workspaces, and removes it on close", () => {
+  const f = fixture()
+  const popup = {
+    tabId: "popup_owned",
+    openerTabId: "browser",
+    title: "Popup",
+    url: "https://owned.test",
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+  }
+  f.tab(popup)
+  f.tab(popup)
+  expect(
+    useWorkspaceStore.getState().tabs.filter((tab) => tab.id === popup.tabId),
+  ).toMatchObject([
+    { id: popup.tabId, kind: "browser", workspaceSessionId: "owned" },
+  ])
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe("changes")
+  f.tab({ ...popup, closed: true })
+  expect(
+    useWorkspaceStore.getState().tabs.some((tab) => tab.id === popup.tabId),
+  ).toBe(false)
+})
 
 it("changes workspace selection only after the native owner grants its claim", async () => {
   const f = fixture()
@@ -105,9 +144,9 @@ it("maps a promoted session owner to its draft workspace", async () => {
   f.emit()
   f.claim.resolve(true)
   expect(await f.acked.promise).toBe("applied")
-  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).activeId).toBe(
-    "browser",
-  )
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe("browser")
 })
 
 it("does not apply a display request whose native claim expired or was cancelled", async () => {

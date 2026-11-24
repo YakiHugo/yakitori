@@ -4,20 +4,15 @@ import {
   parseBrowserNavigationRequest,
 } from "../protocol/desktop-browser.ts"
 import { plainToolName } from "../runtime/tools/tool-name.ts"
-import type {
-  RuntimeTool,
-  ToolExecutionContext,
-  ToolFailure,
-} from "../runtime/tools/types.ts"
+import type { RuntimeTool } from "../runtime/tools/types.ts"
 
 export function createBrowserNavigationTool(
   browser: DesktopBrowser,
-  admit: (context: ToolExecutionContext) => Promise<ToolFailure | undefined>,
 ): RuntimeTool {
   return {
     toolName: plainToolName("browser_navigate"),
     description:
-      "Navigate an exact browser target owned by Yakitori desktop. Pass target and its current URL as fromUrl from browser list; blank tabs are supported. Destination must be an absolute HTTP(S) URL without credentials, matching the workspace browser policy. A changed/loading source refuses navigation. This waits for page load, including redirects; loaded means Electron completed loading, not HTTP or business success. Cancellation stops only this load, never a later user navigation. An unconfirmed result must be inspected with browser list; never replay automatically. Normal permission and shared computer ownership apply. URL implementation safety bound:8192 characters.",
+      "Navigate an exact browser target owned by Yakitori desktop. Pass target and its current URL as fromUrl from browser list; blank tabs are supported. Destination must be an absolute HTTP(S) URL without credentials, matching the workspace browser policy. A changed/loading source refuses navigation. This waits for page load, including redirects; loaded means Electron completed loading, not HTTP or business success. Cancellation stops only this load, never a later user navigation. An unconfirmed result must be inspected with browser list; never replay automatically. Normal permission and per-tab browser ownership apply. URL implementation safety bound:8192 characters.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -49,9 +44,7 @@ export function createBrowserNavigationTool(
     async execute(input, context) {
       context.signal?.throwIfAborted()
       try {
-        const request = parseBrowserNavigationRequest(input),
-          refusal = await admit(context)
-        if (refusal) return refusal
+        const request = parseBrowserNavigationRequest(input)
         if (!context.threadId || !context.turnId)
           throw new Error(
             "Browser navigation requires an owning session and turn.",

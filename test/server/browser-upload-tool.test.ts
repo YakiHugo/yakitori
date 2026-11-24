@@ -35,18 +35,14 @@ it("resolves regular upload files to canonical metadata and identifies disclosur
     await mkdtemp(join(tmpdir(), "yakitori-upload-test-")),
   )
   const requests: BrowserRequest[] = []
-  const tool = createBrowserUploadTool(
-    {
-      request: async (request) => {
-        requests.push(request)
-        return { filesVerified: true }
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+  const tool = createBrowserUploadTool({
+    request: async (request) => {
+      requests.push(request)
+      return { filesVerified: true }
     },
-    async () => undefined,
-    () => {},
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   try {
     await writeFile(join(root, "file.txt"), "hello")
     await utimes(join(root, "file.txt"), 1700000000, 1700000000)
@@ -96,18 +92,14 @@ it("refuses directories, missing files and duplicate aliases without asking Chro
     await mkdtemp(join(tmpdir(), "yakitori-upload-test-")),
   )
   const requests: BrowserRequest[] = []
-  const tool = createBrowserUploadTool(
-    {
-      request: async (request) => {
-        requests.push(request)
-        return {}
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+  const tool = createBrowserUploadTool({
+    request: async (request) => {
+      requests.push(request)
+      return {}
     },
-    async () => undefined,
-    () => {},
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   try {
     await writeFile(join(root, "file.txt"), "hello")
     await symlink(join(root, "file.txt"), join(root, "alias.txt"))
@@ -124,32 +116,19 @@ it("refuses directories, missing files and duplicate aliases without asking Chro
   }
 })
 
-it("checks shared computer admission before resolving local paths and rejects model-supplied transport metadata", async () => {
-  const tool = createBrowserUploadTool(
-    {
-      request: async () => {
-        throw new Error("No browser request allowed")
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+it("rejects model-supplied transport metadata", async () => {
+  const tool = createBrowserUploadTool({
+    request: async () => {
+      throw new Error("No browser request allowed")
     },
-    async () => ({
-      ok: false,
-      code: "computer_taken_over",
-      message: "Taken over",
-      content: "Taken over",
-    }),
-    () => {},
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   const context = {
     workspaceRoot: "/missing-workspace",
     threadId: "session",
     turnId: "turn",
   }
-  expect(await tool.execute(input, context)).toMatchObject({
-    ok: false,
-    code: "computer_taken_over",
-  })
   for (const extra of [
     { files: [] },
     { paths: [""] },
@@ -183,18 +162,14 @@ it("discloses recursive directory selection and inventories canonical regular-fi
     await mkdtemp(join(tmpdir(), "yakitori-directory-test-")),
   )
   const requests: BrowserRequest[] = []
-  const tool = createBrowserUploadTool(
-    {
-      request: async (request) => {
-        requests.push(request)
-        return { filesVerified: true }
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+  const tool = createBrowserUploadTool({
+    request: async (request) => {
+      requests.push(request)
+      return { filesVerified: true }
     },
-    async () => undefined,
-    () => {},
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   const context = { workspaceRoot: root, threadId: "session", turnId: "turn" }
   const selected = { ...input, action: "upload_directory", paths: ["folder"] }
   try {
@@ -266,30 +241,17 @@ it("discloses recursive directory selection and inventories canonical regular-fi
   }
 })
 
-it("bounds directory traversal and checks shared ownership before enumerating any directory", async () => {
+it("bounds directory traversal before sending paths to Chromium", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "yakitori-directory-test-")),
   )
-  let admitted = true
-  const tool = createBrowserUploadTool(
-    {
-      request: async () => {
-        throw new Error("Oversized directories must not reach Chromium")
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+  const tool = createBrowserUploadTool({
+    request: async () => {
+      throw new Error("Oversized directories must not reach Chromium")
     },
-    async () =>
-      admitted
-        ? undefined
-        : {
-            ok: false,
-            code: "computer_taken_over",
-            message: "Taken over",
-            content: "Taken over",
-          },
-    () => {},
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   const selected = { ...input, action: "upload_directory", paths: ["folder"] }
   const context = { workspaceRoot: root, threadId: "session", turnId: "turn" }
   try {
@@ -303,10 +265,6 @@ it("bounds directory traversal and checks shared ownership before enumerating an
       ok: false,
       code: "directory_too_large",
     })
-    admitted = false
-    expect(
-      await tool.execute({ ...selected, paths: ["missing"] }, context),
-    ).toMatchObject({ ok: false, code: "computer_taken_over" })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

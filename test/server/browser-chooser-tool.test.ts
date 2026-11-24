@@ -13,41 +13,22 @@ const target = {
     instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
   },
   context = { workspaceRoot: "/workspace", threadId: "session", turnId: "turn" }
-it("requires shared computer admission and normal command permission for chooser configuration and inspection", async () => {
+it("requires normal command permission for chooser configuration and inspection", async () => {
   const requests: BrowserRequest[] = []
-  let admitted = false
-  const tool = createBrowserChooserTool(
-    {
-      async request(request, owner) {
-        expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
-        requests.push(request)
-        return { armed: request.action !== "chooser_disarm" }
-      },
-      async finishTurn() {},
-      async closeSession() {},
+  const tool = createBrowserChooserTool({
+    async request(request, owner) {
+      expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
+      requests.push(request)
+      return { armed: request.action !== "chooser_disarm" }
     },
-    async () =>
-      admitted
-        ? undefined
-        : {
-            ok: false,
-            code: "computer_taken_over",
-            message: "Taken over",
-            content: "Taken over",
-          },
-    () => {},
-  )
+    async finishTurn() {},
+    async closeSession() {},
+  })
   expect(tool.approvalRequirement).toMatchObject({
     kind: "approval",
     action: "command_execution",
   })
   const arm = { action: "arm", target, fromUrl: "https://owned.test/" }
-  expect(await tool.execute(arm, context)).toMatchObject({
-    ok: false,
-    code: "computer_taken_over",
-  })
-  expect(requests).toEqual([])
-  admitted = true
   for (const input of [
     arm,
     { action: "inspect", target },
@@ -75,26 +56,18 @@ it("requires shared computer admission and normal command permission for chooser
     })
   expect(requests).toHaveLength(3)
 })
-it("marks all computer input for cleanup when configuration acknowledgement is unknown", async () => {
-  let marks = 0
-  const tool = createBrowserChooserTool(
-    {
-      async request() {
-        throw new BrowserControlError(
-          "browser_cleanup_failed",
-          "Unknown configuration",
-        )
-      },
-      async finishTurn() {},
-      async closeSession() {},
+it("preserves an unconfirmed configuration cleanup error", async () => {
+  const tool = createBrowserChooserTool({
+    async request() {
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Unknown configuration",
+      )
     },
-    async () => undefined,
-    () => {
-      marks++
-    },
-  )
+    async finishTurn() {},
+    async closeSession() {},
+  })
   expect(
     await tool.execute({ action: "disarm", target }, context),
   ).toMatchObject({ ok: false, code: "browser_cleanup_failed" })
-  expect(marks).toBe(1)
 })

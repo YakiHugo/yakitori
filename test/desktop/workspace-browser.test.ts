@@ -113,6 +113,7 @@ function setup() {
   const webContents = Object.assign(new EventEmitter(), {
     mainFrame,
     send: sent,
+    isDestroyed: () => false,
     getZoomFactor: () => 1,
     focus: vi.fn(),
   })
@@ -1083,7 +1084,7 @@ it.each([
       ).find((row) => row.target.tabId === "other")?.target
       if (!second) throw new Error("Missing listed second target")
       await browser.request({ action: "observe", target: second })
-      expect(debug.attached).toBe(false)
+      expect(debug.attached).toBe(true)
     }
     const listener: unknown = electron.profile.on.mock.calls.at(-1)?.[1]
     if (typeof listener !== "function")

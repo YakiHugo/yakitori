@@ -10,7 +10,14 @@ import {
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
 
-export function createDesktopBrowserClient(): DesktopBrowser & {
+type BrowserIpc = Pick<
+  NodeJS.Process,
+  "connected" | "send" | "on" | "off" | "once"
+>
+
+export function createDesktopBrowserClient(
+  ipc: BrowserIpc = process,
+): DesktopBrowser & {
   close(): void
 } {
   type Pending = {
@@ -18,23 +25,27 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
     reject: (cause: unknown) => void
     dispose(): void
     signal?: AbortSignal
+    mutating: boolean
   }
   const pending = new Map<string, Pending>()
   let closed = false
   const cancel = (requestId: string) => {
-    if (process.connected && process.send) {
+    if (ipc.connected && ipc.send) {
       const message: DesktopBrowserCancellation = {
         type: "desktop_browser/cancel",
         requestId,
       }
-      process.send(message, (error) => {
+      ipc.send(message, (error) => {
         if (!error) return
         const request = pending.get(requestId)
         if (!request) return
         pending.delete(requestId)
         request.dispose()
         request.reject(
-          new BrowserControlError("browser_unavailable", error.message),
+          new BrowserControlError(
+            request.mutating ? "browser_cleanup_failed" : "browser_unavailable",
+            error.message,
+          ),
         )
       })
     }
@@ -45,9 +56,14 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
     if (!request) return
     pending.delete(message.requestId)
     request.dispose()
-    // Parent cleanup failures remain authoritative even after local abort.
-    // Replacing them with cancellation would reopen the shared input gate.
-    if (!message.ok && message.code === "browser_cleanup_failed")
+    if (
+      !message.ok &&
+      [
+        "browser_cleanup_failed",
+        "browser_input_unconfirmed",
+        "browser_navigation_unconfirmed",
+      ].includes(message.code)
+    )
       request.reject(new BrowserControlError(message.code, message.error))
     else if (request.signal?.aborted)
       request.reject(
@@ -62,8 +78,8 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
   const close = () => {
     if (closed) return
     closed = true
-    process.off("message", receive)
-    process.off("disconnect", close)
+    ipc.off("message", receive)
+    ipc.off("disconnect", close)
     for (const [id, request] of pending) {
       cancel(id)
       request.dispose()
@@ -81,7 +97,7 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
     signal?: AbortSignal,
   ): Promise<JsonObject> => {
     signal?.throwIfAborted()
-    if (closed || !process.connected || !process.send)
+    if (closed || !ipc.connected || !ipc.send)
       return Promise.reject(
         new BrowserControlError(
           "browser_unavailable",
@@ -90,37 +106,63 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
       )
     const requestId = `browser_${randomUUID()}`
     return new Promise((resolve, reject) => {
-      const abort = () => cancel(requestId)
-      // Observation has a 10s deadline; allow 2s for IPC teardown. A timed-out
-      // request never proves cleanup: finishTurn must still acknowledge it.
-      const timer = setTimeout(() => {
-        cancel(requestId)
-        // A dispatched browser mutation cannot be safely abandoned or replayed.
-        // Keep this tool pending until the parent acknowledges it. Turn cleanup
-        // has its own deadline and retains the lease if that acknowledgement is lost.
-        if (
-          operation.operation === "request" &&
-          browserRequestMutates(operation.input)
-        )
-          return
+      const mutating =
+        operation.operation === "request" &&
+        browserRequestMutates(operation.input)
+      const action: string | undefined =
+        operation.operation === "request" ? operation.input.action : undefined
+      const operationDeadline =
+        action && ["navigate", "wait", "download_wait"].includes(action)
+          ? 45_000
+          : 15_000
+      let grace: ReturnType<typeof setTimeout> | undefined
+      let cancelling = false
+      const fail = (code: string, message: string) => {
+        if (!pending.has(requestId)) return
         pending.delete(requestId)
         dispose()
-        reject(
-          new BrowserControlError(
-            "browser_timeout",
-            "The desktop browser did not acknowledge operation cleanup.",
-          ),
-        )
-      }, 12_000)
+        reject(new BrowserControlError(code, message))
+      }
+      const abort = () => stop(false)
+      const stop = (timedOut: boolean) => {
+        if (cancelling) return
+        cancelling = true
+        clearTimeout(timer)
+        if (mutating) {
+          // Bound the wait for input release; no acknowledgement means the
+          // owning tab must remain quarantined until turn cleanup succeeds.
+          grace = setTimeout(
+            () =>
+              fail(
+                "browser_timeout",
+                "The desktop did not confirm input cleanup. Inspect the tab after cleanup; do not replay this operation.",
+              ),
+            5_000,
+          )
+          grace.unref()
+          cancel(requestId)
+        } else {
+          cancel(requestId)
+          fail(
+            timedOut ? "browser_timeout" : "browser_cancelled",
+            timedOut
+              ? "The desktop browser operation exceeded its time safety boundary."
+              : "Browser observation stopped.",
+          )
+        }
+      }
+      const timer = setTimeout(() => stop(true), operationDeadline)
       timer.unref()
       const dispose = () => {
         clearTimeout(timer)
+        clearTimeout(grace)
         signal?.removeEventListener("abort", abort)
       }
       pending.set(requestId, {
         resolve,
         reject,
         dispose,
+        mutating,
         ...(signal ? { signal } : {}),
       })
       signal?.addEventListener("abort", abort, { once: true })
@@ -129,17 +171,15 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
         requestId,
         ...operation,
       }
-      process.send?.(message, (error) => {
+      ipc.send?.(message, (error) => {
         if (!error) return
-        pending.delete(requestId)
-        dispose()
-        reject(new BrowserControlError("browser_unavailable", error.message))
+        fail("browser_unavailable", error.message)
       })
       if (signal?.aborted) abort()
     })
   }
-  process.on("message", receive)
-  process.once("disconnect", close)
+  ipc.on("message", receive)
+  ipc.once("disconnect", close)
   return {
     close,
     request: (input, owner, signal) =>

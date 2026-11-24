@@ -35,7 +35,7 @@ export class BrowserPageFocus {
     } catch (cause) {
       throw new BrowserControlError(
         "browser_cleanup_failed",
-        "Browser page focus emulation did not confirm restoration. Computer input remains quarantined until cleanup succeeds or the original tab closes.",
+        "Browser page focus emulation did not confirm restoration. The tab remains quarantined until cleanup succeeds or the original tab closes.",
         { cause },
       )
     }

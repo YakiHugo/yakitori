@@ -21,30 +21,17 @@ const context = {
   threadId: "session",
   turnId: "turn",
 }
-it("gates explicit display behind normal permission and shared computer ownership with an exact target", async () => {
+it("gates explicit display behind normal permission with an exact target", async () => {
   const requests: BrowserRequest[] = []
-  let admitted = false
-  const tool = createBrowserViewTool(
-    {
-      request: async (request, owner) => {
-        expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
-        requests.push(request)
-        return { selectionApplied: true, visible: true }
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+  const tool = createBrowserViewTool({
+    request: async (request, owner) => {
+      expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
+      requests.push(request)
+      return { selectionApplied: true, visible: true }
     },
-    async () =>
-      admitted
-        ? undefined
-        : {
-            ok: false,
-            code: "computer_taken_over",
-            message: "Taken over",
-            content: "Taken over",
-          },
-    () => {},
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   if (typeof tool.approvalRequirement !== "function")
     throw new Error("Missing display permission")
   expect(await tool.approvalRequirement(input, context)).toMatchObject({
@@ -52,12 +39,6 @@ it("gates explicit display behind normal permission and shared computer ownershi
     action: "command_execution",
     subject: expect.stringContaining("https://owned.test/"),
   })
-  expect(await tool.execute(input, context)).toMatchObject({
-    ok: false,
-    code: "computer_taken_over",
-  })
-  expect(requests).toEqual([])
-  admitted = true
   expect(await tool.execute(input, context)).toMatchObject({
     ok: true,
     output: { selectionApplied: true, visible: true },
@@ -73,27 +54,19 @@ it("gates explicit display behind normal permission and shared computer ownershi
   ])
     expect(() => parseBrowserRequest({ ...input, ...extra })).toThrow()
 })
-it("preserves unconfirmed display cleanup so all computer input remains quarantined", async () => {
-  let marks = 0
-  const tool = createBrowserViewTool(
-    {
-      request: async () => {
-        throw new BrowserControlError(
-          "browser_cleanup_failed",
-          "Renderer acknowledgement missing",
-        )
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+it("preserves unconfirmed display cleanup for tab quarantine", async () => {
+  const tool = createBrowserViewTool({
+    request: async () => {
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Renderer acknowledgement missing",
+      )
     },
-    async () => undefined,
-    () => {
-      marks++
-    },
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   expect(await tool.execute(input, context)).toMatchObject({
     ok: false,
     code: "browser_cleanup_failed",
   })
-  expect(marks).toBe(1)
 })
