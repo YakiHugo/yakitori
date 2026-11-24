@@ -21,6 +21,7 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import { fixtureChatDialect } from "../fixtures/chat-dialects.ts"
 import { messageContent } from "../fixtures/model-history.ts"
 
 afterEach(() => vi.restoreAllMocks())
@@ -258,7 +259,12 @@ describe("direct Qwen images", () => {
       { role: "tool" as const, toolCallId: "call_1", content: [block] },
     ]
     const qwen = JSON.stringify(
-      toChatCompletionsMessages(messages, "personal", undefined, "qwen"),
+      toChatCompletionsMessages(
+        messages,
+        "personal",
+        undefined,
+        fixtureChatDialect("qwen"),
+      ),
     )
     expect(qwen).not.toContain('"detail"')
     expect(qwen.match(/data:image\/png;base64/g)).toHaveLength(2)

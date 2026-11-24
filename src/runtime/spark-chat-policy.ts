@@ -77,7 +77,7 @@ export function validateSparkChatRequest(
 }
 
 export function validateSparkChatMessages(
-  messages: ChatCompletionMessageParam[],
+  messages: readonly ChatCompletionMessageParam[],
 ): void {
   for (const message of messages) {
     // Native assistant envelopes bypass portable content conversion. Check them

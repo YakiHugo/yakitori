@@ -12,17 +12,12 @@ import type { ReasoningFormat } from "../protocol/model-output.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import {
-  chatCompletionsImageFields,
-  chatCompletionsRequestFields,
-  isGlmStandardEndpoint,
-} from "./chat-completions-wire-policy.ts"
-import { glmTextModel } from "./glm-models.ts"
-import { createChatImagePolicy } from "./image-preparation-profiles.ts"
+  type ChatCompletionsFlavor,
+  genericChatDialect,
+  type ResolvedChatDialect,
+  resolveChatCompletionsDialect,
+} from "./chat-completions-dialects.ts"
 import { JsonRequestBudgetError } from "./json-request-budget.ts"
-import { isLongCatEndpoint, longcatVisionModel } from "./longcat-vision.ts"
-import { isMetaEndpoint } from "./meta-image-policy.ts"
-import { isMetaContributorModel } from "./meta-models.ts"
-import { isMimoEndpoint } from "./mimo-image-policy.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
@@ -57,55 +52,17 @@ import {
   ModelRequestControlsError,
   validateModelRequestControls,
 } from "./model-request-controls.ts"
-import {
-  ModelRequestPlanError,
-  validateChatOnlyRequest,
-} from "./model-request-plan.ts"
-import {
-  isNvidiaEndpoint,
-  validateNvidiaRequest,
-} from "./nvidia-image-policy.ts"
-import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
-import { isRekaEndpoint } from "./reka-vision.ts"
+import { ModelRequestPlanError } from "./model-request-plan.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
-import {
-  isSenseNovaEndpoint,
-  sensenovaVisionModel,
-} from "./sensenova-vision.ts"
-import {
-  isSparkChatEndpoint,
-  validateSparkChatMessages,
-  validateSparkChatRequest,
-} from "./spark-chat-policy.ts"
-import { isStepfunEndpoint } from "./stepfun-image-policy.ts"
-import { tencentVisionModel } from "./tencent-chat-only.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
   model: string
   baseURL: string
   defaultHeaders?: Record<string, string | null>
-  flavor?:
-    | "generic"
-    | "deepseek"
-    | "gemini"
-    | "qwen"
-    | "mistral"
-    | "minimax"
-    | "doubao"
-    | "glm"
-    | "meta"
-    | "stepfun"
-    | "sensenova"
-    | "longcat"
-    | "tencent"
-    | "mimo"
-    | "nvidia"
-    | "reka"
-    | "spark"
+  flavor?: ChatCompletionsFlavor
 }>
 
-type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
 type ToolCall = ChatCompletionMessageToolCall & {
   extra_content?: { google: { thought_signature: string } }
 }
@@ -168,116 +125,11 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
       )
-    const mimo = options.flavor === "mimo" && isMimoEndpoint(options.baseURL)
-    if (
-      mimo &&
-      ((request.toolChoice !== undefined && request.toolChoice !== "auto") ||
-        request.parallelToolCalls !== undefined ||
-        request.target.effort !== undefined ||
-        request.outputFormat !== undefined)
-    )
-      throw new AssetMediaError(
-        "MiMo Chat supports only auto tool choice and does not document parallel-tool, reasoning-effort or JSON-schema controls. Remove those overrides; the request was not sent.",
-      )
-    const stepfun =
-      options.flavor === "stepfun" && isStepfunEndpoint(options.baseURL)
-    const doubao = options.flavor === "doubao"
     const model = request.target.model || options.model
-    const spark =
-      options.flavor === "spark" && isSparkChatEndpoint(options.baseURL)
-    if (spark) validateSparkChatRequest(request, model)
-    const deepseekPro =
-      options.flavor === "deepseek" &&
-      model === "deepseek-v4-pro" &&
-      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
-        "https://api.deepseek.com"
-    const glmText =
-      options.flavor === "glm" && isGlmStandardEndpoint(options.baseURL)
-        ? glmTextModel(model)
-        : undefined
-    if (
-      (deepseekPro || glmText) &&
-      request.messages.some(
-        (message) =>
-          (message.role === "user" || message.role === "tool") &&
-          message.content.some(
-            (block) => block.type === "image" || block.type === "document",
-          ),
-      )
-    )
-      throw new AssetMediaError(
-        `${model} accepts text only. Choose a verified vision model or provide extracted text; media was not sent.`,
-      )
-    // These public APIs document JSON-object output, not our JSON-schema
-    // control. GLM additionally documents only auto tool choice here.
-    if ((deepseekPro || glmText) && request.outputFormat !== undefined)
-      throw new AssetMediaError(
-        `${model} does not document JSON-schema output. Remove the output-format override; the request was not sent.`,
-      )
-    if (
-      glmText &&
-      ((request.toolChoice !== undefined && request.toolChoice !== "auto") ||
-        request.parallelToolCalls !== undefined ||
-        (request.target.effort !== undefined &&
-          !glmText.efforts?.includes(request.target.effort)))
-    )
-      throw new AssetMediaError(
-        `${model} requires auto tool choice and a documented reasoning control, without a parallel-tool override. The request was not sent.`,
-      )
-    const nvidia =
-      options.flavor === "nvidia" && isNvidiaEndpoint(options.baseURL)
-    if (nvidia) validateNvidiaRequest(request, model)
-    const reka = options.flavor === "reka" && isRekaEndpoint(options.baseURL)
-    const sensenova =
-      options.flavor === "sensenova" && isSenseNovaEndpoint(options.baseURL)
-    if (sensenova) {
-      validateChatOnlyRequest(request)
-      if (
-        model !== sensenovaVisionModel ||
-        request.outputFormat !== undefined ||
-        request.target.effort !== undefined
-      )
-        throw new AssetMediaError(
-          "SenseNova chat currently supports sensenova-6.8-flash-lite without output-format or reasoning-effort overrides only.",
-        )
-    }
-    const longcat =
-      options.flavor === "longcat" && isLongCatEndpoint(options.baseURL)
-    if (longcat) {
-      validateChatOnlyRequest(request)
-      if (
-        model !== longcatVisionModel ||
-        request.outputFormat !== undefined ||
-        request.target.effort !== undefined ||
-        request.messages.some(
-          (message) =>
-            message.role === "user" &&
-            message.content.some((block) => block.type === "document"),
-        )
-      )
-        throw new AssetMediaError(
-          "LongCat image chat supports LongCat-2.5 text/images only, without native documents, output-format or reasoning-effort overrides.",
-        )
-    }
-    const portableChat = sensenova || longcat
-    const tencentVision =
-      options.flavor === "tencent" && model === tencentVisionModel
-    if (tencentVision) validateChatOnlyRequest(request)
-    const meta = options.flavor === "meta" && isMetaEndpoint(options.baseURL)
-    if (meta && isMetaContributorModel(model))
-      throw new AssetMediaError(
-        "Meta Contributor models are not enabled: they allow Meta to train on prompts, code, files and responses. Yakitori has no informed data-sharing opt-in for these models yet. Choose the Standard model ID without -contributor; nothing was sent.",
-      )
-    const qwen =
-      options.flavor === "qwen"
-        ? qwenEndpointPolicy(options.baseURL)
-        : undefined
-    const imagePolicy = createChatImagePolicy({
-      flavor: options.flavor,
-      baseURL: options.baseURL,
-      model,
-      request,
-    })
+    const dialect = resolveChatCompletionsDialect(options, model)
+    dialect.validateRequest?.(request, model)
+    const imagePolicy = dialect.prepareMedia?.(request)
+    const portableChat = dialect.assistantHistory === "portable"
     const media = await prepareProviderMedia(request, {
       ...imagePolicy,
       inlineDocumentUrls: true,
@@ -286,15 +138,8 @@ async function* streamChatCompletions(
       media.messages,
       request.target.provider,
       request.continuationScope,
-      (options.flavor === "qwen" && !qwen) ||
-        (options.flavor === "mimo" && !mimo) ||
-        (options.flavor === "sensenova" && !sensenova) ||
-        (options.flavor === "longcat" && !longcat) ||
-        (options.flavor === "nvidia" && !nvidia) ||
-        (options.flavor === "reka" && !reka)
-        ? "generic"
-        : (options.flavor ?? "generic"),
-      request.target.model || options.model,
+      dialect,
+      model,
     )
     const system = flattenModelSystem(request.system)
     if (system.length > 0) messages.unshift({ role: "system", content: system })
@@ -306,13 +151,15 @@ async function* streamChatCompletions(
       }),
     )
     const body = applyModelRequestControls(request, "openai_chat_completions", {
-      model: request.target.model || options.model,
+      model,
       messages,
       stream: true as const,
-      ...chatCompletionsRequestFields(
-        { flavor: options.flavor, baseURL: options.baseURL, model },
-        request.maxOutputTokens,
-      ),
+      ...(dialect.wire.includeStreamUsage
+        ? { stream_options: { include_usage: true as const } }
+        : {}),
+      ...(request.maxOutputTokens === undefined
+        ? {}
+        : { [dialect.wire.maxOutputTokensField]: request.maxOutputTokens }),
       ...(request.parallelToolCalls === undefined
         ? {}
         : { parallel_tool_calls: request.parallelToolCalls }),
@@ -393,49 +240,10 @@ async function* streamChatCompletions(
         ? {}
         : { reasoning_effort: request.target.effort as ReasoningEffort }),
     })
-    if (glmText) {
-      // Standard Z.AI clears prior reasoning by default. Coding/agent turns
-      // need the complete native blocks plus this explicit preservation flag.
-      // Caller values that pass the captured-effort guard still win. Never
-      // rewrite durable history or attach another account's thinking blocks.
-      // https://docs.z.ai/guides/capabilities/thinking-mode
-      const thinking = (body as { thinking?: JsonObject }).thinking
-      Object.assign(body, {
-        thinking: { type: "enabled", clear_thinking: false, ...thinking },
-      })
-    }
-    imagePolicy?.validateBody?.(body, media.messages)
-    if (spark) validateSparkChatMessages(messages)
-    if (mimo) {
-      const thinking = (body as { thinking?: { type?: string } }).thinking
-      if (
-        thinking?.type !== "disabled" &&
-        messages.some(
-          (message) =>
-            message.role === "assistant" &&
-            message.tool_calls?.length &&
-            typeof (message as unknown as { reasoning_content?: unknown })
-              .reasoning_content !== "string",
-        )
-      )
-        throw new AssetMediaError(
-          "MiMo thinking-mode tool history requires its original reasoning_content. Start a new conversation, disable thinking explicitly, or use the original provider; history has not been changed.",
-        )
-      if (
-        request.tools.some(
-          (tool) =>
-            tool.kind === "custom" && tool.customInputFallbackKey === undefined,
-        ) ||
-        messages.some(
-          (message) =>
-            message.role === "assistant" &&
-            message.tool_calls?.some((call) => call.type !== "function"),
-        )
-      )
-        throw new AssetMediaError(
-          "MiMo Chat supports function tools, not native custom tools. Configure a function fallback or start a new conversation for incompatible tool history; history has not been changed.",
-        )
-    }
+    const extendedBody: typeof body & { thinking?: JsonObject } = body
+    Object.assign(extendedBody, dialect.extendBody?.(extendedBody, model))
+    imagePolicy?.validateBody?.(extendedBody, media.messages)
+    dialect.validateBody?.(extendedBody, request)
 
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
@@ -520,7 +328,7 @@ async function* streamChatCompletions(
         yield { type: "cancelled", ...usageFields() }
         return
       }
-      if (spark && "code" in chunk && chunk.code !== 0)
+      if (dialect.checkStreamCode && "code" in chunk && chunk.code !== 0)
         throw new SparkBusinessError(
           String(chunk.code),
           "message" in chunk
@@ -537,7 +345,7 @@ async function* streamChatCompletions(
         completionId = chunk.id
       }
       if (chunk.usage != null) {
-        usage = fromChatUsage(chunk.usage, stepfun)
+        usage = fromChatUsage(chunk.usage, dialect.cachedTokens ?? false)
         request.onUsageSnapshot?.(usage)
       }
       const { choices: _choices, ...metadata } = chunk
@@ -562,7 +370,7 @@ async function* streamChatCompletions(
         // Ark sends one complete encrypted block, not incremental text.
         // Keep it in provider-scoped native history, never visible reasoning.
         // https://docs.volcengine.com/docs/ark/chat-api?lang=zh
-        if (doubao && delta.encrypted_content != null) {
+        if (dialect.encryptedReasoning && delta.encrypted_content != null) {
           if (typeof delta.encrypted_content !== "string")
             throw new ChatCompletionsProtocolError(
               "Invalid encrypted_content delta.",
@@ -724,8 +532,9 @@ async function* streamChatCompletions(
         const plainFragments = new Set<string>()
         for (const [field, type] of [
           ["content", "delta"],
-          ["reasoning_content", "reasoning_delta"],
-          ["reasoning", "reasoning_delta"],
+          ...dialect.reasoning.extractFields.map(
+            (field) => [field, "reasoning_delta"] as const,
+          ),
           ["refusal", "delta"],
         ] as const) {
           const fragment = delta[field]
@@ -766,10 +575,12 @@ async function* streamChatCompletions(
           if (!Array.isArray(delta.tool_calls))
             throw new ChatCompletionsProtocolError("Invalid tool call deltas.")
           for (const tool of delta.tool_calls) {
-            if (spark && isJsonObject(tool) && tool.type === "custom")
-              throw new ChatCompletionsProtocolError(
-                "Spark MaaS returned an unsupported native custom tool.",
-              )
+            if (
+              dialect.functionToolsOnly &&
+              isJsonObject(tool) &&
+              tool.type === "custom"
+            )
+              throw new ChatCompletionsProtocolError(dialect.functionToolsOnly)
             if (
               !isJsonObject(tool) ||
               typeof tool.index !== "number" ||
@@ -836,7 +647,7 @@ async function* streamChatCompletions(
                 call.arguments += tool.function.arguments
               }
             }
-            if (options.flavor === "gemini") {
+            if (dialect.thoughtSignatures) {
               const signature = geminiThoughtSignature(tool)
               if (signature !== undefined) call.thoughtSignature = signature
             }
@@ -846,7 +657,9 @@ async function* streamChatCompletions(
         // StepFun and SenseNova document empty strings on unfinished SSE chunks.
         if (
           choice.finish_reason != null &&
-          !((stepfun || sensenova) && (choice.finish_reason as string) === "")
+          !(
+            dialect.emptyFinishReason && (choice.finish_reason as string) === ""
+          )
         )
           finishReason = choice.finish_reason
       }
@@ -859,10 +672,8 @@ async function* streamChatCompletions(
       throw new ChatCompletionsIncompleteStreamError(
         "Completion ended without a finish reason.",
       )
-    if (mimo && finishReason === "repetition_truncation")
-      throw new MimoRepetitionTruncationError(
-        "MiMo stopped with repetition_truncation: output is incomplete and tool calls were not executed. Reduce repetitive context and retry.",
-      )
+    if (dialect.incompleteFinish?.reason === finishReason)
+      throw new MimoRepetitionTruncationError(dialect.incompleteFinish.message)
     if (
       !["stop", "length", "tool_calls", "content_filter"].includes(finishReason)
     )
@@ -881,7 +692,7 @@ async function* streamChatCompletions(
         type: "reasoning",
         text: part.text,
         format: part.format,
-        ...(portableChat || part !== plainReasoning
+        ...(dialect.reasoning.echoMode !== "scoped" || part !== plainReasoning
           ? {}
           : {
               providerMetadata: {
@@ -1187,7 +998,7 @@ export function toChatCompletionsMessages(
   messages: readonly ModelMessage[],
   provider: string,
   continuationScope?: string,
-  flavor: Flavor = "generic",
+  dialect: ResolvedChatDialect = genericChatDialect,
   model?: string,
 ): ChatCompletionMessageParam[] {
   const result: ChatCompletionMessageParam[] = []
@@ -1228,7 +1039,9 @@ export function toChatCompletionsMessages(
                     block.file && "url" in block.file
                       ? block.file.url
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                  ...chatCompletionsImageFields(flavor, "user"),
+                  ...(dialect.wire.omitImageDetail?.includes("user")
+                    ? {}
+                    : { detail: "high" }),
                 },
               }
             }),
@@ -1266,7 +1079,9 @@ export function toChatCompletionsMessages(
                   block.file && "url" in block.file
                     ? block.file.url
                     : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                ...chatCompletionsImageFields(flavor, "tool"),
+                ...(dialect.wire.omitImageDetail?.includes("tool")
+                  ? {}
+                  : { detail: "high" }),
               },
             },
           )
@@ -1281,13 +1096,16 @@ export function toChatCompletionsMessages(
         content: message.isError ? `[tool_error]\n${text}` : text,
       })
     } else {
-      const native = replayModelNativeItems(
-        message,
-        "openai_chat_completions",
-        provider,
-        continuationScope,
-        model,
-      )
+      const native =
+        dialect.assistantHistory === "portable"
+          ? undefined
+          : replayModelNativeItems(
+              message,
+              "openai_chat_completions",
+              provider,
+              continuationScope,
+              model,
+            )
       if (native !== undefined) {
         if (native.length !== 1 || native[0]?.role !== "assistant")
           throw new ChatCompletionsProtocolError(
@@ -1310,14 +1128,13 @@ export function toChatCompletionsMessages(
           if (metadata?.reasoningContent === true) reasoning.push(block.text)
         }
         if (block.type !== "tool_call") continue
-        const metadata =
-          flavor === "gemini"
-            ? chatContinuationMetadata(
-                block.providerMetadata,
-                provider,
-                continuationScope,
-              )
-            : undefined
+        const metadata = dialect.thoughtSignatures
+          ? chatContinuationMetadata(
+              block.providerMetadata,
+              provider,
+              continuationScope,
+            )
+          : undefined
         if (
           block.toolKind === "custom" &&
           block.customInputFallbackKey === undefined
@@ -1353,9 +1170,7 @@ export function toChatCompletionsMessages(
         role: "assistant",
         content: text,
         ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
-        ...(flavor === "sensenova" ||
-        flavor === "longcat" ||
-        reasoning.length === 0
+        ...(dialect.reasoning.echoMode !== "scoped" || reasoning.length === 0
           ? {}
           : { reasoning_content: reasoning.join("\n") }),
       }
@@ -1451,7 +1266,7 @@ function geminiThoughtSignature(delta: JsonObject): string | undefined {
 
 function fromChatUsage(
   usage: NonNullable<ChatCompletionChunk["usage"]>,
-  stepfun: boolean,
+  usesCachedTokens: boolean,
 ): ModelUsage {
   if (
     ![usage.prompt_tokens, usage.completion_tokens, usage.total_tokens].every(
@@ -1465,7 +1280,9 @@ function fromChatUsage(
     ? extended.prompt_cache_hit_tokens
     : undefined
   const stepfunCache =
-    stepfun && isJsonObject(extended) ? extended.cached_tokens : undefined
+    usesCachedTokens && isJsonObject(extended)
+      ? extended.cached_tokens
+      : undefined
   const cached =
     usage.prompt_tokens_details?.cached_tokens ??
     (typeof stepfunCache === "number" ? stepfunCache : undefined) ??

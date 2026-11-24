@@ -1,7 +1,8 @@
 import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
-import { createGlmImagePolicy } from "../../src/runtime/glm-image-policy.ts"
+import { createDeclarativeChatImagePolicy } from "../../src/runtime/chat-image-admission.ts"
+import { glmImageSpec } from "../../src/runtime/chat-image-specs.ts"
 import type {
   ModelImageBlock,
   ModelMessage,
@@ -404,3 +405,13 @@ describe("native Z.AI GLM vision", () => {
     expect(events.at(-1)).toMatchObject({ type: "response" })
   })
 })
+
+function createGlmImagePolicy(input: ModelRequest) {
+  const policy = createDeclarativeChatImagePolicy(
+    glmImageSpec,
+    input,
+    input.target.model,
+  )
+  if (policy === undefined) throw new Error("Missing GLM policy")
+  return policy
+}

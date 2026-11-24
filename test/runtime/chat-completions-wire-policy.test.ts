@@ -4,6 +4,7 @@ import {
   toChatCompletionsMessages,
 } from "../../src/runtime/chat-completions-provider.ts"
 import type { ModelRequest } from "../../src/runtime/model.ts"
+import { fixtureChatDialect } from "../fixtures/chat-dialects.ts"
 import { pngImageBase64 } from "../fixtures/images.ts"
 
 afterEach(() => vi.restoreAllMocks())
@@ -158,7 +159,7 @@ it.each([
     ],
     "personal",
     undefined,
-    flavor,
+    fixtureChatDialect(flavor),
   )
   const images = messages.flatMap((message) =>
     Array.isArray(message.content)
@@ -193,7 +194,7 @@ it.each([
       ],
       "personal",
       undefined,
-      flavor,
+      fixtureChatDialect(flavor),
     ),
   ).toEqual([
     {
@@ -217,6 +218,52 @@ function request(model: string): ModelRequest {
     toolWireProtocol: "eager",
   }
 }
+
+it.each([
+  { flavor: "doubao", model: "relay-text-model" },
+  { flavor: "minimax", model: "relay-text-model" },
+  { flavor: "tencent", model: "relay-text-model" },
+] as const)("does not apply $flavor media admission to a relay", async ({
+  flavor,
+  model,
+}) => {
+  const bodies = captureBodies()
+  const events = await Array.fromAsync(
+    createChatCompletionsProvider({
+      apiKey: "unused",
+      baseURL: "https://relay.example/v1",
+      model,
+      flavor,
+    })({
+      ...request(model),
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              mediaType: "image/png",
+              data: pngImageBase64,
+            },
+          ],
+        },
+      ],
+    }),
+  )
+  expect(events.at(-1)).toMatchObject({ type: "response" })
+  expect(bodies).toHaveLength(1)
+  expect(bodies[0]?.messages).toMatchObject([
+    {
+      role: "user",
+      content: [
+        {
+          type: "image_url",
+          image_url: { detail: "high" },
+        },
+      ],
+    },
+  ])
+})
 
 function captureBodies(): Record<string, unknown>[] {
   const bodies: Record<string, unknown>[] = []

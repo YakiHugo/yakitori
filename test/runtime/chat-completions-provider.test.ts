@@ -30,6 +30,10 @@ import {
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import {
+  fixtureChatDialect,
+  fixtureChatEndpoint,
+} from "../fixtures/chat-dialects.ts"
 import { pngImageBase64, secondPngImageBase64 } from "../fixtures/images.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
@@ -566,7 +570,7 @@ describe("Chat Completions provider", () => {
             history,
             "custom_1",
             "endpoint_1",
-            "deepseek",
+            fixtureChatDialect("deepseek"),
           ),
         ).toEqual([
           {
@@ -602,15 +606,20 @@ describe("Chat Completions provider", () => {
           ["custom_1", "endpoint_2", "deepseek"],
           ["custom_1", undefined, "deepseek"],
         ] as const)
-          expect(toChatCompletionsMessages(history, id, scope, flavor)).toEqual(
-            [{ role: "assistant", content: "Done" }],
-          )
+          expect(
+            toChatCompletionsMessages(
+              history,
+              id,
+              scope,
+              fixtureChatDialect(flavor),
+            ),
+          ).toEqual([{ role: "assistant", content: "Done" }])
         expect(
           toChatCompletionsMessages(
             history,
             "custom_1",
             "endpoint_1",
-            "generic",
+            fixtureChatDialect("generic"),
           ),
         ).toEqual([
           {
@@ -709,7 +718,7 @@ describe("Chat Completions provider", () => {
             history,
             "custom_1",
             "endpoint_1",
-            "gemini",
+            fixtureChatDialect("gemini"),
           )
           expect(replay).toEqual([
             {
@@ -773,7 +782,7 @@ describe("Chat Completions provider", () => {
                 history,
                 "custom_1",
                 "endpoint_changed",
-                "gemini",
+                fixtureChatDialect("gemini"),
               ),
             ),
           ).not.toContain("thought_signature")
@@ -783,7 +792,7 @@ describe("Chat Completions provider", () => {
                 history,
                 "another_provider",
                 "endpoint_1",
-                "gemini",
+                fixtureChatDialect("gemini"),
               ),
             ),
           ).not.toContain("thought_signature")
@@ -1239,7 +1248,7 @@ describe("Chat Completions provider", () => {
             history,
             "custom_1",
             "endpoint_1",
-            flavor,
+            fixtureChatDialect(flavor),
             "configured-model",
           )
           expect(JSON.stringify(replay)).toContain("Inspect the tool output")
@@ -1836,7 +1845,7 @@ function provider(
   return createChatCompletionsProvider({
     apiKey: "test-key",
     model: "default-model",
-    baseURL,
+    baseURL: flavor === "generic" ? baseURL : fixtureChatEndpoint(flavor),
     flavor,
   })
 }
@@ -1912,7 +1921,29 @@ async function withServer(
   if (address === null || typeof address === "string")
     throw new Error("Missing HTTP address")
   try {
-    await run(`http://127.0.0.1:${address.port}/v1`)
+    const fixtureURL = `http://127.0.0.1:${address.port}/v1`
+    const originalFetch = globalThis.fetch
+    const endpoints = [
+      fixtureChatEndpoint("gemini"),
+      fixtureChatEndpoint("deepseek"),
+    ]
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input, init) => {
+        const url = String(input)
+        const endpoint = endpoints.find(
+          (candidate) => url === `${candidate}/chat/completions`,
+        )
+        return originalFetch(
+          endpoint === undefined ? input : `${fixtureURL}/chat/completions`,
+          init,
+        )
+      })
+    try {
+      await run(fixtureURL)
+    } finally {
+      fetch.mockRestore()
+    }
     if (failures.length > 0) throw failures[0]
   } finally {
     server.closeAllConnections()
