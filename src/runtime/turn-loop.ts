@@ -905,7 +905,9 @@ async function executeTurnModelLoop(
       const worldState = buildWorldState({
         configuration,
         enabledToolNames: new Set(
-          toolPlan.definitions.map((definition) => definition.name),
+          [...toolPlan.definitions, ...toolPlan.deferredDefinitions].map(
+            (definition) => definition.name,
+          ),
         ),
         ...(baseModelId(input.context) === undefined
           ? {}
