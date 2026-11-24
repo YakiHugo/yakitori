@@ -12,14 +12,20 @@ import type {
 } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
-import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
+import {
+  type ModelContentBlock,
+  ModelStopReason,
+  type StreamFn,
+} from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
+import { mediaPresentation } from "../../src/runtime/tools/result-output.ts"
 import {
   createToolRegistry,
   plainToolName,
   type RuntimeTool,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { pngImageBytes } from "../fixtures/images.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 
 const testHome = vi.hoisted(() => ({ path: "" }))
@@ -37,6 +43,120 @@ afterEach(async () => {
 })
 
 describe("durable Turn execution contracts", () => {
+  it("keeps screenshots in the rollout after aging them out of model requests", async () => {
+    const screenshotCalls = [
+      "first",
+      "second",
+      "third",
+      "fourth",
+      "fifth",
+      "sixth",
+    ]
+    const provider = createFauxProvider([
+      ...screenshotCalls.map((id) => ({
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "tool_call", id, name: "browser_capture", input: {} },
+        ] satisfies ModelContentBlock[],
+      })),
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const image = pngImageBytes()
+    const runtime = createRuntime(provider.stream, [
+      {
+        ...tool("browser_capture"),
+        exposure: "deferred",
+        async execute(_input, context) {
+          assert(
+            context.rolloutAssets && context.rolloutId && context.toolCallId,
+          )
+          const saved = await context.rolloutAssets.saveToolFile(
+            context.rolloutId,
+            context.toolCallId,
+            "capture.png",
+            image,
+          )
+          return {
+            ok: true,
+            output: {},
+            content: "",
+            presentation: mediaPresentation({
+              content: [
+                {
+                  type: "image",
+                  file: saved.reference,
+                  sizeBytes: image.length,
+                  mediaType: "image/png",
+                },
+              ],
+            }),
+          }
+        },
+      },
+    ])
+    const thread = await runtime.createThread()
+    await thread.startIfIdle(input("Take six screenshots", "screenshots_turn"))
+    const journal = await assertDurableTerminal(
+      runtime.root,
+      thread.id,
+      "screenshots_turn",
+      "completed",
+      await throughTerminal(thread),
+    )
+
+    expect(provider.requests[0]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: "developer",
+        content: expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining(
+              "For web pages in Yakitori, prefer the browser tools",
+            ),
+          }),
+        ]),
+      }),
+    )
+    const requestResults =
+      provider.requests
+        .at(-1)
+        ?.messages.filter((message) => message.role === "tool") ?? []
+    expect(
+      requestResults
+        .filter((message) =>
+          message.content.some((block) => block.type === "image"),
+        )
+        .map((message) => message.toolCallId),
+    ).toEqual(["third", "fourth", "fifth", "sixth"])
+    for (const toolCallId of ["first", "second"]) {
+      const path = join(
+        runtime.root,
+        "rollouts",
+        thread.id,
+        "files",
+        "tools",
+        toolCallId,
+        "capture.png",
+      )
+      expect(
+        requestResults.find((message) => message.toolCallId === toolCallId)
+          ?.content,
+      ).toContainEqual({
+        type: "text",
+        text: `[Earlier tool screenshot omitted from request context to bound payload size (saved at ${path}). Call view_image if you need to re-inspect it; do not claim to see omitted images.]`,
+      })
+      expect(await readFile(path)).toEqual(image)
+    }
+    expect(
+      journal.flatMap(({ item }) =>
+        item.type === "response_item" &&
+        item.item.item.role === "tool" &&
+        item.item.item.content.some((block) => block.type === "image")
+          ? [item.item.item.toolCallId]
+          : [],
+      ),
+    ).toEqual(screenshotCalls)
+  })
+
   it("interrupts uncooperative readiness without executing the tool or publishing a second terminal", async () => {
     const entered = deferred()
     const release = deferred()

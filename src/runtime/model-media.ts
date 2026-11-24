@@ -31,6 +31,7 @@ export async function prepareModelMedia(
     messages,
     input.target,
     input.imageCapabilities,
+    input.rolloutAssets?.resolve,
   ).messages
   const { createNativePdfBudget, prepareModelDocuments } = await import(
     "./prepare-model-document.ts"

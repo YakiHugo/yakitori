@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest"
+import type {
+  ModelImageBlock,
+  ModelToolResultMessage,
+} from "../../src/runtime/model.ts"
 import { adaptImagesForModel } from "../../src/runtime/model-images.ts"
 
 const imageMessage = {
@@ -15,6 +19,57 @@ const imageMessage = {
 }
 
 describe("model image adaptation", () => {
+  it("counts image occurrences within tool results without counting user attachments", () => {
+    const screenshots = [
+      "first",
+      "second",
+      "third",
+      "fourth",
+      "fifth",
+      "sixth",
+    ].map(
+      (data): ModelImageBlock => ({
+        type: "image",
+        mediaType: "image/png",
+        data,
+      }),
+    )
+    const attachments = [imageMessage, imageMessage] as const
+    const separator = { type: "text", text: "next screenshot" } as const
+    const tool: ModelToolResultMessage = {
+      role: "tool",
+      toolCallId: "screenshots",
+      content: [...screenshots.slice(0, 1), separator, ...screenshots.slice(1)],
+    }
+    const result = adaptImagesForModel(
+      [attachments[0], tool, attachments[1]],
+      {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        instructionProfileId: "default",
+      },
+      {
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
+      },
+    )
+    const omission = {
+      type: "text",
+      text: "[Earlier tool screenshot omitted from request context to bound payload size. No local file path is available; do not claim to see omitted images.]",
+    }
+
+    expect(result.omittedImageCount).toBe(2)
+    expect(result.downgradedOriginalCount).toBe(0)
+    expect(result.messages).toEqual([
+      attachments[0],
+      {
+        ...tool,
+        content: [omission, separator, omission, ...screenshots.slice(2)],
+      },
+      attachments[1],
+    ])
+  })
+
   it("replaces unsupported images with a model-visible notice", () => {
     const result = adaptImagesForModel([imageMessage], {
       provider: "unknown",
