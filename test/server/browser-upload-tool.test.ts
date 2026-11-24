@@ -15,7 +15,7 @@ import {
   browserRequestMutates,
   parseBrowserRequest,
 } from "../../src/protocol/desktop-browser.ts"
-import { createBrowserUploadTool } from "../../src/server/browser-upload-tool.ts"
+import { createBrowserUpload } from "../../src/server/browser-upload.ts"
 
 const target = {
   tabId: "owned",
@@ -30,12 +30,12 @@ const input = {
   paths: ["file.txt"],
 }
 
-it("resolves regular upload files to canonical metadata and identifies disclosure in the normal permission request", async () => {
+it("resolves regular upload files to canonical metadata", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "yakitori-upload-test-")),
   )
   const requests: BrowserRequest[] = []
-  const tool = createBrowserUploadTool({
+  const tool = createBrowserUpload({
     request: async (request) => {
       requests.push(request)
       return { filesVerified: true }
@@ -47,15 +47,6 @@ it("resolves regular upload files to canonical metadata and identifies disclosur
     await writeFile(join(root, "file.txt"), "hello")
     await utimes(join(root, "file.txt"), 1700000000, 1700000000)
     const context = { workspaceRoot: root, threadId: "session", turnId: "turn" }
-    expect(typeof tool.approvalRequirement).toBe("function")
-    if (typeof tool.approvalRequirement !== "function")
-      throw new Error("Missing disclosure permission")
-    expect(await tool.approvalRequirement(input, context)).toMatchObject({
-      kind: "approval",
-      action: "command_execution",
-      subject: "Provide local files to https://owned.test/",
-      reason: expect.stringContaining("file.txt"),
-    })
     expect(await tool.execute(input, context)).toMatchObject({
       ok: true,
       output: { filesVerified: true },
@@ -92,7 +83,7 @@ it("refuses directories, missing files and duplicate aliases without asking Chro
     await mkdtemp(join(tmpdir(), "yakitori-upload-test-")),
   )
   const requests: BrowserRequest[] = []
-  const tool = createBrowserUploadTool({
+  const tool = createBrowserUpload({
     request: async (request) => {
       requests.push(request)
       return {}
@@ -117,7 +108,7 @@ it("refuses directories, missing files and duplicate aliases without asking Chro
 })
 
 it("rejects model-supplied transport metadata", async () => {
-  const tool = createBrowserUploadTool({
+  const tool = createBrowserUpload({
     request: async () => {
       throw new Error("No browser request allowed")
     },
@@ -162,7 +153,7 @@ it("discloses recursive directory selection and inventories canonical regular-fi
     await mkdtemp(join(tmpdir(), "yakitori-directory-test-")),
   )
   const requests: BrowserRequest[] = []
-  const tool = createBrowserUploadTool({
+  const tool = createBrowserUpload({
     request: async (request) => {
       requests.push(request)
       return { filesVerified: true }
@@ -178,12 +169,6 @@ it("discloses recursive directory selection and inventories canonical regular-fi
     await writeFile(join(root, "folder/nested/empty.txt"), "")
     await utimes(join(root, "folder/.hidden"), 1700000000, 1700000000)
     await utimes(join(root, "folder/nested/empty.txt"), 1700000001, 1700000001)
-    if (typeof tool.approvalRequirement !== "function")
-      throw new Error("Missing disclosure permission")
-    expect(await tool.approvalRequirement(selected, context)).toMatchObject({
-      subject: "Provide a local directory to https://owned.test/",
-      reason: expect.stringContaining("all regular files recursively"),
-    })
     expect(await tool.execute(selected, context)).toMatchObject({ ok: true })
     expect(requests).toEqual([
       {
@@ -245,7 +230,7 @@ it("bounds directory traversal before sending paths to Chromium", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "yakitori-directory-test-")),
   )
-  const tool = createBrowserUploadTool({
+  const tool = createBrowserUpload({
     request: async () => {
       throw new Error("Oversized directories must not reach Chromium")
     },

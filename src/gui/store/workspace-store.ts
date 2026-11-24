@@ -80,6 +80,7 @@ type WorkspaceStore = {
   setFileDirty(id: string, dirty: boolean): void
   openBrowser(url: string): void
   adoptBrowserPopup(tabId: string, openerTabId: string): void
+  adoptAgentBrowser(tabId: string, sessionId: string): void
   openAgents(sourceSessionId: string, agentId?: string): void
   selectAgent(tabId: string, agentId?: string): void
   askInSideChat(
@@ -391,6 +392,16 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
             ? {}
             : { workspaceSessionId: opener.workspaceSessionId }),
         },
+      ],
+    })
+  },
+  adoptAgentBrowser(tabId, sessionId) {
+    const { tabs } = get()
+    if (tabs.some((tab) => tab.id === tabId)) return
+    set({
+      tabs: [
+        ...tabs,
+        { id: tabId, kind: "browser", workspaceSessionId: sessionId },
       ],
     })
   },

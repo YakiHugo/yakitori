@@ -70,7 +70,7 @@ export function browserKeyStroke(
     }
   }
   // Physical codes for the explicitly supported printable US key names.
-  // Unicode text uses browser_input type/fill instead of guessing a layout.
+  // Send Unicode text through browser_act type or fill.
   const punctuation: [string, string, string, number][] = [
     [";", ":", "Semicolon", 186],
     ["=", "+", "Equal", 187],

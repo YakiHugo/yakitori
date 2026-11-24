@@ -5,7 +5,7 @@ import {
 import type { JsonObject } from "../protocol/events.ts"
 
 export async function captureBrowserPage(
-  input: BrowserCaptureRequest,
+  input: Exclude<BrowserCaptureRequest, { mode: "ref" }>,
   command: (
     method: string,
     params?: Record<string, unknown>,

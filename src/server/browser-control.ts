@@ -18,6 +18,7 @@ type BrowserTurn = {
 type TabLease = {
   turn: BrowserTurn
   cleanupPending: boolean
+  instanceId?: string
 }
 
 export class BrowserControl implements DesktopBrowser {
@@ -52,9 +53,13 @@ export class BrowserControl implements DesktopBrowser {
         "browser_cancelled",
         "This turn no longer owns browser operations.",
       )
-    if (input.action === "list")
+    if (
+      input.action === "list" ||
+      input.action === "target" ||
+      input.action === "download_target"
+    )
       return this.#browser.request(input, owner, signal)
-    const tabId = input.target.tabId
+    const tabId = input.action === "new_tab" ? input.tabId : input.target.tabId
     let lease = this.#tabs.get(tabId)
     if (lease?.cleanupPending)
       throw new BrowserControlError(
@@ -69,6 +74,14 @@ export class BrowserControl implements DesktopBrowser {
     if (!lease) {
       lease = { turn, cleanupPending: false }
       this.#tabs.set(tabId, lease)
+    }
+    if (input.action !== "new_tab") {
+      if (lease.instanceId && lease.instanceId !== input.target.instanceId)
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The tab was replaced during this turn.",
+        )
+      lease.instanceId = input.target.instanceId
     }
     try {
       return await this.#browser.request(input, owner, signal)

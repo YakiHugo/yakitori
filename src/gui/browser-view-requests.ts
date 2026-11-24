@@ -93,6 +93,13 @@ export function connectBrowserViewRequests(
     if (state.closed) workspace.closeTab(state.tabId)
     else if (state.openerTabId)
       workspace.adoptBrowserPopup(state.tabId, state.openerTabId)
+    else if (state.ownerSessionId) {
+      const app = useAppStore.getState()
+      workspace.adoptAgentBrowser(
+        state.tabId,
+        app.sessionThreadIds[state.ownerSessionId] ?? state.ownerSessionId,
+      )
+    }
   })
   return () => {
     mounted = false

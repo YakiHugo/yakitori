@@ -30,7 +30,7 @@ import { BrowserPageFocus } from "./browser-focus.ts"
 import { BrowserFrames } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import { BrowserPendingMutations } from "./browser-mutations.ts"
-import { BrowserPointerTarget } from "./browser-pointer.ts"
+import { BrowserFramePointer, BrowserPointerTarget } from "./browser-pointer.ts"
 import {
   type BrowserDocumentScope,
   type BrowserFrameReadMethod,
@@ -42,6 +42,7 @@ import {
   verifyBrowserSelection,
 } from "./browser-select.ts"
 import { BrowserFrameSessions } from "./browser-sessions.ts"
+import type { BrowserTelemetry } from "./browser-telemetry.ts"
 import {
   readBrowserTextControl,
   setBrowserInputValue,
@@ -76,6 +77,10 @@ export class BrowserDocumentConnection {
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
   readonly #viewReady: (signal: AbortSignal) => Promise<void>
+  readonly #telemetry: BrowserTelemetry | undefined
+  #recordingNetwork = false
+  readonly #networkMessage = (_event: unknown, method: string, data: unknown) =>
+    this.#telemetry?.receive(method, data)
   readonly #detached = () => {
     this.#closed = true
     this.#lifetime.abort(
@@ -89,6 +94,7 @@ export class BrowserDocumentConnection {
     this.#sessions.close()
     this.#chooser.close()
     this.#dialogs.disconnected()
+    this.#debug.off("message", this.#networkMessage)
   }
 
   constructor(
@@ -96,15 +102,20 @@ export class BrowserDocumentConnection {
     viewReady: (signal: AbortSignal) => Promise<void> = async (signal) => {
       signal.throwIfAborted()
     },
+    options: { telemetry?: BrowserTelemetry; allowBlank?: boolean } = {},
   ) {
     this.#contents = contents
     this.#viewReady = viewReady
+    this.#telemetry = options.telemetry
     this.#mutations = new BrowserPendingMutations(() => contents.isDestroyed())
     const debug = contents.debugger
     this.#debug = debug
     if (
       contents.isDestroyed() ||
-      !/^https?:\/\//.test(contents.getURL()) ||
+      !(
+        /^https?:\/\//.test(contents.getURL()) ||
+        (options.allowBlank && ["", "about:blank"].includes(contents.getURL()))
+      ) ||
       contents.isLoadingMainFrame()
     )
       throw new BrowserControlError(
@@ -130,6 +141,38 @@ export class BrowserDocumentConnection {
     this.#drag = new BrowserDrag(debug)
     this.#frameCatalog = new BrowserFrames(this.#sessions)
     debug.on("detach", this.#detached)
+  }
+
+  async enableNetwork(signal: AbortSignal): Promise<void> {
+    if (!this.#telemetry || this.#recordingNetwork) return
+    this.#debug.on("message", this.#networkMessage)
+    try {
+      await this.#read(signal, async (command) => {
+        await command("Page.enable")
+        this.#telemetry?.startNetworkAttachment()
+        await command("Network.enable", {
+          maxTotalBufferSize: 1024 * 1024,
+          maxResourceBufferSize: 64 * 1024,
+        })
+      })
+      this.#recordingNetwork = true
+    } finally {
+      if (!this.#recordingNetwork)
+        this.#debug.off("message", this.#networkMessage)
+    }
+  }
+
+  async network(
+    offset: number | undefined,
+    requestId: string | undefined,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    const telemetry = this.#telemetry
+    if (!telemetry) return { entries: [] }
+    await this.enableNetwork(signal)
+    return this.#read(signal, (command) =>
+      telemetry.network(command, offset, requestId),
+    )
   }
 
   get closed(): boolean {
@@ -242,6 +285,7 @@ export class BrowserDocumentConnection {
     )
     this.#references.clear()
     this.#debug.off("detach", this.#detached)
+    this.#debug.off("message", this.#networkMessage)
     this.#frameCatalog.close()
     this.#sessions.close()
     this.#chooser.close()
@@ -430,11 +474,84 @@ export class BrowserDocumentConnection {
     })
   }
 
+  async matchesWait(
+    until: "text" | "text_gone" | "ref_or_role",
+    value: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    return this.#read(signal, async (command) => {
+      if (until === "ref_or_role") {
+        const reference = this.#references.get(value)
+        if (!reference && /^e[1-9][0-9]{0,15}$/.test(value)) return false
+        let document: BrowserControlReference["document"]
+        if (reference?.frame) {
+          try {
+            document = (
+              await this.#frameCatalog.resolve(
+                reference.frame.reference,
+                command,
+              )
+            ).frame.document
+          } catch (cause) {
+            if (
+              cause instanceof BrowserControlError &&
+              cause.code === "browser_frame_stale"
+            )
+              return false
+            throw cause
+          }
+        } else document = documentIdentity(await command("Page.getFrameTree"))
+        if (reference && reference.document.documentId !== document.documentId)
+          return false
+        const result = object(
+          await command(
+            "Accessibility.getFullAXTree",
+            {
+              frameId: document.frameId,
+              depth: 8,
+            },
+            reference?.frame?.sessionId,
+          ),
+        )
+        if (!Array.isArray(result.nodes))
+          throw new Error("Missing accessibility nodes during wait.")
+        return result.nodes.some((raw) => {
+          const node = object(raw)
+          return (
+            node.ignored !== true &&
+            (reference
+              ? reference.backendNodeId === node.backendDOMNodeId
+              : node.role !== undefined && object(node.role).value === value)
+          )
+        })
+      }
+      const document = documentIdentity(await command("Page.getFrameTree"))
+      const world = object(
+        await command("Page.createIsolatedWorld", {
+          frameId: document.frameId,
+          worldName: "yakitori-browser-observation",
+        }),
+      )
+      const response = object(
+        await command("Runtime.evaluate", {
+          contextId: world.executionContextId,
+          returnByValue: true,
+          expression: `(() => { const text = document.body?.innerText ?? ""; return { found: text.slice(0, 65536).includes(${JSON.stringify(value)}), complete: text.length <= 65536 }; })()`,
+        }),
+      )
+      const result = object(object(response.result).value)
+      return until === "text"
+        ? result.found === true
+        : result.found === false && result.complete === true
+    })
+  }
+
   async observe(
     signal: AbortSignal,
     frameReference?: string,
     options: Readonly<{ interactiveOnly?: boolean; scopeRef?: string }> = {},
   ): Promise<JsonObject> {
+    await this.enableNetwork(signal)
     const scoped = options.scopeRef
       ? this.#references.get(options.scopeRef)
       : undefined
@@ -552,6 +669,7 @@ export class BrowserDocumentConnection {
           : {}),
         nodes,
         outline,
+        ...(this.#telemetry ? { consoleErrors: this.#telemetry.errors } : {}),
         truncated,
         depth: 8,
         urlTruncated: after.url.length > 8192,
@@ -577,7 +695,10 @@ export class BrowserDocumentConnection {
           "The browser target closed during capture.",
         )
       const zoom = contents.getZoomFactor()
-      const image = await captureBrowserPage(input, command, zoom)
+      const image =
+        input.mode === "ref"
+          ? await this.#captureReference(input, command, signal, zoom)
+          : await captureBrowserPage(input, command, zoom)
       const after = documentIdentity(await command("Page.getFrameTree"))
       if (
         before.frameId !== after.frameId ||
@@ -597,6 +718,195 @@ export class BrowserDocumentConnection {
         urlTruncated: after.url.length > 8192,
       }
     })
+  }
+
+  async #captureReference(
+    input: Extract<BrowserCaptureRequest, { mode: "ref" }>,
+    command: BrowserProtocolCommand,
+    signal: AbortSignal,
+    zoom: number,
+  ): Promise<JsonObject> {
+    const reference = this.#references.get(input.reference)
+    if (!reference)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Take a snapshot before capturing an element.",
+      )
+    const group = `yakitori_${randomUUID()}`
+    const address = await this.#verifyDocument(reference, signal)
+    const read: BrowserProtocolCommand = (method, params, sessionId) =>
+      command(method, params, sessionId)
+    const frame = address
+      ? new BrowserFramePointer(address.path, read, read, group)
+      : undefined
+    try {
+      const objectId = await this.#resolveReference(reference, group, signal)
+      const reply = object(
+        await command(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: `function() {
+          if (!(this instanceof Element) || !this.isConnected || this.ownerDocument !== document) return null;
+          const {left, top, right, bottom} = Element.prototype.getBoundingClientRect.call(this);
+          return { left, top, right, bottom, width: innerWidth, height: innerHeight };
+        }`,
+          },
+          reference.frame?.sessionId,
+        ),
+      )
+      const rect = object(reply.result).value
+      if (!rect)
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "The screenshot element no longer exists.",
+        )
+      const { left, top, right, bottom, width, height } = object(rect)
+      if (
+        typeof left !== "number" ||
+        typeof top !== "number" ||
+        typeof right !== "number" ||
+        typeof bottom !== "number" ||
+        typeof width !== "number" ||
+        typeof height !== "number"
+      )
+        throw new Error("Chromium returned no element rectangle.")
+      const x0 = frame ? Math.max(0, left) : left,
+        x1 = frame ? Math.min(width, right) : right
+      const y0 = frame ? Math.max(0, top) : top,
+        y1 = frame ? Math.min(height, bottom) : bottom
+      if (x1 <= x0 || y1 <= y0)
+        throw new BrowserControlError(
+          "browser_capture_size",
+          "The element has no visible area in its document.",
+        )
+      await frame?.prepare(false)
+      const corners = [
+        { x: x0, y: y0 },
+        { x: x1, y: y0 },
+        { x: x0, y: y1 },
+        { x: x1, y: y1 },
+      ]
+      const points = frame
+        ? await Promise.all(corners.map((point) => frame.project(point, false)))
+        : corners
+      const metrics = object(await command("Page.getLayoutMetrics"))
+      const viewport = object(metrics.cssVisualViewport),
+        content = object(metrics.cssContentSize)
+      if (
+        typeof viewport.pageX !== "number" ||
+        typeof viewport.pageY !== "number" ||
+        typeof content.width !== "number" ||
+        typeof content.height !== "number"
+      )
+        throw new Error("Chromium returned no document dimensions.")
+      const x = Math.max(
+        0,
+        Math.min(...points.map((point) => point.x)) + viewport.pageX,
+      )
+      const y = Math.max(
+        0,
+        Math.min(...points.map((point) => point.y)) + viewport.pageY,
+      )
+      const clip = {
+        x,
+        y,
+        width:
+          Math.min(
+            content.width,
+            Math.max(...points.map((point) => point.x)) + viewport.pageX,
+          ) - x,
+        height:
+          Math.min(
+            content.height,
+            Math.max(...points.map((point) => point.y)) + viewport.pageY,
+          ) - y,
+      }
+      if (clip.width <= 0 || clip.height <= 0)
+        throw new BrowserControlError(
+          "browser_capture_size",
+          "The element is outside the captured document.",
+        )
+      const image = await captureBrowserPage(
+        { action: "capture", target: input.target, mode: "clip", clip },
+        command,
+        zoom,
+      )
+      await this.#verifyDocument(reference, signal)
+      return {
+        ...image,
+        capture: {
+          ...object(image.capture),
+          mode: "ref",
+          ref: input.reference,
+        },
+      }
+    } finally {
+      await Promise.all(
+        [
+          ...new Set([reference.frame?.sessionId, ...(frame?.sessions ?? [])]),
+        ].map((sessionId) =>
+          this.#sessions.releaseObjects(
+            group,
+            (method, params, id) => this.#debug.sendCommand(method, params, id),
+            sessionId,
+          ),
+        ),
+      )
+    }
+  }
+
+  async fileTarget(token: string, signal: AbortSignal): Promise<JsonObject> {
+    const reference = this.#references.get(token)
+    if (!reference)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Take a snapshot before selecting a file control.",
+      )
+    const group = `yakitori_${randomUUID()}`
+    const sessionId = reference.frame?.sessionId
+    try {
+      const objectId = await this.#resolveReference(reference, group, signal)
+      const reply = object(
+        await this.#inputReadCommand(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: `function() {
+          if (!(this instanceof Element) || !this.isConnected || this.ownerDocument !== document) return null;
+          const fileInput = this instanceof HTMLInputElement && this.type === 'file';
+          return { fileInput, directory: fileInput && this.webkitdirectory };
+        }`,
+          },
+          signal,
+          sessionId,
+        ),
+      )
+      const value = object(reply.result).value
+      if (!value)
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "The file control no longer exists.",
+        )
+      const { fileInput, directory } = object(value)
+      await this.#verifyDocument(reference, signal)
+      return {
+        fileInput: fileInput === true,
+        directory: directory === true,
+        fromUrl: reference.document.url,
+        ...(reference.frame
+          ? { frameReference: reference.frame.reference }
+          : {}),
+      }
+    } finally {
+      await this.#sessions.releaseObjects(
+        group,
+        (method, params, id) => this.#debug.sendCommand(method, params, id),
+        sessionId,
+      )
+    }
   }
 
   #consumeReference(
@@ -731,14 +1041,24 @@ export class BrowserDocumentConnection {
   ): Promise<JsonObject> {
     signal.throwIfAborted()
     this.assertInputIdle()
-    if (input.action !== "dialog_arm") {
+    if (input.action === "dialog_disarm" || input.action === "dialog_inspect") {
       if (input.action === "dialog_disarm") {
         await this.#dialogs.disarm()
         return { armed: false }
       }
       return this.#dialogs.inspect()
     }
+    if (!("fromUrl" in input))
+      throw new Error("Missing dialog document binding.")
     const scope = await this.#documentScope(input, signal)
+    if (input.action === "dialog_answer") {
+      return this.#dialogs.answer(
+        scope,
+        input.response,
+        (method, params, sessionId) =>
+          this.#inputCommand(method, params ?? {}, signal, sessionId),
+      )
+    }
     let attempted = false
     try {
       await this.#dialogs.arm(

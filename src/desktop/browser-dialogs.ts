@@ -29,12 +29,47 @@ export class BrowserDialogs {
     | undefined
   #reply: Promise<void> | undefined
   #failure: BrowserControlError | undefined
+  #pending:
+    | {
+        frameId: string
+        url: string
+        type: string
+        message: string
+        sessionId?: string
+      }
+    | undefined
   readonly #message = (
     _event: unknown,
     method: string,
     params: unknown,
     sessionId?: string,
   ) => {
+    if (typeof params === "object" && params !== null) {
+      if (
+        method === "Page.javascriptDialogOpening" &&
+        "frameId" in params &&
+        typeof params.frameId === "string" &&
+        "url" in params &&
+        typeof params.url === "string" &&
+        "type" in params &&
+        typeof params.type === "string" &&
+        "message" in params &&
+        typeof params.message === "string"
+      ) {
+        this.#pending = {
+          frameId: params.frameId,
+          url: params.url,
+          type: params.type,
+          message: params.message,
+          ...(sessionId ? { sessionId } : {}),
+        }
+      } else if (
+        method === "Page.javascriptDialogClosed" &&
+        this.#pending?.sessionId === (sessionId || undefined)
+      ) {
+        this.#pending = undefined
+      }
+    }
     const scope = this.#scope
     if (
       !scope ||
@@ -106,6 +141,7 @@ export class BrowserDialogs {
       return
     }
     scope.state = "answering"
+    const currentDialog = this.#pending
     this.#reply = scope
       .command(
         "Page.handleJavaScriptDialog",
@@ -118,12 +154,14 @@ export class BrowserDialogs {
         scope.frame?.sessionId,
         () => {
           scope.state = "answered"
+          if (this.#pending === currentDialog) this.#pending = undefined
           if (this.#scope === scope) this.#failure = undefined
         },
       )
       .then(
         () => {
           scope.state = "answered"
+          if (this.#pending === currentDialog) this.#pending = undefined
         },
         (cause: unknown) => {
           // The protocol boundary translates operational failures before they reach
@@ -182,6 +220,39 @@ export class BrowserDialogs {
       )
   }
 
+  async answer(
+    scope: BrowserDocumentScope,
+    response: BrowserDialogRule,
+    command: BrowserDialogCommand,
+  ): Promise<JsonObject> {
+    const pending = this.#pending
+    if (
+      this.#scope?.state === "answering" ||
+      !pending ||
+      pending.type !== response.type ||
+      pending.url !== scope.document.url ||
+      pending.frameId !== scope.document.frameId ||
+      pending.sessionId !== scope.frame?.sessionId ||
+      (response.message !== undefined && response.message !== pending.message)
+    )
+      throw new BrowserControlError(
+        "browser_dialog_stale",
+        "There is no observed open dialog matching this document and response.",
+      )
+    await command(
+      "Page.handleJavaScriptDialog",
+      {
+        accept: response.accept,
+        ...(response.promptText === undefined
+          ? {}
+          : { promptText: response.promptText }),
+      },
+      pending.sessionId,
+    )
+    if (this.#pending === pending) this.#pending = undefined
+    return { answered: true, type: pending.type, accepted: response.accept }
+  }
+
   allowNavigationUnload(fromUrl: string): boolean {
     const scope = this.#scope
     if (
@@ -203,7 +274,20 @@ export class BrowserDialogs {
 
   inspect(): JsonObject {
     const scope = this.#scope
-    if (!scope?.ready) return { armed: false }
+    if (!scope?.ready) {
+      const pending = this.#pending
+      return {
+        armed: false,
+        ...(pending
+          ? {
+              dialog: {
+                type: pending.type,
+                message: pending.message.slice(0, 8192),
+              },
+            }
+          : {}),
+      }
+    }
     return {
       armed: true,
       state: scope.state,
@@ -229,11 +313,13 @@ export class BrowserDialogs {
   }
 
   disconnected(): void {
+    this.#pending = undefined
     this.#prompt.disconnected()
     this.#debug.off("message", this.#message)
   }
 
   close(targetDestroyed = false): void {
+    this.#pending = undefined
     this.#scope = undefined
     this.#reply = undefined
     this.#failure = undefined

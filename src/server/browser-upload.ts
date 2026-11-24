@@ -9,7 +9,6 @@ import {
 } from "../protocol/desktop-browser.ts"
 import { isJsonObject } from "../protocol/json.ts"
 import { resolveReadPath } from "../runtime/tools/path-policy.ts"
-import { plainToolName } from "../runtime/tools/tool-name.ts"
 import type { RuntimeTool } from "../runtime/tools/types.ts"
 import { inspectUploadDirectory } from "./browser-upload-directory.ts"
 
@@ -52,65 +51,10 @@ function parseUploadInput(input: unknown) {
   }
 }
 
-export function createBrowserUploadTool(browser: DesktopBrowser): RuntimeTool {
+export function createBrowserUpload(
+  browser: DesktopBrowser,
+): Pick<RuntimeTool, "execute"> {
   return {
-    toolName: plainToolName("browser_upload"),
-    description:
-      "Provide local regular files to an exact observed HTML file input in the connected Yakitori browser. Use ref and fromUrl equal to that observation's document.url, including for a child frame. Paths may be workspace-relative or absolute; they resolve to regular files before Chromium receives them. This gives the page access to those files and may trigger its upload handlers. Empty paths explicitly clears the file selection using synthetic input/change events; nonempty selection uses Chromium. The receipt verifies FileList names, sizes and modification times, not website upload completion or file contents. Multi-file selection requires a multiple input. For a webkitdirectory input use action upload_directory with exactly one folder path; this recursively provides regular files with their relative paths. Symbolic links and device files inside the tree are refused; traversal is bounded to 4096 entries, 64 levels, 256 files and 64KiB metadata. Chromium directory enumeration requires a displayed browser tab and a restored Yakitori window; the tool waits up to five seconds for approval-overlay layout to settle and otherwise returns browser_requires_visibility before file selection. It never shows or focuses a page automatically. Directory completion waits for a trusted Chromium change/cancel event, with a 10-second safety deadline that retains unknown pending effects until confirmed or the original target closes. Setting files does not require the referenced input to be visible or focused, and opens no OS picker. References are single-use; changed documents or unconfirmed results require observation, never automatic replay. Computer connection, shared ownership and normal command permission apply. Safety bounds: 256 paths, 64KiB path data/result metadata, 8192 characters per path.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["action", "target", "reference", "fromUrl", "paths"],
-      properties: {
-        action: { type: "string", enum: ["upload", "upload_directory"] },
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["tabId", "webContentsId", "instanceId"],
-          properties: {
-            tabId: { type: "string" },
-            webContentsId: { type: "integer", minimum: 1 },
-            instanceId: { type: "string" },
-          },
-        },
-        reference: { type: "string" },
-        fromUrl: { type: "string", minLength: 1, maxLength: 8192 },
-        paths: {
-          type: "array",
-          maxItems: 256,
-          items: { type: "string", minLength: 1, maxLength: 8192 },
-        },
-      },
-    },
-    effect: "mutate",
-    exposure: "deferred",
-    supportsParallelToolCalls: false,
-    approvalRequirement(input) {
-      try {
-        const request = parseUploadInput(input)
-        return {
-          kind: "approval",
-          action: "command_execution",
-          subject: request.directory
-            ? `Provide a local directory to ${request.fromUrl}`
-            : request.paths.length
-              ? `Provide local files to ${request.fromUrl}`
-              : `Clear file selection in ${request.fromUrl}`,
-          reason: request.directory
-            ? `The page will receive all regular files recursively from this directory, including relative paths:\n${request.paths[0]}`
-            : request.paths.length
-              ? `The page will receive these files:\n${request.paths.join("\n")}`
-              : "Clear the exact observed file input.",
-        }
-      } catch (cause) {
-        if (!(cause instanceof BrowserControlError)) throw cause
-        return {
-          kind: "approval",
-          action: "command_execution",
-          subject: "Provide files to the connected desktop browser",
-        }
-      }
-    },
     async execute(input, context) {
       context.signal?.throwIfAborted()
       try {

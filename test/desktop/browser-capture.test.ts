@@ -14,7 +14,7 @@ import {
   parseBrowserCaptureRequest,
 } from "../../src/protocol/desktop-browser.ts"
 import { isJsonObject } from "../../src/protocol/json.ts"
-import { createBrowserCaptureTool } from "../../src/server/browser-capture-tool.ts"
+import { createBrowserScreenshot } from "../../src/server/browser-screenshot.ts"
 
 const target = {
   tabId: "owned",
@@ -262,7 +262,7 @@ it("stores browser pixels as a conversation asset and projects an image without 
     assets = createRolloutAssets(root, {
       withMutationLease: (_id, mutate) => mutate(),
     })
-  const tool = createBrowserCaptureTool({
+  const tool = createBrowserScreenshot({
     request: async () => ({
       imageBase64: bytes.toString("base64"),
       capture: { mode: "viewport" },
@@ -318,7 +318,7 @@ it("stores browser pixels as a conversation asset and projects an image without 
 
 it("refuses screenshot dispatch for a text-only model", async () => {
   let dispatched = false
-  const tool = createBrowserCaptureTool({
+  const tool = createBrowserScreenshot({
     request: async () => {
       dispatched = true
       return {}

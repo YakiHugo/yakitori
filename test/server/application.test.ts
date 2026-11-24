@@ -3182,82 +3182,18 @@ describe("application composition", () => {
   })
 
   it.each([
-    "browser",
-    "browser_input",
-    "browser_navigate",
-    "browser_upload",
-    "browser_view",
-    "browser_chooser",
-    "browser_dialog",
-    "browser_download",
-    "browser_drag",
-  ])("dispatches browser tools while native input is owned or disconnected (tool=%s)", async (browserTool) => {
-    const browserInput =
-      browserTool === "browser_drag"
-        ? {
-            action: "prepare",
-            target: {
-              tabId: "owned",
-              webContentsId: 17,
-              instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
-            },
-            reference: "e1",
-          }
-        : browserTool === "browser"
-          ? { action: "list" }
-          : browserTool === "browser_input"
-            ? {
-                action: "type",
-                target: {
-                  tabId: "owned",
-                  webContentsId: 17,
-                  instanceId:
-                    "browser_target_00000000-0000-4000-8000-000000000001",
-                },
-                reference: "e1",
-                text: "Must stay blocked",
-              }
-            : browserTool === "browser_upload"
-              ? {
-                  action: "upload",
-                  target: {
-                    tabId: "owned",
-                    webContentsId: 17,
-                    instanceId:
-                      "browser_target_00000000-0000-4000-8000-000000000001",
-                  },
-                  reference: "e1",
-                  fromUrl: "https://owned.test/",
-                  paths: [],
-                }
-              : browserTool === "browser_view" ||
-                  browserTool === "browser_chooser" ||
-                  browserTool === "browser_dialog" ||
-                  browserTool === "browser_download"
-                ? {
-                    action: browserTool === "browser_view" ? "show" : "arm",
-                    target: {
-                      tabId: "owned",
-                      webContentsId: 17,
-                      instanceId:
-                        "browser_target_00000000-0000-4000-8000-000000000001",
-                    },
-                    fromUrl: "https://owned.test/",
-                    ...(browserTool === "browser_dialog"
-                      ? { response: { type: "confirm", accept: true } }
-                      : {}),
-                  }
-                : {
-                    action: "navigate",
-                    target: {
-                      tabId: "owned",
-                      webContentsId: 17,
-                      instanceId:
-                        "browser_target_00000000-0000-4000-8000-000000000001",
-                    },
-                    fromUrl: "",
-                    url: "https://destination.test/",
-                  }
+    ["browser_inspect", { action: "tabs" }],
+    ["browser_inspect", { action: "snapshot", tabId: "owned" }],
+    [
+      "browser_act",
+      { action: "fill", tabId: "owned", ref: "e1", text: "Browser input" },
+    ],
+    [
+      "browser_act",
+      { action: "navigate", tabId: "owned", url: "https://destination.test/" },
+    ],
+    ["browser_wait", { tabId: "owned", until: "load" }],
+  ] as const)("dispatches %s independently of native input (%j)", async (browserTool, browserInput) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
@@ -3306,7 +3242,17 @@ describe("application composition", () => {
         desktopBrowser: {
           async finishTurn() {},
           async closeSession() {},
-          async request() {
+          async request(input) {
+            if (input.action === "target")
+              return {
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                url: "https://owned.test/",
+              }
             inspections++
             return { tabs: [] }
           },
@@ -3367,55 +3313,19 @@ describe("application composition", () => {
   })
 
   it.each([
-    "browser_input",
-    "browser",
-    "browser_capture",
-    "browser_navigate",
-    "browser_download",
-    "browser_drag",
-  ])("quarantines only the affected tab after %s cleanup fails", async (browserTool) => {
+    ["browser_act", { action: "fill", tabId: "owned", ref: "e1", text: "" }],
+    [
+      "browser_act",
+      { action: "navigate", tabId: "owned", url: "https://destination.test/" },
+    ],
+    ["browser_inspect", { action: "snapshot", tabId: "owned" }],
+    ["browser_wait", { tabId: "owned", until: "load" }],
+  ] as const)("quarantines only the affected tab after %s cleanup fails (%j)", async (browserTool, input) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release, called } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
       const cleaning = Promise.withResolvers<void>(),
         releaseCleanup = Promise.withResolvers<void>()
-      const target = {
-        tabId: "owned",
-        webContentsId: 17,
-        instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
-      }
-      const input =
-        browserTool === "browser_drag"
-          ? {
-              action: "drop",
-              target,
-              dragId: "browser_drag_00000000-0000-4000-8000-000000000001",
-              reference: "e1",
-            }
-          : browserTool === "browser_download"
-            ? {
-                action: "cancel",
-                target,
-                downloadId:
-                  "browser_download_00000000-0000-4000-8000-000000000001",
-              }
-            : browserTool === "browser"
-              ? { action: "observe", target }
-              : browserTool === "browser_capture"
-                ? { action: "capture", target, mode: "viewport" }
-                : browserTool === "browser_navigate"
-                  ? {
-                      action: "navigate",
-                      target,
-                      fromUrl: "https://owned.test/",
-                      url: "https://destination.test/",
-                    }
-                  : {
-                      action: "fill",
-                      target,
-                      reference: "e1",
-                      text: "",
-                    }
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,
@@ -3445,8 +3355,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "try_browser",
-              name: "browser",
-              input: { action: "observe", target },
+              name: "browser_inspect",
+              input: { action: "snapshot", tabId: "owned" },
             },
           ],
         },
@@ -3457,8 +3367,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "after_cleanup",
-              name: "browser",
-              input: { action: "observe", target },
+              name: "browser_inspect",
+              input: { action: "snapshot", tabId: "owned" },
             },
           ],
         },
@@ -3470,7 +3380,17 @@ describe("application composition", () => {
         ...testApplicationOptions({ rootDir, workspace }),
         stream: provider.stream,
         desktopBrowser: {
-          async request() {
+          async request(input) {
+            if (input.action === "target")
+              return {
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                url: "https://owned.test/",
+              }
             requests++
             if (!cleaned)
               throw new BrowserControlError(
@@ -3543,16 +3463,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "browser_owner",
-              name: "browser",
-              input: {
-                action: "observe",
-                target: {
-                  tabId: "owned",
-                  webContentsId: 17,
-                  instanceId:
-                    "browser_target_00000000-0000-4000-8000-000000000001",
-                },
-              },
+              name: "browser_inspect",
+              input: { action: "snapshot", tabId: "owned" },
             },
           ],
         },
@@ -3564,7 +3476,17 @@ describe("application composition", () => {
         ...testApplicationOptions({ rootDir, workspace }),
         stream: provider.stream,
         desktopBrowser: {
-          async request(_input, owner) {
+          async request(input, owner) {
+            if (input.action === "target")
+              return {
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                url: "https://owned.test/",
+              }
             requestOwner = owner
             return { tabs: [] }
           },

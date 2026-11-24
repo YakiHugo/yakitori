@@ -365,6 +365,168 @@ export type BrowserNavigationRequest = Readonly<{
   url: string
 }>
 
+type BrowserWorkspaceRequest =
+  | Readonly<{ action: "target"; tabId?: string }>
+  | Readonly<{ action: "download_target"; downloadId: string }>
+  | Readonly<{ action: "new_tab"; tabId: string; url?: string }>
+  | Readonly<{
+      action: "back" | "forward" | "reload" | "stop"
+      target: BrowserTarget
+      fromUrl: string
+    }>
+  | Readonly<{
+      action: "console" | "network"
+      target: BrowserTarget
+      offset?: number
+      requestId?: string
+    }>
+  | Readonly<{
+      action: "file_target"
+      target: BrowserTarget
+      reference: string
+    }>
+  | Readonly<{
+      action: "wait"
+      target: BrowserTarget
+      until: "text" | "text_gone" | "ref_or_role" | "url" | "load"
+      value?: string
+      regex?: boolean
+      timeoutMs?: number
+    }>
+
+function parseWorkspaceRequest(value: JsonObject): BrowserWorkspaceRequest {
+  const validTab =
+    typeof value.tabId === "string" &&
+    /^[A-Za-z0-9_-]{1,256}$/.test(value.tabId)
+  const only = (...keys: string[]) =>
+    Object.keys(value).every((key) => key === "action" || keys.includes(key))
+  if (
+    value.action === "target" &&
+    only("tabId") &&
+    (value.tabId === undefined || validTab)
+  )
+    return {
+      action: "target",
+      ...(value.tabId === undefined ? {} : { tabId: String(value.tabId) }),
+    }
+  if (
+    value.action === "download_target" &&
+    only("downloadId") &&
+    typeof value.downloadId === "string" &&
+    /^browser_download_[a-f0-9-]{36}$/.test(value.downloadId)
+  )
+    return { action: "download_target", downloadId: value.downloadId }
+  if (
+    value.action === "new_tab" &&
+    only("tabId", "url") &&
+    validTab &&
+    String(value.tabId).startsWith("agent_tab_")
+  ) {
+    let url: string | undefined
+    if (
+      value.url !== undefined &&
+      typeof value.url === "string" &&
+      value.url.length <= 8192 &&
+      URL.canParse(value.url)
+    ) {
+      const candidate = new URL(value.url)
+      if (
+        ["http:", "https:"].includes(candidate.protocol) &&
+        !candidate.username &&
+        !candidate.password
+      )
+        url = candidate.href
+    }
+    if (value.url === undefined || url)
+      return {
+        action: "new_tab",
+        tabId: String(value.tabId),
+        ...(url ? { url } : {}),
+      }
+  }
+  if (Object.hasOwn(value, "target")) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid target parser result.")
+    const { target } = observed
+    if (
+      value.action === "file_target" &&
+      only("target", "reference") &&
+      typeof value.reference === "string" &&
+      /^e[1-9][0-9]{0,15}$/.test(value.reference)
+    )
+      return { action: "file_target", target, reference: value.reference }
+    if (
+      (value.action === "back" ||
+        value.action === "forward" ||
+        value.action === "reload" ||
+        value.action === "stop") &&
+      only("target", "fromUrl") &&
+      typeof value.fromUrl === "string" &&
+      value.fromUrl.length <= 8192
+    )
+      return { action: value.action, target, fromUrl: value.fromUrl }
+    if (
+      (value.action === "console" || value.action === "network") &&
+      only("target", "offset", "requestId") &&
+      (value.offset === undefined ||
+        (typeof value.offset === "number" &&
+          Number.isSafeInteger(value.offset) &&
+          value.offset >= 0)) &&
+      (value.requestId === undefined ||
+        (value.action === "network" &&
+          typeof value.requestId === "string" &&
+          /^n[1-9][0-9]{0,15}$/.test(value.requestId)))
+    )
+      return {
+        action: value.action,
+        target,
+        ...(typeof value.offset === "number" ? { offset: value.offset } : {}),
+        ...(typeof value.requestId === "string"
+          ? { requestId: value.requestId }
+          : {}),
+      }
+    if (
+      value.action === "wait" &&
+      only("target", "until", "value", "regex", "timeoutMs") &&
+      (value.until === "text" ||
+        value.until === "text_gone" ||
+        value.until === "ref_or_role" ||
+        value.until === "url" ||
+        value.until === "load") &&
+      (value.until === "load"
+        ? value.value === undefined
+        : typeof value.value === "string" &&
+          value.value.length > 0 &&
+          value.value.length <= 1024) &&
+      (value.regex === undefined ||
+        (value.until === "url" && typeof value.regex === "boolean")) &&
+      (value.timeoutMs === undefined ||
+        (typeof value.timeoutMs === "number" &&
+          Number.isInteger(value.timeoutMs) &&
+          value.timeoutMs >= 100 &&
+          value.timeoutMs <= 30_000))
+    )
+      return {
+        action: value.action,
+        target,
+        until: value.until,
+        ...(typeof value.value === "string" ? { value: value.value } : {}),
+        ...(typeof value.regex === "boolean" ? { regex: value.regex } : {}),
+        ...(typeof value.timeoutMs === "number"
+          ? { timeoutMs: value.timeoutMs }
+          : {}),
+      }
+  }
+  throw new BrowserControlError(
+    "invalid_arguments",
+    "Invalid browser workspace operation.",
+  )
+}
+
 export function parseBrowserNavigationRequest(
   value: unknown,
 ): BrowserNavigationRequest {
@@ -410,6 +572,7 @@ export function parseBrowserNavigationRequest(
 export type BrowserCaptureRequest = Readonly<
   { action: "capture"; target: BrowserTarget } & (
     | { mode: "viewport" | "page" }
+    | { mode: "ref"; reference: string }
     | {
         mode: "clip"
         clip: { x: number; y: number; width: number; height: number }
@@ -425,7 +588,7 @@ export function parseBrowserCaptureRequest(
     value.action === "capture" &&
     ["action", "target", "mode"].every((key) => Object.hasOwn(value, key)) &&
     Object.keys(value).every((key) =>
-      ["action", "target", "mode", "clip"].includes(key),
+      ["action", "target", "mode", "clip", "reference"].includes(key),
     )
   ) {
     const observed = parseBrowserObservationRequest({
@@ -439,9 +602,22 @@ export function parseBrowserCaptureRequest(
       Object.keys(value).length === 3
     )
       return { action: "capture", target: observed.target, mode: value.mode }
+    if (
+      value.mode === "ref" &&
+      Object.keys(value).length === 4 &&
+      typeof value.reference === "string" &&
+      /^e[1-9][0-9]{0,15}$/.test(value.reference)
+    )
+      return {
+        action: "capture",
+        target: observed.target,
+        mode: "ref",
+        reference: value.reference,
+      }
     const clip = value.clip
     if (
       value.mode === "clip" &&
+      Object.keys(value).length === 4 &&
       isJsonObject(clip) &&
       Object.keys(clip).length === 4 &&
       ["x", "y", "width", "height"].every((key) => Object.hasOwn(clip, key)) &&
@@ -464,7 +640,7 @@ export function parseBrowserCaptureRequest(
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use capture with an exact target and mode viewport/page, or mode clip with a positive document CSS-pixel rectangle (16 megapixel source paint safety bound).",
+    "Use viewport, page, clip with a positive document CSS-pixel rectangle, or ref with a current observed element (16 megapixel source paint safety bound).",
   )
 }
 
@@ -480,6 +656,7 @@ export type BrowserRequest =
   | BrowserDialogRequest
   | BrowserDownloadRequest
   | BrowserDragRequest
+  | BrowserWorkspaceRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -657,6 +834,7 @@ export type BrowserDownloadRequest =
         | "download_release"
       target: BrowserTarget
       downloadId: string
+      timeoutMs?: number
     }>
 
 export function isBrowserDownloadUrl(value: string): boolean {
@@ -701,7 +879,9 @@ export function parseBrowserDownloadRequest(
         !(
           arm
             ? ["action", "target", "fromUrl", "url"]
-            : ["action", "target", "downloadId"]
+            : value.action === "download_wait"
+              ? ["action", "target", "downloadId", "timeoutMs"]
+              : ["action", "target", "downloadId"]
         ).includes(key),
     ) ||
     (arm
@@ -713,7 +893,12 @@ export function parseBrowserDownloadRequest(
             value.url.length > 8192 ||
             !isBrowserDownloadUrl(value.url)))
       : typeof value.downloadId !== "string" ||
-        !/^browser_download_[a-f0-9-]{36}$/.test(value.downloadId))
+        !/^browser_download_[a-f0-9-]{36}$/.test(value.downloadId) ||
+        (value.timeoutMs !== undefined &&
+          (typeof value.timeoutMs !== "number" ||
+            !Number.isInteger(value.timeoutMs) ||
+            value.timeoutMs < 100 ||
+            value.timeoutMs > 30_000)))
   )
     throw new BrowserControlError(
       "invalid_arguments",
@@ -739,6 +924,9 @@ export function parseBrowserDownloadRequest(
     >,
     target: observed.target,
     downloadId: value.downloadId as string,
+    ...(typeof value.timeoutMs === "number"
+      ? { timeoutMs: value.timeoutMs }
+      : {}),
   }
 }
 
@@ -750,7 +938,7 @@ export type BrowserDialogRule = Readonly<{
 }>
 export type BrowserDialogRequest =
   | Readonly<{
-      action: "dialog_arm"
+      action: "dialog_arm" | "dialog_answer"
       target: BrowserTarget
       fromUrl: string
       frameReference?: string
@@ -767,13 +955,18 @@ export function parseBrowserDialogRequest(
   if (
     !isJsonObject(value) ||
     typeof value.action !== "string" ||
-    !["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(value.action)
+    ![
+      "dialog_arm",
+      "dialog_answer",
+      "dialog_inspect",
+      "dialog_disarm",
+    ].includes(value.action)
   )
     throw new BrowserControlError(
       "invalid_arguments",
       "Use an exact target and a JavaScript dialog action.",
     )
-  const arm = value.action === "dialog_arm",
+  const arm = value.action === "dialog_arm" || value.action === "dialog_answer",
     response = value.response
   if (
     arm &&
@@ -827,7 +1020,7 @@ export function parseBrowserDialogRequest(
     throw new Error("Invalid dialog target parser result.")
   if (arm)
     return {
-      action: "dialog_arm",
+      action: value.action === "dialog_answer" ? "dialog_answer" : "dialog_arm",
       target: observed.target,
       fromUrl: value.fromUrl as string,
       ...(observed.frameReference
@@ -944,6 +1137,17 @@ export function parseBrowserViewRequest(value: unknown): BrowserViewRequest {
 
 const requestMutates: Record<BrowserRequest["action"], boolean> = {
   list: false,
+  target: false,
+  download_target: false,
+  new_tab: true,
+  back: true,
+  forward: true,
+  reload: true,
+  stop: true,
+  console: false,
+  network: false,
+  file_target: false,
+  wait: false,
   observe: false,
   frames: false,
   text: false,
@@ -967,6 +1171,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   chooser_inspect: false,
   chooser_disarm: true,
   dialog_arm: true,
+  dialog_answer: true,
   dialog_inspect: false,
   dialog_disarm: true,
   download_arm: true,
@@ -984,6 +1189,23 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 export function parseBrowserRequest(value: unknown): BrowserRequest {
   if (
     isJsonObject(value) &&
+    [
+      "target",
+      "download_target",
+      "new_tab",
+      "back",
+      "forward",
+      "reload",
+      "stop",
+      "console",
+      "network",
+      "file_target",
+      "wait",
+    ].includes(String(value.action))
+  )
+    return parseWorkspaceRequest(value)
+  if (
+    isJsonObject(value) &&
     typeof value.action === "string" &&
     value.action.startsWith("drag_")
   )
@@ -996,7 +1218,7 @@ export function parseBrowserRequest(value: unknown): BrowserRequest {
     return parseBrowserDownloadRequest(value)
   if (
     isJsonObject(value) &&
-    ["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(
+    ["dialog_arm", "dialog_answer", "dialog_inspect", "dialog_disarm"].includes(
       String(value.action),
     )
   )

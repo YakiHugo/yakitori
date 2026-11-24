@@ -777,6 +777,7 @@ it("isolates host menus and workspace shortcuts during agent ownership and resto
         events.emit("detach")
       },
       async sendCommand(method: string) {
+        if (method === "Page.enable" || method === "Network.enable") return {}
         if (method === "Page.getFrameTree")
           return {
             frameTree: {
@@ -866,6 +867,7 @@ it.each([
         events.emit("detach")
       },
       async sendCommand(method: string, params: Record<string, unknown> = {}) {
+        if (method === "Page.enable" || method === "Network.enable") return {}
         if (method === "Page.getFrameTree")
           return {
             frameTree: {
@@ -1024,6 +1026,7 @@ it.each([
           events.emit("detach")
         },
         async sendCommand(method: string) {
+          if (method === "Page.enable" || method === "Network.enable") return {}
           if (method === "Page.getFrameTree")
             return {
               frameTree: {

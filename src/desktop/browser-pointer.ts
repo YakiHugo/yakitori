@@ -275,7 +275,7 @@ export class BrowserFramePointer {
     }
   }
 
-  async project(point: BrowserPoint): Promise<BrowserPoint> {
+  async project(point: BrowserPoint, verifyHit = true): Promise<BrowserPoint> {
     const root = this.#path[0]
     if (!root) throw new Error("Missing root frame.")
     const transforms = new Map<string, Matrix>([
@@ -325,6 +325,7 @@ export class BrowserFramePointer {
       leafTransform = leaf && transforms.get(leaf.document.frameId)
     if (!leafTransform) throw new Error("Missing leaf projection.")
     const mainPoint = mapPoint(leafTransform, point)
+    if (!verifyHit) return mainPoint
     for (const { parent, objectId } of this.#owners) {
       const transform = transforms.get(parent.document.frameId)
       if (!transform) throw new Error("Missing ancestor projection.")

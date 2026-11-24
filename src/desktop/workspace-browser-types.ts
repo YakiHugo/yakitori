@@ -7,6 +7,7 @@ export type WorkspaceBrowserState = Readonly<{
   canGoForward: boolean
   error?: string
   openerTabId?: string
+  ownerSessionId?: string
   closed?: boolean
 }>
 

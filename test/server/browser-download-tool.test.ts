@@ -8,7 +8,7 @@ import {
   type BrowserRequest,
 } from "../../src/protocol/desktop-browser.ts"
 import { isJsonObject } from "../../src/protocol/json.ts"
-import { createBrowserDownloadTool } from "../../src/server/browser-download-tool.ts"
+import { createBrowserDownload } from "../../src/server/browser-download.ts"
 
 const target = {
     tabId: "owned",
@@ -51,7 +51,7 @@ async function fixture(
     savedPath = saved.path
     return saved
   }
-  const tool = createBrowserDownloadTool({
+  const tool = createBrowserDownload({
     async request(input, owner) {
       expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
       requests.push(input)
@@ -177,14 +177,6 @@ it("keeps collection cancellable before persistence without discarding the origi
     "download_collect",
   ])
   expect(await readFile(f.path)).toEqual(f.bytes)
-})
-
-it("requires normal command permission for download actions", async () => {
-  const f = await fixture()
-  expect(f.tool.approvalRequirement).toMatchObject({
-    kind: "approval",
-    action: "command_execution",
-  })
 })
 
 it("refuses arbitrary paths, private release commands, cross-scope IDs and non-download URLs before native dispatch", async () => {

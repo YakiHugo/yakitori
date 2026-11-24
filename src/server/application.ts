@@ -92,16 +92,9 @@ import {
   type AttachmentUploads,
   createAttachmentUploads,
 } from "./attachment-uploads.ts"
-import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
-import { createBrowserChooserTool } from "./browser-chooser-tool.ts"
-import { createBrowserDialogTool } from "./browser-dialog-tool.ts"
-import { createBrowserDownloadTool } from "./browser-download-tool.ts"
-import { createBrowserDragTool } from "./browser-drag-tool.ts"
-import { createBrowserInputTool } from "./browser-input-tool.ts"
-import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
-import { createBrowserObservationTool } from "./browser-observation-tool.ts"
-import { createBrowserUploadTool } from "./browser-upload-tool.ts"
-import { createBrowserViewTool } from "./browser-view-tool.ts"
+import { createBrowserActTool } from "./browser-act-tool.ts"
+import { createBrowserInspectTool } from "./browser-inspect-tool.ts"
+import { createBrowserWaitTool } from "./browser-wait-tool.ts"
 import {
   type ChatGPTConnections,
   createChatGPTConnections,
@@ -1088,16 +1081,9 @@ export async function createYakitoriApplication(
         ),
         ...(desktopBrowser
           ? [
-              createBrowserObservationTool(desktopBrowser),
-              createBrowserInputTool(desktopBrowser),
-              createBrowserUploadTool(desktopBrowser),
-              createBrowserViewTool(desktopBrowser),
-              createBrowserNavigationTool(desktopBrowser),
-              createBrowserDownloadTool(desktopBrowser),
-              createBrowserDragTool(desktopBrowser),
-              createBrowserDialogTool(desktopBrowser),
-              createBrowserChooserTool(desktopBrowser),
-              createBrowserCaptureTool(desktopBrowser),
+              createBrowserInspectTool(desktopBrowser),
+              createBrowserActTool(desktopBrowser),
+              createBrowserWaitTool(desktopBrowser),
             ]
           : []),
       ])
