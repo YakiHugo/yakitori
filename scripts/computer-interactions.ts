@@ -8,6 +8,7 @@ type Element = {
   title?: string
   description?: string
   actions?: string[]
+  anchor_window_id?: number
 }
 
 export async function verifyComputerInteractions(context: {
@@ -19,6 +20,10 @@ export async function verifyComputerInteractions(context: {
     count: number
     menu_count: number
     menus_open: number
+    menu_window_id: number
+    key_window: number
+    window_id: number
+    switch_window_on_menu_open: boolean
     hover_alternate: boolean
     hover_moves: number
     hover_transitions: number
@@ -87,22 +92,115 @@ export async function verifyComputerInteractions(context: {
       before.structuredContent?.pointer,
     )
   }
+  const prepareMenu = async () => {
+    await regular()
+    // The owned fixture can retain a key window without activating its app.
+    // WindowServer order alone does not prove responder-chain routing.
+    process.kill(pid, "SIGURG")
+    await waitFor(async () => (await state()).key_window === windowID)
+  }
+
+  await check(
+    "menu commands refuse another key window without invoking or opening menus",
+    async () => {
+      await prepareMenu()
+      process.kill(pid, "SIGIO")
+      await waitFor(async () => {
+        const current = await state()
+        return current.key_window === current.window_id
+      })
+      const observed = await observe()
+      const before = await state()
+      const desktop = await call({ action: "status" })
+      const args = {
+        action: "invoke_menu",
+        snapshot_id: observed.structuredContent?.snapshot_id,
+        path: ["Automation", "Actions", "Document increment"],
+      }
+      const result = await call(args)
+      assert.equal(result.structuredContent?.code, "focus_unconfirmed")
+      assert.equal(result.structuredContent?.target_window_id, windowID)
+      assert.equal(
+        result.structuredContent?.focused_window_id,
+        before.window_id,
+      )
+      const after = await state()
+      assert.equal(after.menu_count, before.menu_count)
+      assert.equal(after.menus_open, 0)
+      assert.equal(after.key_window, before.key_window)
+      assert.equal((await call(args)).structuredContent?.code, "stale_snapshot")
+      await unchangedDesktop(desktop)
+    },
+  )
+
+  await check(
+    "observed application menu elements cannot bypass key-window binding",
+    async () => {
+      await prepareMenu()
+      process.kill(pid, "SIGIO")
+      await waitFor(async () => {
+        const current = await state()
+        return current.key_window === current.window_id
+      })
+      const before = (await state()).menu_count
+      for (const action of ["press", "perform_action"]) {
+        const observed = await call({
+          action: "observe",
+          scope: "app",
+          mode: "ax",
+          pid,
+        })
+        assert(!observed.isError, JSON.stringify(observed.structuredContent))
+        const item = element(observed, "Document increment")
+        assert.equal(item.anchor_window_id, windowID)
+        const result = await call({
+          action,
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          element: item.element,
+          ...(action === "perform_action" ? { action_name: "AXPress" } : {}),
+        })
+        assert.equal(result.structuredContent?.code, "focus_unconfirmed")
+        assert.equal((await state()).menu_count, before)
+      }
+    },
+  )
+
+  await check(
+    "menu commands stop when key focus changes during submenu expansion",
+    async () => {
+      await prepareMenu()
+      process.kill(pid, "SIGXCPU")
+      await waitFor(async () => (await state()).switch_window_on_menu_open)
+      const observed = await observe()
+      const before = (await state()).menu_count
+      const result = await call({
+        action: "invoke_menu",
+        snapshot_id: observed.structuredContent?.snapshot_id,
+        path: ["Automation", "Actions", "Document increment"],
+      })
+      assert.equal(result.structuredContent?.code, "focus_unconfirmed")
+      assert.equal(result.structuredContent?.effect, "unverified")
+      await waitFor(async () => (await state()).menus_open === 0)
+      assert.equal((await state()).menu_count, before)
+    },
+  )
 
   await check(
     "menu path resolves nested native levels and consumes its input ticket",
     async () => {
-      await regular()
+      await prepareMenu()
       const observed = await observe()
       const before = (await state()).menu_count
       const desktop = await call({ action: "status" })
       const args = {
         action: "invoke_menu",
         snapshot_id: observed.structuredContent?.snapshot_id,
-        path: ["Automation", "Actions", "Increment"],
+        path: ["Automation", "Actions", "Document increment"],
       }
       const result = await call(args)
       assert(!result.isError, JSON.stringify(result.structuredContent))
       await waitFor(async () => (await state()).menu_count === before + 1)
+      assert.equal((await state()).menu_window_id, windowID)
       const replay = await call(args)
       assert.equal(replay.structuredContent?.code, "stale_snapshot")
       assert.equal((await state()).menu_count, before + 1)
@@ -113,7 +211,7 @@ export async function verifyComputerInteractions(context: {
   await check(
     "menu path refuses ambiguous disabled and missing native entries",
     async () => {
-      await regular()
+      await prepareMenu()
       const before = (await state()).menu_count
       for (const [label, code] of [
         ["Ambiguous", "menu_ambiguous"],
@@ -140,7 +238,7 @@ export async function verifyComputerInteractions(context: {
   await check(
     "cancelled menu expansion closes its native UI without invoking an item",
     async () => {
-      await regular()
+      await prepareMenu()
       const observed = await observe()
       const before = (await state()).menu_count
       const controller = new AbortController()
