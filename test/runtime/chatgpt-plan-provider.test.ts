@@ -1,13 +1,14 @@
-import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { describe, expect, it } from "vitest"
 import {
+  type ChatGPTPlanAccess,
   createChatGPTPlanProvider,
   discoverChatGPTPlanModels,
-  type ChatGPTPlanAccess,
 } from "../../src/runtime/chatgpt-plan-provider.ts"
 import { toChatGPTPlanRequest } from "../../src/runtime/chatgpt-plan-request.ts"
-import { createOpenAITurnTransport } from "../../src/runtime/openai-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
+import { createOpenAITurnTransport } from "../../src/runtime/openai-provider.ts"
+import { chatGPTPlanResponsesProfile } from "../../src/runtime/openai-responses-profiles.ts"
 
 const access = {
   clientId: "oaiapp_fake",
@@ -369,7 +370,7 @@ describe("ChatGPT plan inference", () => {
     const transport = createOpenAITurnTransport({
       apiKey: "fake",
       model: "gpt-fake",
-      requestProfile: "chatgpt-plan",
+      profile: chatGPTPlanResponsesProfile,
     })
     expect(transport.warmup).toBeUndefined()
     transport.close()

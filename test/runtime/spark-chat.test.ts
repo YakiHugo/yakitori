@@ -107,7 +107,7 @@ it("exposes only the exact text model and a static catalog without probing crede
   })
   expect(resolveProviderBackend(configuration)).toMatchObject({
     serviceId: "spark",
-    chatCompletionsFlavor: "spark",
+    chatDialect: { id: "spark" },
     capabilities: {
       nativePdf: false,
       tools: { supportsCustomTools: false },
@@ -139,7 +139,7 @@ it.each([
   "https://maas-api.cn-huabei-1.xf-yun.com.evil.example/v2",
 ])("does not grant the native Spark profile to %s", (baseURL) => {
   expect(
-    resolveProviderBackend({ ...configuration, baseURL }).chatCompletionsFlavor,
+    resolveProviderBackend({ ...configuration, baseURL }).chatDialect.id,
   ).toBe("generic")
 })
 

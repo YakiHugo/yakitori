@@ -6,6 +6,7 @@ import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import { grokResponsesProfile } from "../../src/runtime/openai-responses-profiles.ts"
 import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 const request: ModelRequest = {
@@ -119,7 +120,7 @@ describe("provider error diagnostics", () => {
       createOpenAIProvider({
         apiKey: "test",
         model: "test",
-        responseProfile: "grok",
+        profile: grokResponsesProfile,
         baseURL: `http://127.0.0.1:${address.port}`,
       }),
       {

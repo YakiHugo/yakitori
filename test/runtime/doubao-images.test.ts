@@ -52,7 +52,7 @@ describe("direct Doubao images", () => {
       wireApi: "openai_chat_completions",
       baseURL: "https://ark.cn-beijing.volces.com/api/v3",
     })
-    expect(backend.chatCompletionsFlavor).toBe("doubao")
+    expect(backend.chatDialect.id).toBe("doubao")
     const configured = createConfiguredProvider(
       "personal",
       {

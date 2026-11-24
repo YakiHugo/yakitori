@@ -11,6 +11,7 @@ import type {
   ModelStreamEvent,
 } from "../../src/runtime/model.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import { kimiResponsesProfile } from "../../src/runtime/openai-responses-profiles.ts"
 import { persistModelMessages } from "../support/persist-model-messages.ts"
 
 const png = Buffer.from(
@@ -620,7 +621,7 @@ function provider(baseURL: string) {
     apiKey: "fixture",
     model: "kimi-k3",
     baseURL,
-    responseProfile: "kimi",
+    profile: kimiResponsesProfile,
   })
 }
 

@@ -9,6 +9,10 @@ import type {
   ModelStreamEvent,
 } from "../../src/runtime/model.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import {
+  kimiResponsesProfile,
+  openAIResponsesProfile,
+} from "../../src/runtime/openai-responses-profiles.ts"
 import { messageContent } from "../fixtures/model-history.ts"
 
 const endpoint = "https://api.moonshot.ai/v1"
@@ -94,7 +98,10 @@ async function run(
     apiKey: "test",
     model: input.target.model,
     client,
-    responseProfile,
+    profile:
+      responseProfile === "kimi"
+        ? kimiResponsesProfile
+        : openAIResponsesProfile,
   })
   const events: ModelStreamEvent[] = []
   for await (const event of stream(input)) events.push(event)

@@ -10,7 +10,7 @@ type EndpointContract = Pick<
   ProviderConfiguration,
   "service" | "baseURL" | "wireApi"
 > & {
-  profile: Record<string, string>
+  profile: Record<string, { id: string }>
   capabilities: ModelProviderCapabilities
 }
 
@@ -19,7 +19,7 @@ it.each([
     service: "openai",
     baseURL: "https://API.OPENAI.COM:443/v1/",
     wireApi: "openai_responses",
-    profile: { responseProfile: "openai" },
+    profile: { responseProfile: { id: "openai" } },
     capabilities: {
       compactionStrategy: { replacement: "native_window" },
       nativePdf: true,
@@ -33,7 +33,7 @@ it.each([
     service: "openai",
     baseURL: "https://api.openai.com/v1",
     wireApi: "openai_chat_completions",
-    profile: { chatCompletionsFlavor: "generic" },
+    profile: { chatDialect: { id: "generic" } },
     capabilities: {
       nativePdf: true,
       tools: { supportsCustomTools: false },
@@ -43,7 +43,7 @@ it.each([
     service: "codex",
     baseURL: "https://CHATGPT.COM:443/backend-api/codex/",
     wireApi: "openai_responses",
-    profile: { responseProfile: "openai" },
+    profile: { responseProfile: { id: "codex" } },
     capabilities: {
       compactionStrategy: { replacement: "checkpoint_only", maxAttempts: 3 },
       nativePdf: false,
@@ -57,7 +57,7 @@ it.each([
     service: "anthropic",
     baseURL: "https://api.anthropic.com/",
     wireApi: "anthropic_messages",
-    profile: { anthropicProfile: "anthropic" },
+    profile: { anthropicProfile: { id: "anthropic" } },
     capabilities: {
       nativePdf: true,
       tools: {
@@ -84,7 +84,7 @@ it.each([
   ).map((endpoint) => ({
     ...endpoint,
     service: "gemini",
-    profile: { chatCompletionsFlavor: "gemini" },
+    profile: { chatDialect: { id: "generic" } },
     capabilities: {
       nativePdf: true,
       tools: { supportsCustomTools: false },
@@ -94,7 +94,7 @@ it.each([
     service: "gemini",
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
     wireApi: "openai_chat_completions",
-    profile: { chatCompletionsFlavor: "gemini" },
+    profile: { chatDialect: { id: "gemini" } },
     capabilities: {
       nativePdf: false,
       tools: { supportsCustomTools: false },
@@ -104,7 +104,7 @@ it.each([
     service: "kimi-code",
     baseURL: "https://api.kimi.com/coding/v1/",
     wireApi: "anthropic_messages",
-    profile: { anthropicProfile: "kimi-code" },
+    profile: { anthropicProfile: { id: "kimi-code" } },
     capabilities: {
       nativePdf: false,
       tools: { supportsCustomTools: false },
@@ -114,7 +114,7 @@ it.each([
     service: "moonshot",
     baseURL: "https://api.moonshot.ai/v1/",
     wireApi: "openai_responses",
-    profile: { responseProfile: "kimi" },
+    profile: { responseProfile: { id: "kimi" } },
     capabilities: {
       nativePdf: false,
       tools: { supportsCustomTools: false },
@@ -125,7 +125,7 @@ it.each([
       service: "xai",
       baseURL: "https://api.x.ai/v1/",
       wireApi,
-      profile: { responseProfile: "grok" },
+      profile: { responseProfile: { id: "grok" } },
       capabilities: {
         nativePdf: false,
         tools: { supportsCustomTools: false },
@@ -222,9 +222,9 @@ it.each([
     nativePdf: false,
     tools: { supportsCustomTools: false },
   })
-  expect(backend.responseProfile).toBe("openai")
-  expect(backend.anthropicProfile).toBe("generic")
-  expect(backend.chatCompletionsFlavor).toBe("generic")
+  expect(backend.responseProfile.id).toBe("openai")
+  expect(backend.anthropicProfile.id).toBe("generic")
+  expect(backend.chatDialect.id).toBe("generic")
 })
 
 it("shares the Grok backend contract across API keys and CLI credentials", () => {

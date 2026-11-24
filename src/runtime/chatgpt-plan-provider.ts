@@ -3,6 +3,7 @@ import OpenAI from "openai"
 import { parseChatGPTPlanModels } from "./chatgpt-plan-request.ts"
 import type { StreamFn } from "./model.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
+import { chatGPTPlanResponsesProfile } from "./openai-responses-profiles.ts"
 
 export type ChatGPTPlanAccess = Readonly<{
   clientId: string
@@ -57,7 +58,7 @@ export function createChatGPTPlanProvider(input: {
       apiKey: token.accessToken,
       model: request.target.model,
       client,
-      requestProfile: "chatgpt-plan",
+      profile: chatGPTPlanResponsesProfile,
     })({
       ...request,
       continuationScope: identity,

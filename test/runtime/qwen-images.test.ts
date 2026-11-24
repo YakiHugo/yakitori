@@ -62,7 +62,7 @@ describe("direct Qwen images", () => {
       wireApi: "openai_chat_completions",
       baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     })
-    expect(backend.chatCompletionsFlavor).toBe("qwen")
+    expect(backend.chatDialect.id).toBe("qwen")
     const configured = createConfiguredProvider(
       "personal",
       {

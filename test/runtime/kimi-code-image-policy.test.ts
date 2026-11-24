@@ -1,7 +1,11 @@
-import type Anthropic from "@anthropic-ai/sdk"
 import { crc32 } from "node:zlib"
+import type Anthropic from "@anthropic-ai/sdk"
 import sharp from "sharp"
 import { expect, it } from "vitest"
+import {
+  genericMessagesProfile,
+  kimiCodeMessagesProfile,
+} from "../../src/runtime/anthropic-messages-profiles.ts"
 import type {
   ModelImageBlock,
   ModelRequest,
@@ -61,7 +65,10 @@ function harness(
     apiKey: "test",
     model: "kimi-for-coding",
     client,
-    profile,
+    profile:
+      profile === "kimi-code"
+        ? kimiCodeMessagesProfile
+        : genericMessagesProfile,
   })
   return {
     bodies,
@@ -312,7 +319,10 @@ it.each([
   const source = await png()
   const input = request(source)
   const run = harness(endpoint)
-  const events = await run.send({ ...input, target: { ...input.target, model } })
+  const events = await run.send({
+    ...input,
+    target: { ...input.target, model },
+  })
   expect(events.at(-1)?.type).toBe("response")
   expect(await sharp(sentImages(run.bodies)[0]).metadata()).toMatchObject({
     width: 2000,

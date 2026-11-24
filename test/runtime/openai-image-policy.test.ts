@@ -1,22 +1,26 @@
 import OpenAI from "openai"
 import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { prepareModelMedia } from "../../src/runtime/model-media.ts"
 import type {
   ModelImageBlock,
   ModelMessage,
   ModelRequest,
 } from "../../src/runtime/model.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import { prepareModelMedia } from "../../src/runtime/model-media.ts"
 import {
+  OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
   prepareOpenAIImage,
   validateOpenAIImageRequest,
-  OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
 } from "../../src/runtime/openai-image-policy.ts"
+import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import {
+  codexResponsesProfile,
+  type OpenAIResponsesProfile,
+} from "../../src/runtime/openai-responses-profiles.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
-import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { gifImageBase64 } from "../fixtures/images.ts"
 
@@ -66,8 +70,7 @@ async function send(
   input: ModelRequest,
   options: {
     baseURL?: string
-    requestProfile?: "codex"
-    responseProfile?: "grok"
+    profile?: OpenAIResponsesProfile
   } = {},
 ) {
   const bodies: string[] = []
@@ -411,7 +414,7 @@ it.each([
 })
 
 it.each([
-  { baseURL: "https://api.openai.com/v1", requestProfile: "codex" as const },
+  { baseURL: "https://api.openai.com/v1", profile: codexResponsesProfile },
   { baseURL: "https://api.openai.com/custom" },
   { baseURL: "https://relay.example/v1" },
 ])("does not apply public Astra preparation to proxy/custom routes %j", async (options) => {
@@ -433,7 +436,7 @@ it.each([
   expect(
     (await sharp(Buffer.from(url.split(",")[1] ?? "", "base64")).metadata())
       .width,
-  ).toBe(options.requestProfile === "codex" ? 2048 : 4096)
+  ).toBe(options.profile === codexResponsesProfile ? 2048 : 4096)
 })
 
 it("bounds retained native images even without portable image blocks", async () => {

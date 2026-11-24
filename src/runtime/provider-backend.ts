@@ -2,10 +2,25 @@ import type {
   ProviderConfiguration,
   ProviderPreset,
 } from "../protocol/providers.ts"
-import type { AnthropicProviderOptions } from "./anthropic-provider.ts"
-import type { ChatCompletionsProviderOptions } from "./chat-completions-provider.ts"
+import {
+  type AnthropicMessagesProfile,
+  anthropicMessagesProfile,
+  genericMessagesProfile,
+  kimiCodeMessagesProfile,
+} from "./anthropic-messages-profiles.ts"
+import {
+  type ChatCompletionsDialect,
+  genericChatDialect,
+  selectChatCompletionsDialect,
+} from "./chat-completions-dialects.ts"
 import type { ModelProviderCapabilities } from "./model-provider.ts"
-import type { OpenAIProviderOptions } from "./openai-provider.ts"
+import {
+  codexResponsesProfile,
+  grokResponsesProfile,
+  kimiResponsesProfile,
+  type OpenAIResponsesProfile,
+  openAIResponsesProfile,
+} from "./openai-responses-profiles.ts"
 import { providerServiceForEndpoint } from "./provider-services.ts"
 
 export type ProviderBackend = Readonly<{
@@ -14,9 +29,9 @@ export type ProviderBackend = Readonly<{
   serviceId?: string
   catalogProvider?: string
   capabilities: ModelProviderCapabilities
-  responseProfile: NonNullable<OpenAIProviderOptions["responseProfile"]>
-  anthropicProfile: NonNullable<AnthropicProviderOptions["profile"]>
-  chatCompletionsFlavor: NonNullable<ChatCompletionsProviderOptions["flavor"]>
+  responseProfile: OpenAIResponsesProfile
+  anthropicProfile: AnthropicMessagesProfile
+  chatDialect: ChatCompletionsDialect
 }>
 
 // Authentication chooses a credential source; it does not grant protocol
@@ -50,9 +65,15 @@ export function resolveProviderBackend(
         ...protocol?.capabilities?.tools,
       },
     },
-    responseProfile: protocol?.responseProfile ?? "openai",
-    anthropicProfile: protocol?.anthropicProfile ?? "generic",
-    chatCompletionsFlavor: service?.flavor ?? "generic",
+    responseProfile: protocol?.responseProfile ?? openAIResponsesProfile,
+    anthropicProfile: protocol?.anthropicProfile ?? genericMessagesProfile,
+    chatDialect:
+      configuration.wireApi === "openai_chat_completions"
+        ? selectChatCompletionsDialect(
+            service?.flavor ?? "generic",
+            configuration.baseURL,
+          )
+        : genericChatDialect,
   }
 }
 
@@ -70,6 +91,7 @@ const providerProtocols: Readonly<
   >
 > = {
   "codex/openai_responses": {
+    responseProfile: codexResponsesProfile,
     capabilities: {
       compactionStrategy: { replacement: "checkpoint_only", maxAttempts: 3 },
       tools: {
@@ -99,7 +121,7 @@ const providerProtocols: Readonly<
         nativeDeferredProtocol: "anthropic_deferred",
       },
     },
-    anthropicProfile: "anthropic",
+    anthropicProfile: anthropicMessagesProfile,
   },
   "gemini/gemini_generate_content": {
     capabilities: { nativePdf: true },
@@ -107,8 +129,8 @@ const providerProtocols: Readonly<
   "gemini/gemini_interactions": {
     capabilities: { nativePdf: true },
   },
-  "xai/openai_responses": { responseProfile: "grok" },
-  "xai/openai_chat_completions": { responseProfile: "grok" },
-  "moonshot/openai_responses": { responseProfile: "kimi" },
-  "kimi-code/anthropic_messages": { anthropicProfile: "kimi-code" },
+  "xai/openai_responses": { responseProfile: grokResponsesProfile },
+  "xai/openai_chat_completions": { responseProfile: grokResponsesProfile },
+  "moonshot/openai_responses": { responseProfile: kimiResponsesProfile },
+  "kimi-code/anthropic_messages": { anthropicProfile: kimiCodeMessagesProfile },
 }

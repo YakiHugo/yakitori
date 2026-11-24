@@ -7,7 +7,6 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages"
 import type {
   MessageCreateParamsStreaming,
-  OutputConfig,
   RawMessageStreamEvent,
   RedactedThinkingBlockParam,
   TextBlockParam,
@@ -21,6 +20,10 @@ import {
   prepareAnthropicImage,
   validateAnthropicScreenshot,
 } from "./anthropic-image-policy.ts"
+import {
+  type AnthropicMessagesProfile,
+  defaultAnthropicMessagesProfile,
+} from "./anthropic-messages-profiles.ts"
 import { anthropicModel } from "./anthropic-models.ts"
 import {
   prepareAnthropicThinkingHistory,
@@ -79,7 +82,7 @@ export type AnthropicProviderOptions = Readonly<{
   // override the default and may require extra identity headers.
   baseURL?: string
   defaultHeaders?: Record<string, string | null>
-  profile?: "generic" | "anthropic" | "kimi-code"
+  profile?: AnthropicMessagesProfile
 }>
 
 export function createAnthropicTurnTransport(
@@ -121,11 +124,9 @@ export function createAnthropicTurnTransport(
         options.baseURL ?? "https://api.anthropic.com",
         upload,
         options.profile ??
-          (URL.parse(
+          defaultAnthropicMessagesProfile(
             client.baseURL ?? options.baseURL ?? "https://api.anthropic.com",
-          )?.origin === "https://api.anthropic.com"
-            ? "anthropic"
-            : "generic"),
+          ),
       ),
     )
   return {
@@ -141,15 +142,14 @@ async function* streamAnthropic(
   defaultModel: string,
   request: ModelRequest,
   fallbackBaseURL: string,
-  upload?: ReturnType<typeof createFileUploadCache>,
-  profile: "generic" | "anthropic" | "kimi-code" = "generic",
+  upload: ReturnType<typeof createFileUploadCache> | undefined,
+  profile: AnthropicMessagesProfile,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield { type: "cancelled" }
     return
   }
 
-  const nativeThinking = request.providerOptions?.body.thinking
   let thinkingDisplay: "summarized" | "updates" | undefined
   let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
   let providerRequestId: string | undefined
@@ -163,24 +163,11 @@ async function* streamAnthropic(
   try {
     validateModelHistoryScope(request, "anthropic_messages")
     validateModelRequestControls(request, "anthropic_messages")
-    // K3.1 subscription models require thinking; older Code models retain
-    // their existing boolean-thinking controls. Do not alias public API IDs.
-    if (
-      profile === "kimi-code" &&
-      ["k3.1-pro", "k3.1-pro-highspeed"].includes(
-        request.target.model || defaultModel,
-      ) &&
-      (request.target.effort === "off" ||
-        (isJsonObject(nativeThinking) && nativeThinking.type === "disabled"))
-    )
-      throw new ModelRequestControlsError(
-        "Kimi Code K3.1 Pro requires thinking; select low, high or max effort instead of off.",
-      )
-    if (profile === "anthropic")
-      validateAnthropicModelRequest(request, defaultModel)
+    const model = request.target.model || defaultModel
+    profile.validateRequest?.(request, model)
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "anthropic"
-    const explicitPromptCaching = profile !== "generic"
+    const explicitPromptCaching = profile.explicitPromptCaching
     if (
       request.tools.some(
         (tool) =>
@@ -195,41 +182,10 @@ async function* streamAnthropic(
       explicitPromptCaching,
       nativeDeferredLoading,
     )
-    // Effort is only sent where support is confirmed: official Anthropic and
-    // Kimi's Anthropic-compatible coding endpoint (which mirrors Claude Code).
-    // Explicit cache breakpoints are supported by both official Anthropic and
-    // Kimi's Anthropic-compatible coding endpoint. Kimi boolean-thinking
-    // models take "on"/"off": "off" maps to thinking.disabled, "on" is the
-    // endpoint default and sends nothing; real levels use the effort beta.
-    const effort = profile !== "generic" ? request.target.effort : undefined
-    const effortLevel =
-      effort === undefined || effort === "on" || effort === "off"
-        ? undefined
-        : effort
-    // Top-level effort is GA on Anthropic; Kimi retains its own beta contract.
-    // https://platform.claude.com/docs/en/build-with-claude/effort
-    const effortBeta = profile === "kimi-code" && effortLevel !== undefined
-    const modelContract =
-      profile === "anthropic"
-        ? anthropicModel(request.target.model || defaultModel)
-        : undefined
-    const thinking =
-      effort === "off"
-        ? ({ type: "disabled" } as const)
-        : profile === "anthropic" && modelContract?.thinking === "adaptive"
-          ? ({ type: "adaptive", display: "summarized" } as const)
-          : undefined
-    const nativeImagePolicy =
-      URL.parse(client.baseURL ?? fallbackBaseURL)?.href ===
-      "https://api.anthropic.com/"
-    const kimiCodeImages =
-      profile === "kimi-code" &&
-      [
-        "https://api.kimi.com/coding",
-        "https://api.kimi.com/coding/v1",
-      ].includes(
-        new URL(client.baseURL ?? fallbackBaseURL).href.replace(/\/$/, ""),
-      )
+    const thinking = profile.thinking?.(request, model)
+    const mediaPolicy = profile.selectMedia(client.baseURL ?? fallbackBaseURL)
+    const nativeImagePolicy = mediaPolicy === "anthropic"
+    const kimiCodeImages = mediaPolicy === "kimi-code"
     // Hard native admission and local request budgets apply even with PDFs or
     // SDK controls. Only the ordinary image-only slice opts into automatic
     // tier re-encoding: advanced controls may change screenshot/SDK semantics.
@@ -378,21 +334,8 @@ async function* streamAnthropic(
         ...(request.cacheKey === undefined
           ? {}
           : { metadata: { user_id: request.cacheKey } }),
-        ...(thinking === undefined ? {} : { thinking }),
-        ...(effortLevel === undefined
-          ? {}
-          : {
-              output_config: {
-                effort: effortLevel as NonNullable<OutputConfig["effort"]>,
-              },
-            }),
+        ...thinking?.fields,
       }
-    if (effort === "off" && modelContract?.off === "between_tools") {
-      // SDK 0.112 predates this documented Sonnet 5.5 wire value.
-      body.thinking = { type: "between_tools" } as unknown as NonNullable<
-        typeof body.thinking
-      >
-    }
     if (request.outputFormat !== undefined)
       body.output_config = {
         ...body.output_config,
@@ -464,7 +407,7 @@ async function* streamAnthropic(
       }
     }
     const bindingBeta =
-      profile === "anthropic" &&
+      profile.bindThinkingHistory &&
       nativeImagePolicy &&
       prepareAnthropicThinkingHistory(request, body)
     if (
@@ -502,7 +445,7 @@ async function* streamAnthropic(
                   : []),
                 ...(request.providerOptions?.betas ?? []),
                 ...(bindingBeta ? [thinkingBindingBeta] : []),
-                ...(effortBeta ? ["effort-2025-11-24"] : []),
+                ...(thinking?.effortBeta ? ["effort-2025-11-24"] : []),
               ],
             },
             request.signal === undefined
@@ -511,13 +454,13 @@ async function* streamAnthropic(
           )
         : client.messages.create(
             body as MessageCreateParamsStreaming,
-            request.signal === undefined && !effortBeta
+            request.signal === undefined && !thinking?.effortBeta
               ? undefined
               : {
                   ...(request.signal === undefined
                     ? {}
                     : { signal: request.signal }),
-                  ...(effortBeta
+                  ...(thinking?.effortBeta
                     ? { headers: { "anthropic-beta": "effort-2025-11-24" } }
                     : {}),
                 },
@@ -1630,72 +1573,6 @@ const RETRYABLE_ERROR_TYPES: ReadonlySet<string> = new Set([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function validateAnthropicModelRequest(
-  request: ModelRequest,
-  defaultModel: string,
-): void {
-  const model = request.target.model || defaultModel
-  const contract = anthropicModel(model)
-  if (contract === undefined) return
-  const effort = request.target.effort
-  if (
-    effort !== undefined &&
-    !(effort === "off" && contract.off) &&
-    !contract.configuration.efforts?.includes(effort)
-  )
-    throw new ModelRequestControlsError(
-      `${model} does not support effort ${effort}.`,
-    )
-  const thinking = request.providerOptions?.body.thinking
-  if (
-    effort === "off" &&
-    isJsonObject(thinking) &&
-    Object.keys(thinking).length > 0
-  )
-    throw new ModelRequestControlsError(
-      "Thinking off cannot be combined with native thinking fields.",
-    )
-  if (isJsonObject(thinking) && thinking.type !== undefined) {
-    const mode = thinking.type
-    if (
-      (mode === "disabled" && contract.off !== "disabled") ||
-      (mode === "between_tools" && contract.off !== "between_tools") ||
-      (mode === "adaptive" && contract.thinking !== "adaptive") ||
-      (mode === "enabled" &&
-        contract.thinking !== "extended" &&
-        !["claude-sonnet-4-6", "claude-opus-4-6"].includes(model))
-    )
-      throw new ModelRequestControlsError(
-        `${model} does not support thinking mode ${String(mode)}.`,
-      )
-    if (
-      mode === "between_tools" &&
-      Object.keys(thinking).some((key) => key !== "type")
-    )
-      throw new ModelRequestControlsError(
-        "Claude Sonnet 5.5 between_tools accepts no other thinking fields.",
-      )
-  }
-  if (
-    !contract.forcedTools &&
-    (request.toolChoice === "required" ||
-      typeof request.toolChoice === "object")
-  )
-    throw new ModelRequestControlsError(
-      `${model} does not support forced tool choice; select auto instead.`,
-    )
-  if (
-    request.maxOutputTokens !== undefined &&
-    (!Number.isInteger(request.maxOutputTokens) ||
-      request.maxOutputTokens < 1 ||
-      request.maxOutputTokens >
-        (contract.configuration.maxOutputTokens ?? Infinity))
-  )
-    throw new ModelRequestControlsError(
-      `${model} maxOutputTokens must be between 1 and ${contract.configuration.maxOutputTokens}.`,
-    )
 }
 
 import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

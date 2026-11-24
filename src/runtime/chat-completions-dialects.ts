@@ -82,6 +82,7 @@ type RequestBody = Readonly<{
   thinking?: JsonObject
 }>
 export type ChatCompletionsDialect = Readonly<{
+  id: ChatCompletionsFlavor
   matchesEndpoint(baseURL: string): boolean
   wire: Wire | ((model: string) => Wire)
   reasoning: Reasoning
@@ -116,17 +117,22 @@ const compatibleReasoning = {
 } as const
 
 export const genericChatDialect = {
+  id: "generic",
   wire: standardWire,
   reasoning: compatibleReasoning,
-} satisfies Pick<ChatCompletionsDialect, "wire" | "reasoning">
+  matchesEndpoint: () => true,
+} satisfies ChatCompletionsDialect
 
 function nativeDialect(
   flavor: ChatCompletionsFlavor,
-  settings: Partial<Omit<ChatCompletionsDialect, "matchesEndpoint">> = {},
+  settings: Partial<
+    Omit<ChatCompletionsDialect, "matchesEndpoint" | "id">
+  > = {},
 ): ChatCompletionsDialect {
   return {
     ...genericChatDialect,
     ...settings,
+    id: flavor,
     matchesEndpoint(baseURL) {
       return (
         URL.parse(baseURL) !== null &&
@@ -406,6 +412,7 @@ export function chatDialectMedia(serviceId: string | undefined, model: string) {
 
 type DialectOptions = Readonly<{
   flavor?: ChatCompletionsFlavor
+  dialect?: ChatCompletionsDialect
   baseURL: string
 }>
 export type ResolvedChatDialect = Readonly<
@@ -419,16 +426,30 @@ export type ResolvedChatDialect = Readonly<
   }
 >
 
+export function selectChatCompletionsDialect(
+  flavor: ChatCompletionsFlavor,
+  baseURL: string,
+): ChatCompletionsDialect {
+  const dialect = Object.hasOwn(chatDialects, flavor)
+    ? chatDialects[flavor as keyof typeof chatDialects]
+    : undefined
+  return dialect?.matchesEndpoint(baseURL) ? dialect : genericChatDialect
+}
+
 export function resolveChatCompletionsDialect(
   options: DialectOptions,
   model: string,
 ): ResolvedChatDialect {
-  const flavor = options.flavor ?? "generic"
-  const dialect = Object.hasOwn(chatDialects, flavor)
-    ? chatDialects[flavor as keyof typeof chatDialects]
-    : undefined
-  if (!dialect?.matchesEndpoint(options.baseURL)) return genericChatDialect
-  const { media, wire, ...settings } = dialect
+  const dialect =
+    options.dialect ??
+    selectChatCompletionsDialect(options.flavor ?? "generic", options.baseURL)
+  if (!dialect.matchesEndpoint(options.baseURL)) return genericChatDialect
+  const {
+    media,
+    wire,
+    matchesEndpoint: _matchesEndpoint,
+    ...settings
+  } = dialect
   return {
     ...settings,
     wire: typeof wire === "function" ? wire(model) : wire,

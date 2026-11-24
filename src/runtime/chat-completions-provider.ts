@@ -12,6 +12,7 @@ import type { ReasoningFormat } from "../protocol/model-output.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import {
+  type ChatCompletionsDialect,
   type ChatCompletionsFlavor,
   genericChatDialect,
   type ResolvedChatDialect,
@@ -61,6 +62,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
   baseURL: string
   defaultHeaders?: Record<string, string | null>
   flavor?: ChatCompletionsFlavor
+  dialect?: ChatCompletionsDialect
 }>
 
 type ToolCall = ChatCompletionMessageToolCall & {

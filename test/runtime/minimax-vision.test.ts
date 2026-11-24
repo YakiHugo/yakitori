@@ -1,10 +1,10 @@
 import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
+import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { resolveProviderBackend } from "../../src/runtime/provider-backend.ts"
 import { providerServices } from "../../src/runtime/provider-services.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
-import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { pngImageBase64 } from "../fixtures/images.ts"
 
 afterEach(() => vi.unstubAllGlobals())
@@ -64,20 +64,18 @@ function capture() {
 
 describe("MiniMax vision", () => {
   it("binds vendor behavior only to its explicit official Chat endpoint", () => {
-    expect(resolveProviderBackend(configuration).chatCompletionsFlavor).toBe(
-      "minimax",
-    )
+    expect(resolveProviderBackend(configuration).chatDialect.id).toBe("minimax")
     expect(
       resolveProviderBackend({
         ...configuration,
         baseURL: "https://relay.example/v1",
-      }).chatCompletionsFlavor,
+      }).chatDialect.id,
     ).toBe("generic")
     expect(
       resolveProviderBackend({
         baseURL: configuration.baseURL,
         wireApi: configuration.wireApi,
-      }).chatCompletionsFlavor,
+      }).chatDialect.id,
     ).toBe("generic")
   })
   it("fills exact catalog omissions without granting vision to M2 or unknown IDs", async () => {

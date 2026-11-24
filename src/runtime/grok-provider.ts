@@ -3,6 +3,7 @@ import {
   GROK_API_BASE_URL,
   resolveGrokModelCredentials,
 } from "./grok-credentials.ts"
+import { prepareGrokRequest } from "./grok-request.ts"
 import { discoverOpenAiCompatibleModels } from "./model-discovery.ts"
 import {
   createModelProvider,
@@ -13,7 +14,6 @@ import { createFileModelsCacheStore } from "./models-cache-store.ts"
 import { createDiscoveringModelsManager } from "./models-manager.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
 import { resolveProviderBackend } from "./provider-backend.ts"
-import { prepareGrokRequest } from "./grok-request.ts"
 
 export function createGrokProvider(
   modelsCacheDir: string,
@@ -99,7 +99,7 @@ export function createGrokProvider(
           }
           expectedOwner = scope
           yield* createOpenAIProvider({
-            responseProfile: backend.responseProfile,
+            profile: backend.responseProfile,
             apiKey,
             model: request.target.model,
             baseURL: GROK_API_BASE_URL,

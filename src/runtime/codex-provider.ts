@@ -7,6 +7,7 @@ import {
 } from "./codex-credentials.ts"
 import type { ModelStreamEvent, StreamFn } from "./model.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
+import { codexResponsesProfile } from "./openai-responses-profiles.ts"
 
 // Reuses the local codex CLI's ChatGPT OAuth login against the Responses-API
 // codex backend. Tokens resolve lazily per model call (same pattern as the
@@ -68,7 +69,7 @@ export function createCodexProvider(
       let outputObserved = false
       let recoverUnauthorized = false
       for await (const event of createStream({
-        requestProfile: "codex",
+        profile: codexResponsesProfile,
         apiKey: token.accessToken,
         model: request.target.model,
         baseURL: CODEX_API_BASE_URL,
