@@ -58,6 +58,58 @@ test("conversation history opens at the latest prompt and loads older search tar
   }
 })
 
+test("healthy conversations remain usable alongside an invalid session index", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await runFauxTurn(page)
+    await writeFile(
+      join(
+        environment.root,
+        "store",
+        "sessions",
+        "threads",
+        "session_invalid.json",
+      ),
+      '{"id":',
+    )
+
+    await page.reload()
+    const session = page.locator(
+      '.sidebar-session [data-sidebar-drag="session"]',
+    )
+    await expect(session).toBeVisible()
+    await session.click()
+    await expect(
+      page.getByRole("main").getByText("Hello from faux.", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("textbox", { name: "Message the Mate" }),
+    ).toBeVisible()
+    await expect(
+      page.getByText("Unexpected server error.", { exact: true }),
+    ).toHaveCount(0)
+    expect(errors).toEqual([])
+  } finally {
+    try {
+      await server?.stop()
+    } finally {
+      await environment.cleanup()
+    }
+  }
+})
+
 test("a message search result lets readers expand the recorded activity", async ({
   page,
 }) => {
@@ -770,6 +822,10 @@ test("edit and undo replace history in one session across open windows", async (
       .filter({ hasText: "Edited stable prompt" })
     const inputId = await edited.getAttribute("data-context-message-id")
     if (!inputId) throw new Error("Missing edited input")
+    const replacement = (await client.request("session/list", {})).sessions
+    expect(replacement).toHaveLength(1)
+    expect(replacement[0]?.id).toBe(original.id)
+    expect(replacement[0]?.rolloutId).not.toBe(original.rolloutId)
     const undone = await client.request("session/revert", {
       sessionId: original.id,
       atInputId: inputId,
@@ -899,18 +955,28 @@ test("shared selects keep preferences, keyboard focus and popup bounds", async (
   }
 })
 
-test("an unavailable saved model can be replaced and stays corrected after reload", async ({
+test("a saved model survives account edits and can be replaced after removal", async ({
   page,
 }, testInfo) => {
   const environment = await createSmokeEnvironment()
   const configPath = join(environment.root, "home", "config.toml")
   const logs: string[] = []
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  const endpoint = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ data: [{ id: "coder" }] }))
+  })
   let server: ServerProcess | undefined
+  let client: ReturnType<typeof createAppRpcClient> | undefined
   try {
-    await writeFile(
-      configPath,
-      stringify({ provider: "removed-account", model: "retired-model" }),
-    )
+    endpoint.listen(0, "127.0.0.1")
+    await once(endpoint, "listening")
+    const address = endpoint.address()
+    if (!address || typeof address === "string")
+      throw new Error("Missing model catalog server")
+    const choice = { provider: "deepseek", model: "coder" }
+    await writeFile(configPath, stringify(choice))
     server = await spawnServerProcess({
       command: process.execPath,
       args: [resolve("src/server/start.ts")],
@@ -919,17 +985,40 @@ test("an unavailable saved model can be replaced and stays corrected after reloa
       onStdout: (line) => logs.push(line),
       onStderr: (line) => logs.push(line),
     })
-    await page.goto(server.url)
+    client = createAppRpcClient({ apiBase: server.url })
     const selector = page.getByRole("button", {
       name: "Select model and effort",
     })
+    await page.goto(server.url)
     await expect(selector).toHaveText("Select model")
+    for (const edited of [false, true]) {
+      const displayName = edited ? "Renamed model" : "Friendly model"
+      await client.request("provider/configuration/write", {
+        id: "vendor-account",
+        configuration: {
+          name: edited ? "Renamed account" : "Original account",
+          service: "deepseek",
+          authentication: "none",
+          baseURL: `http://127.0.0.1:${address.port}/${edited ? "edited" : "original"}/v1`,
+          wireApi: edited ? "openai_responses" : "openai_chat_completions",
+          models: [{ id: "coder", displayName }],
+        },
+      })
+      await page.reload()
+      await expect(selector).toHaveText(displayName)
+      expect(
+        (await client.request("provider/list", {})).userPreference,
+      ).toEqual(choice)
+    }
+    await client.request("provider/configuration/delete", {
+      id: "vendor-account",
+    })
     await page.reload()
     await expect(selector).toHaveText("Select model")
-    expect(parse(await readFile(configPath, "utf8"))).toMatchObject({
-      provider: "removed-account",
-      model: "retired-model",
-    })
+    expect((await client.request("provider/list", {})).userPreference).toEqual(
+      choice,
+    )
+    expect(parse(await readFile(configPath, "utf8"))).toMatchObject(choice)
     await page.screenshot({
       path: testInfo.outputPath("model-unavailable.png"),
     })
@@ -952,7 +1041,11 @@ test("an unavailable saved model can be replaced and stays corrected after reloa
       page.getByRole("button", { name: "Select model and effort" }),
     ).toContainText("scripted")
     await page.screenshot({ path: testInfo.outputPath("model-recovered.png") })
+    expect(errors).toEqual([])
   } finally {
+    client?.close()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
     await testInfo.attach("server.log", {
       body: logs.join("\n"),
       contentType: "text/plain",
@@ -1428,6 +1521,59 @@ test("provider settings preserve settings navigation and restore chat panels", a
   }
 })
 
+test("runtime settings persist subagent model selection to disk", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  let client: ReturnType<typeof createAppRpcClient> | undefined
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    client = createAppRpcClient({ apiBase: server.url })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.getByRole("button", { name: "Runtime", exact: true }).click()
+    const control = page.getByRole("switch", {
+      name: "Subagent model selection",
+    })
+    await expect(control).not.toBeChecked()
+    await control.click()
+    await expect
+      .poll(
+        async () =>
+          (await client?.request("config/read", {}))?.configuration.agents
+            ?.exposeModelOverrides,
+      )
+      .toBe(true)
+    const snapshot = await client.request("config/read", {})
+    const user = snapshot.layers.find((layer) => layer.source === "user")
+    if (user === undefined) throw new Error("User configuration is missing.")
+    expect(parse(await readFile(user.path, "utf8")).agents).toEqual({
+      expose_model_overrides: true,
+    })
+    await page.reload()
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.getByRole("button", { name: "Runtime", exact: true }).click()
+    await expect(control).toBeChecked()
+    await page.screenshot({ path: testInfo.outputPath("runtime-settings.png") })
+    expect(errors).toEqual([])
+  } finally {
+    client?.close()
+    try {
+      await server?.stop()
+    } finally {
+      await environment.cleanup()
+    }
+  }
+})
+
 test("built GUI sends a turn and restores its transcript after reload", async ({
   page,
 }, testInfo) => {
@@ -1480,7 +1626,7 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
     const pdf = imported.ok ? imported.attachments?.[0] : undefined
     if (pdf?.mediaType !== "application/pdf")
       throw new Error("Browser PDF fixture import failed")
-    await runProviderFlow(page, testInfo, { browserPdf: pdf })
+    await runProviderFlow(page, testInfo, pdf)
     expect(errors).toEqual([])
   } finally {
     try {

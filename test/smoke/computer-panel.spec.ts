@@ -1,11 +1,6 @@
 import { writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import {
-  type Browser,
-  type ElectronApplication,
-  expect,
-  test,
-} from "@playwright/test"
+import { expect, test } from "@playwright/test"
 import {
   type ServerProcess,
   spawnServerProcess,
@@ -17,13 +12,11 @@ import {
 import { createSmokeEnvironment } from "./fixtures.ts"
 
 test("Computer panel follows connection changes from another client", async ({
-  playwright,
-}, testInfo) => {
+  page,
+}) => {
   test.skip(process.platform !== "darwin", "Computer use requires macOS.")
   const environment = await createSmokeEnvironment()
   let server: ServerProcess | undefined
-  let application: ElectronApplication | undefined
-  let browser: Browser | undefined
   let client: AppRpcClient | undefined
   try {
     const helper = join(environment.root, "computer.cjs")
@@ -49,30 +42,13 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       YAKITORI_COMPUTER_EXECUTABLE: helper,
       YAKITORI_GUI_DIR: resolve("dist/gui"),
     }
-    if (testInfo.project.name === "desktop") {
-      application = await playwright._electron.launch({
-        args: [
-          resolve("."),
-          `--user-data-dir=${join(environment.root, "electron-user-data")}`,
-        ],
-        cwd: environment.root,
-        env,
-      })
-    } else {
-      browser = await playwright.chromium.launch()
-      server = await spawnServerProcess({
-        command: process.execPath,
-        args: [resolve("src/server/start.ts")],
-        cwd: environment.root,
-        env,
-      })
-    }
-    const page = application
-      ? await application.firstWindow()
-      : await browser?.newPage()
-    if (!page) throw new Error("The Computer panel renderer did not start.")
-    if (server) await page.goto(server.url)
-    else await page.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/?$/)
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env,
+    })
+    await page.goto(server.url)
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
@@ -91,11 +67,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     ).toBeEnabled()
   } finally {
     client?.close()
-    await Promise.allSettled([
-      application?.close(),
-      browser?.close(),
-      server?.stop(),
-    ])
-    await environment.cleanup()
+    try {
+      await server?.stop()
+    } finally {
+      await environment.cleanup()
+    }
   }
 })

@@ -146,6 +146,15 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 
 ## Testing
 
+For routine local changes, run `pnpm lint`, `pnpm typecheck`, and focused
+Vitest files for the affected modules with `pnpm test <path>`. GitHub Actions
+runs the full validation lanes.
+
+Run `pnpm test:desktop-smoke`, `pnpm package`, `pnpm test:computer`,
+`pnpm test:computer:live`, or `pnpm test:computer:web` locally only when
+the user explicitly requests local acceptance. Use the `macos-latest`
+Desktop workflow for routine packaged and native contract verification.
+
 Add focused tests when a behavior change creates or changes a durable contract.
 Prioritize event ordering and persistence, Session and Turn lifecycle, tool
 execution and permission decisions, recovery behavior, cached projection
@@ -195,7 +204,9 @@ typecheck, test, check, build, development, and desktop packaging live in
 
 ## UI Changes
 
-Verify renderer-only behavior in a browser. Verify Electron bridges, sidecars,
-filesystem integration, native dialogs, and desktop lifecycle in the desktop
-app. Changes spanning both boundaries must be verified in both. Record the
-exact verification command or URL in the final response.
+For local renderer and browser interaction changes, run only the affected
+headless Playwright spec with `pnpm test:browser <spec>`. CI runs the full
+Chromium suite and verifies Electron bridges, sidecars, filesystem integration,
+native dialogs, and desktop lifecycle in the packaged app. Use both lanes for
+changes spanning both boundaries. Record the exact verification command or URL
+in the final response.

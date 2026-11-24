@@ -16,6 +16,7 @@ app.setPath("sessionData", process.argv[3])
 app
   .whenReady()
   .then(async () => {
+    if (process.platform === "darwin") app.dock?.hide()
     const { BrowserDocumentConnection } = await import(
       pathToFileURL(process.argv[2]).href
     )

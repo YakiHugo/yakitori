@@ -31,7 +31,7 @@
     "test:contracts": "vitest run --project=contracts",
     "test:ui": "vitest run --project=ui",
     "test:browser": "playwright test --project=browser",
-    "test:desktop-smoke": "playwright test --project=desktop",
+    "test:desktop-smoke": "playwright test --project=desktop --workers=1",
     "test:watch": "vitest",
     "lint": "biome lint .",
     "format": "biome format --write .",

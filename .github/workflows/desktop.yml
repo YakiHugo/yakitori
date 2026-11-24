@@ -39,6 +39,11 @@ jobs:
       - name: Package the desktop app
         run: pnpm package
 
+      - name: Verify the macOS Computer panel in headless Chromium
+        run: |
+          pnpm exec playwright install --only-shell chromium
+          pnpm test:browser test/smoke/computer-panel.spec.ts
+
       - name: Archive and restore the desktop app
         # Artifact uploads do not preserve executable modes or symlinks. Verify
         # the app restored from the same tar archive that installers download.

@@ -22,6 +22,7 @@ process.on("uncaughtException", (error) => {
 
 async function main() {
   await app.whenReady()
+  if (process.platform === "darwin") app.dock?.hide()
   const { registerWorkspaceBrowser } = await import(
     pathToFileURL(modulePath).href
   )
