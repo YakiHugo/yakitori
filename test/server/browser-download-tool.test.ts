@@ -8,7 +8,7 @@ import {
   type BrowserRequest,
 } from "../../src/protocol/desktop-browser.ts"
 import { isJsonObject } from "../../src/protocol/json.ts"
-import { createBrowserDownloadTool } from "../../src/server/browser-download-tool.ts"
+import { createBrowserDownload } from "../../src/server/browser-download.ts"
 
 const target = {
     tabId: "owned",
@@ -45,58 +45,42 @@ async function fixture(
     requests: BrowserRequest[] = [],
     signal = new AbortController(),
     cancelReason = new Error("Stop before download persistence")
-  let savedPath: string | undefined,
-    marks = 0,
-    admitted = true
+  let savedPath: string | undefined
   assets.saveToolFile = async (...args) => {
     const saved = await originalSave(...args)
     savedPath = saved.path
     return saved
   }
-  const tool = createBrowserDownloadTool(
-    {
-      async request(input, owner) {
-        expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
-        requests.push(input)
-        if (input.action === "download_collect") {
-          if (options.cancelDuringRead) signal.abort(cancelReason)
-          return {
-            state: "completed",
-            path,
-            filename: "../../report-你好.bin",
-            size: options.changedSize ? 6 : 5,
-          }
+  const tool = createBrowserDownload({
+    async request(input, owner) {
+      expect(owner).toEqual({ sessionId: "session", turnId: "turn" })
+      requests.push(input)
+      if (input.action === "download_collect") {
+        if (options.cancelDuringRead) signal.abort(cancelReason)
+        return {
+          state: "completed",
+          path,
+          filename: "../../report-你好.bin",
+          size: options.changedSize ? 6 : 5,
         }
-        if (input.action === "download_release") {
-          if (!savedPath)
-            throw new Error("Scratch release preceded artifact persistence")
-          expect(await readFile(savedPath)).toEqual(bytes)
-          if (options.releaseUnknown)
-            throw new BrowserControlError(
-              "browser_cleanup_failed",
-              "Native release completion unknown",
-            )
-          await rm(path)
-          return { released: true }
-        }
-        return { downloadId, state: "armed" }
-      },
-      async finishTurn() {},
-      async closeSession() {},
+      }
+      if (input.action === "download_release") {
+        if (!savedPath)
+          throw new Error("Scratch release preceded artifact persistence")
+        expect(await readFile(savedPath)).toEqual(bytes)
+        if (options.releaseUnknown)
+          throw new BrowserControlError(
+            "browser_cleanup_failed",
+            "Native release completion unknown",
+          )
+        await rm(path)
+        return { released: true }
+      }
+      return { downloadId, state: "armed" }
     },
-    async () =>
-      admitted
-        ? undefined
-        : {
-            ok: false,
-            code: "computer_taken_over",
-            message: "Taken over",
-            content: "Taken over",
-          },
-    () => {
-      marks++
-    },
-  )
+    async finishTurn() {},
+    async closeSession() {},
+  })
   return {
     tool,
     requests,
@@ -112,12 +96,6 @@ async function fixture(
       toolCallId: "tool_collect",
       rolloutAssets: assets,
       signal: signal.signal,
-    },
-    get marks() {
-      return marks
-    },
-    refuse: () => {
-      admitted = false
     },
   }
 }
@@ -173,7 +151,6 @@ it("keeps an already persisted file recoverable when native scratch cleanup is u
     throw new Error("Missing recovery file path")
   expect(await readFile(result.output.path)).toEqual(f.bytes)
   expect(result.content).toContain("do not download it again")
-  expect(f.marks).toBe(1)
   expect(f.requests.map((request) => request.action)).toEqual([
     "download_collect",
     "download_release",
@@ -200,28 +177,6 @@ it("keeps collection cancellable before persistence without discarding the origi
     "download_collect",
   ])
   expect(await readFile(f.path)).toEqual(f.bytes)
-})
-
-it("requires normal command permission and shared computer admission for every download action", async () => {
-  const f = await fixture()
-  expect(f.tool.approvalRequirement).toMatchObject({
-    kind: "approval",
-    action: "command_execution",
-  })
-  f.refuse()
-  for (const input of [
-    { action: "arm", target, fromUrl: "https://owned.test/" },
-    ...["status", "wait", "cancel", "collect"].map((action) => ({
-      action,
-      target,
-      downloadId,
-    })),
-  ])
-    expect(await f.tool.execute(input, f.context)).toMatchObject({
-      ok: false,
-      code: "computer_taken_over",
-    })
-  expect(f.requests).toEqual([])
 })
 
 it("refuses arbitrary paths, private release commands, cross-scope IDs and non-download URLs before native dispatch", async () => {

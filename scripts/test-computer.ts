@@ -16,7 +16,10 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
-import { prepareComputerFixture } from "./computer-fixture.ts"
+import {
+  bindComputerFixture,
+  prepareComputerFixture,
+} from "./computer-fixture.ts"
 
 const run = promisify(execFile)
 const core = "native/computer/Sources/ComputerCore"
@@ -106,10 +109,25 @@ async function waitForLaunchState(
 }
 try {
   const tools = await client.start()
-  const control = tools.find((tool) => tool.name === "control")
-  const cleanup = tools.find((tool) => tool.name === "turn_ended")
-  if (!control || !cleanup) throw new Error("Native tools are missing.")
-  const result = await client.bindTool(control)({ action: "status" })
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    ["observe", "input", "app", "internal"],
+  )
+  assert.deepEqual(
+    tools
+      .filter((tool) => tool.annotations?.readOnlyHint)
+      .map((tool) => tool.name),
+    ["observe"],
+  )
+  const observe = tools.find((tool) => tool.name === "observe")
+  assert(observe)
+  const refused = await client.bindTool(observe)({
+    action: "clipboard",
+    clipboard_action: "clear",
+  })
+  assert.equal(refused.structuredContent?.code, "invalid_arguments")
+  const call = bindComputerFixture(client, tools)
+  const result = await call({ action: "status" })
   if (
     result.isError ||
     typeof result.structuredContent?.accessibility !== "boolean" ||
@@ -121,7 +139,6 @@ try {
     throw new Error("The native helper did not identify its process.")
   helperPid = pid
   console.log("Native MCP app permission status:", result.structuredContent)
-  const call = client.bindTool(control)
   const invalidClipboardImage = await call({
     action: "clipboard",
     clipboard_action: "write",
@@ -412,7 +429,7 @@ try {
   console.log(
     "LaunchServices passes literal argv, creates distinct processes and delivers documents to the explicit application.",
   )
-  const released = await client.bindTool(cleanup)({})
+  const released = await call({ action: "turn_ended" })
   if (released.isError) throw new Error("Native turn cleanup failed.")
 } finally {
   if (fixturePid !== undefined) process.kill(fixturePid, "SIGTERM")

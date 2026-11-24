@@ -58,16 +58,19 @@ async function fixture() {
     wrong = join(root, "wrong"),
     moving = join(root, "moving")
   const initializing = join(root, "initializing")
+  const transient = join(root, "transient")
+  const invalid = join(root, "invalid")
   await writeFile(log, "")
-  const canvas = createCanvas(2, 1)
-  canvas.getContext("2d").fillRect(0, 0, 2, 1)
-  const png = canvas.toBuffer("image/png").toString("base64")
+  const canvas = createCanvas(1568, 1)
+  canvas.getContext("2d").fillRect(0, 0, 1568, 1)
+  const jpeg = canvas.toBuffer("image/jpeg").toString("base64")
   await writeFile(
     script,
     `#!${process.execPath}
 const {appendFileSync, existsSync} = require('node:fs');
 const readline = require('node:readline');
 const moving=${JSON.stringify(moving)};
+const transient=${JSON.stringify(transient)}, invalid=${JSON.stringify(invalid)};
 const log=${JSON.stringify(log)}, block=${JSON.stringify(block)}, wrong=${JSON.stringify(wrong)}, initializing=${JSON.stringify(initializing)};
 const save=value=>appendFileSync(log,JSON.stringify({helper:process.pid,...value})+'\\n');
 process.on('exit',()=>save({exit:true}));
@@ -78,14 +81,14 @@ lines.on('line',line=>{
  const m=JSON.parse(line); if(m.id===undefined)return;
  const reply=result=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
  if(m.method==='initialize'){if(existsSync(initializing)){save({initializing:true});return;}return reply({protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-preview-fixture',version:'1'}});}
- if(m.method==='tools/list')return reply({tools:[{name:'control',inputSchema:{type:'object'}}]});
+ if(m.method==='tools/list')return reply({tools:['observe','internal'].map(name=>({name,inputSchema:{type:'object'}}))});
  if(m.method!=='tools/call')throw new Error('Unexpected method');
  const args=m.params.arguments; save({action:args.action,args});
  if(args.action==='list')return reply({content:[],structuredContent:{apps:[{pid:123456,name:'Owned app'}],windows:[{pid:123456,window_id:101,launch_time:1000,title:'Owned window'}],displays:[{display_id:1,main:true}]}});
- if(args.action==='status')return reply({content:[],structuredContent:{pointer:{x:30,y:35}}});
- if(args.action!=='preview')throw new Error('Preview attempted an application mutation');
+ if(args.action!=='preview'||m.params.name!=='internal')throw new Error('Preview attempted a non-preview call');
  if(existsSync(block))return;
- return reply({content:[{type:'image',mimeType:'image/png',data:${JSON.stringify(png)}}],structuredContent:{preview_id:'preview_owned',input_available:false,geometry_stable:!existsSync(moving),image_width:2,image_height:1,frame:{x:10,y:20,width:100,height:50},windows:[{pid:123456,window_id:101,launch_time:existsSync(wrong)?1001:1000}]}});
+ if(existsSync(transient))return reply({isError:true,content:[],structuredContent:{code:'capture_failed',message:'Transient frame failure'}});
+ return reply({content:[{type:'image',mimeType:'image/jpeg',data:${JSON.stringify(jpeg)}}],structuredContent:{preview_id:'preview_owned',input_available:false,geometry_stable:!existsSync(moving),pointer:{x:30,y:35},image_width:existsSync(invalid)?1567:1568,image_height:1,frame:{x:10,y:20,width:100,height:50},windows:[{pid:123456,window_id:101,launch_time:existsSync(wrong)?1001:1000}]}});
 });`,
     { mode: 0o755 },
   )
@@ -97,7 +100,7 @@ lines.on('line',line=>{
     value: {
       command: script,
       args: ["--mcp"],
-      enabled_tools: ["control"],
+      enabled_tools: ["observe", "input", "app"],
       enabled: true,
     },
   })
@@ -114,7 +117,18 @@ lines.on('line',line=>{
       .split("\n")
       .slice(0, -1)
       .map((line) => JSON.parse(line) as Call)
-  return { service, config, calls, block, wrong, moving, initializing, png }
+  return {
+    service,
+    config,
+    calls,
+    block,
+    wrong,
+    moving,
+    initializing,
+    jpeg,
+    transient,
+    invalid,
+  }
 }
 
 it("hides the pointer when a preview frame's target moved during capture", async () => {
@@ -124,13 +138,13 @@ it("hides the pointer when a preview frame's target moved during capture", async
     { connectionId: 1, viewerId: "moving" },
     target,
   )
-  expect(frame.dataUrl).toContain("data:image/png;base64,")
+  expect(frame.dataUrl).toContain("data:image/jpeg;base64,")
   expect(frame.pointer).toBeUndefined()
   expect((await calls()).map((call) => call.action)).not.toContain("status")
 })
 
 it("uses a persistent read-only connection and forwards the exact process incarnation", async () => {
-  const { service, config, calls, png } = await fixture()
+  const { service, config, calls, jpeg } = await fixture()
   const owner = { connectionId: 1, viewerId: "owned" }
   const catalog = await service.catalog(owner)
   expect(
@@ -138,8 +152,8 @@ it("uses a persistent read-only connection and forwards the exact process incarn
   ).toMatchObject({ label: "Owned app · Owned window", target })
   const frame = await service.capture(owner, target)
   expect(frame).toMatchObject({
-    dataUrl: `data:image/png;base64,${png}`,
-    width: 2,
+    dataUrl: `data:image/jpeg;base64,${jpeg}`,
+    width: 1568,
     height: 1,
     frame: { x: 10, y: 20, width: 100, height: 50 },
     pointer: { x: 30, y: 35 },
@@ -156,7 +170,6 @@ it("uses a persistent read-only connection and forwards the exact process incarn
       launch_time: 1000,
       window_id: 101,
     },
-    { action: "status" },
   ])
   await config.writeValue({
     keyPath: ["mcp_servers", "computer", "enabled"],
@@ -168,7 +181,31 @@ it("uses a persistent read-only connection and forwards the exact process incarn
   const helper = history[0]?.helper
   expect(helper).toBeDefined()
   await until(async () => helper !== undefined && !alive(helper))
-  expect((await calls()).filter((call) => call.action)).toHaveLength(3)
+  expect((await calls()).filter((call) => call.action)).toHaveLength(2)
+})
+
+it("recovers a transient frame error on the same helper", async () => {
+  const { service, transient, calls } = await fixture()
+  const owner = { connectionId: 1, viewerId: "recover" }
+  await writeFile(transient, "")
+  await expect(service.capture(owner, target)).rejects.toThrow(
+    "Transient frame failure",
+  )
+  await rm(transient)
+  await expect(service.capture(owner, target)).resolves.toMatchObject({
+    width: 1568,
+  })
+  const frames = (await calls()).filter((call) => call.action === "preview")
+  expect(frames).toHaveLength(2)
+  expect(new Set(frames.map((call) => call.helper)).size).toBe(1)
+})
+
+it("rejects JPEG dimensions that disagree with the claimed frame", async () => {
+  const { service, invalid } = await fixture()
+  await writeFile(invalid, "")
+  await expect(
+    service.capture({ connectionId: 1, viewerId: "invalid" }, target),
+  ).rejects.toThrow("JPEG does not match")
 })
 
 it("rejects a frame from a replacement process before returning its image", async () => {
@@ -216,7 +253,7 @@ it("counts draining helpers against its resource bound before admitting another 
   await Promise.all(pending)
   await rm(block)
   await expect(service.capture(extra, target)).resolves.toMatchObject({
-    width: 2,
+    width: 1568,
   })
 })
 
@@ -237,7 +274,7 @@ it("an old cancelled capture cannot retire a newly opened viewer with the same i
   await rejected
   await rm(block)
   await expect(service.capture(owner, target)).resolves.toMatchObject({
-    width: 2,
+    width: 1568,
     height: 1,
   })
   const history = await calls()
@@ -289,6 +326,6 @@ it("RPC validates read-only targets and drains a disconnected viewer without sto
     viewerId: "same",
     target,
   })
-  expect(remaining).toMatchObject({ result: { width: 2, height: 1 } })
+  expect(remaining).toMatchObject({ result: { width: 1568, height: 1 } })
   await processor.closeConnection(second.id)
 })

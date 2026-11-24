@@ -357,7 +357,7 @@ export class BrowserDrag {
     } catch (cause) {
       throw new BrowserControlError(
         "browser_cleanup_failed",
-        "Native drag cancellation or observer cleanup is unconfirmed. Computer input remains quarantined until cleanup succeeds or the original tab closes.",
+        "Native drag cancellation or observer cleanup is unconfirmed. The tab remains quarantined until cleanup succeeds or the original tab closes.",
         { cause },
       )
     }

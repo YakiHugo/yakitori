@@ -46,7 +46,7 @@ extension Computer {
                 guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerFailure("native_timeout", "The batch exceeded its 30-second execution safety boundary.") }
                 guard processLaunchDate(pid)?.timeIntervalSince1970 == launch else { throw ComputerFailure("stale_snapshot", "The sequence target process incarnation changed.") }
                 var target = args
-                target["mode"] = "ax"; target["disable_diff"] = true
+                target["mode"] = "ax"
                 target.removeValue(forKey: "steps"); target.removeValue(forKey: "root_element")
                 let outcome: [String: Any]
                 if step["action"] as? String == "wait_for" {
@@ -64,10 +64,12 @@ extension Computer {
                 // Keep the batch reply within MCP framing even when each step
                 // requests an image/tree. Full evidence remains queryable as the
                 // last observation; return at most one final observation.
-                var summary = evidence.filter { ["effect", "delivery", "verification", "selection", "value_matches", "matched", "timed_out", "after_error"].contains($0.key) }
+                var summary = evidence.filter { ["effect", "delivery", "delivered", "text_route", "readback_matched", "observed_value", "verification",
+                                                "selection", "value_matches", "matched", "timed_out", "after_error", "clipboard_warnings"].contains($0.key) }
                 summary["action"] = step["action"]
                 completed.append(summary)
-                if evidence["after_error"] != nil || evidence["verification"] as? String == "timed_out" || evidence["matched"] as? Bool == false {
+                if evidence["after_error"] != nil || evidence["verification"] as? String == "timed_out" ||
+                    evidence["matched"] as? Bool == false || (evidence["readback_matched"] as? Bool == false && evidence["verification"] as? String != "matched") {
                     throw ComputerFailure("sequence_stopped", "A postcondition was not established; later steps were not executed.")
                 }
             }

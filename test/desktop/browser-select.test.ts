@@ -15,7 +15,7 @@ const target = {
 const request = {
   action: "select",
   target,
-  reference: "browser_element_00000000-0000-4000-8000-000000000001",
+  reference: "e1",
   options: [{ value: "你好" }, { label: "Green" }, { index: 2 }],
 }
 
@@ -28,7 +28,7 @@ it("admits native option descriptors as mutating browser input and rejects mixed
     options: [],
   })
   for (const override of [
-    { reference: "browser_node_00000000-0000-4000-8000-000000000001" },
+    { reference: "foreign" },
     { sessionId: "foreign" },
     { text: "wrong action" },
     { options: ["g"] },
@@ -111,13 +111,13 @@ it.each([
   } as unknown as WebContents)
   try {
     const observed = await connection.observe(new AbortController().signal)
-    const node = (observed.nodes as { elementReference?: string }[])[0]
-    if (!node?.elementReference) throw new Error("Missing observed select")
+    const node = (observed.nodes as { ref?: string }[])[0]
+    if (!node?.ref) throw new Error("Missing observed select")
     const pending = connection.selectOptions(
       {
         action: "select",
         target,
-        reference: node.elementReference,
+        reference: node.ref,
         options: [{ value: "g" }],
       },
       new AbortController().signal,

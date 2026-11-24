@@ -57,13 +57,14 @@ async function readPermissions(applicationPath: string) {
     () => {},
   )
   try {
-    const control = (await client.start()).find(
-      (tool) => tool.name === "control",
+    const internal = (await client.start()).find(
+      (tool) => tool.name === "internal",
     )
-    if (!control) throw new Error("Computer helper is missing its control tool")
+    if (!internal)
+      throw new Error("Computer helper is missing its internal tool")
     // Status reads existing grants. It never asks for permissions, captures a
     // screen, or performs computer input.
-    const status = await client.bindTool(control)({ action: "status" })
+    const status = await client.bindTool(internal)({ action: "status" })
     const value = status.structuredContent
     if (
       status.isError ||

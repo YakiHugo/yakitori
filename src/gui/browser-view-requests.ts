@@ -11,7 +11,7 @@ import {
 export function connectBrowserViewRequests(
   bridge: Pick<
     WorkspaceBrowserBridge,
-    "onShowRequest" | "claimShow" | "completeShow"
+    "onShowRequest" | "claimShow" | "completeShow" | "onState"
   >,
 ): () => void {
   let mounted = true
@@ -88,8 +88,22 @@ export function connectBrowserViewRequests(
       })
     })
   })
+  const removeTabListener = bridge.onState((state) => {
+    const workspace = useWorkspaceStore.getState()
+    if (state.closed) workspace.closeTab(state.tabId)
+    else if (state.openerTabId)
+      workspace.adoptBrowserPopup(state.tabId, state.openerTabId)
+    else if (state.ownerSessionId) {
+      const app = useAppStore.getState()
+      workspace.adoptAgentBrowser(
+        state.tabId,
+        app.sessionThreadIds[state.ownerSessionId] ?? state.ownerSessionId,
+      )
+    }
+  })
   return () => {
     mounted = false
     unsubscribe()
+    removeTabListener()
   }
 }

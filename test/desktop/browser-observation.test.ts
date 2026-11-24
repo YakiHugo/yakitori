@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 import type { WebContents } from "electron"
 import { expect, it } from "vitest"
+import { browserAccessibility } from "../../src/desktop/browser-accessibility.ts"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
 
 async function observeBrowserDocument(
@@ -133,8 +134,49 @@ it("bounds large AX output and reports primitive control state and clipped text"
     name: string
     properties: { checked: string }
   }[]
-  expect(nodes[0]?.name.length).toBe(2048)
+  expect(nodes[0]?.name.length).toBe(384)
   expect(nodes[0]?.properties.checked).toBe("true")
+})
+
+it("folds ignored and anonymous containers before applying the outline budget", () => {
+  const ignored = Array.from({ length: 1500 }, (_, index) => ({
+    nodeId: `ignored_${index}`,
+    parentId: "nav",
+    ignored: true,
+  }))
+  let next = 0
+  const result = browserAccessibility(
+    {
+      nodes: [
+        ...ignored,
+        {
+          nodeId: "nav",
+          role: { value: "navigation" },
+          name: { value: "Menu" },
+          backendDOMNodeId: 10,
+        },
+        { nodeId: "group", parentId: "nav", role: { value: "generic" } },
+        {
+          nodeId: "link",
+          parentId: "group",
+          role: { value: "link" },
+          name: { value: "Docs" },
+          backendDOMNodeId: 12,
+        },
+        {
+          nodeId: "other",
+          role: { value: "paragraph" },
+          name: { value: "Unused text" },
+        },
+      ],
+    },
+    { frameId: "main", documentId: "doc", url: "https://owned.test/" },
+    () => `e${++next}`,
+    { interactiveOnly: true },
+  )
+  expect(result.outline).toBe('[e1] navigation "Menu"\n  [e2] link "Docs"')
+  expect(result.truncated).toBe(false)
+  expect(result.references.get("e2")?.backendNodeId).toBe(12)
 })
 
 it("leaves user DevTools attached instead of taking its debugger session", async () => {
@@ -204,9 +246,9 @@ it("offers input references only for text controls, including when a label has t
     new AbortController().signal,
   )
   const nodes = result.nodes as Record<string, unknown>[]
-  expect(nodes[0]).not.toHaveProperty("inputReference")
+  expect(nodes[0]).not.toHaveProperty("ref")
   expect(nodes[1]).toMatchObject({
-    inputReference: expect.stringMatching(/^browser_node_/),
+    ref: expect.stringMatching(/^e[1-9][0-9]*$/),
     role: "textbox",
   })
 })

@@ -22,27 +22,39 @@ struct AXExpectation {
     }
 
     func matches(_ row: [String: Any]) -> Bool {
-        fields.allSatisfy { key, value in
-            if (row["truncated_attributes"] as? [String] ?? []).contains(key) { return false }
-            if let actual = row[key] as? String { return actual == value }
-            if let actual = row[key] as? NSNumber { return actual.stringValue == value }
-            return false
+        let unknown = unknownFields(row)
+        return fields.allSatisfy { key, value in
+            !unknown.contains(key) && text(row[key]) == value
+        }
+    }
+
+    private func text(_ value: Any?) -> String? {
+        (value as? String) ?? (value as? NSNumber)?.stringValue
+    }
+
+    private func unknownFields(_ row: [String: Any]) -> Set<String> {
+        Set((row["truncated_attributes"] as? [String] ?? []) + (row["unreadable_attributes"] as? [String] ?? []))
+    }
+
+    func coverageIncomplete(in snapshot: Snapshot) -> Bool {
+        snapshot.incompleteRoots || snapshot.rows.contains { row in
+            if row["children_incomplete"] != nil { return true }
+            let unknown = unknownFields(row)
+            return fields.keys.contains(where: unknown.contains) && fields.allSatisfy { key, expected in
+                unknown.contains(key) || text(row[key]) == expected
+            }
         }
     }
 
     func satisfied(by snapshot: Snapshot) -> Bool {
         let found = snapshot.rows.contains(where: matches)
-        // Missing nodes in a bounded tree do not prove absence from the app.
-        let incomplete = snapshot.rows.contains { row in
-            !(Set(row["truncated_attributes"] as? [String] ?? []).intersection(fields.keys)).isEmpty
-        }
-        return exists ? found : !found && !snapshot.truncated && !incomplete
+        return exists ? found : !found && !coverageIncomplete(in: snapshot)
     }
 }
 
 extension Snapshot {
     func observationArguments(mode: String = "ax") -> [String: Any] {
-        var args: [String: Any] = ["action": "observe", "scope": scope.rawValue, "mode": mode, "disable_diff": true]
+        var args: [String: Any] = ["action": "observe", "scope": scope.rawValue, "mode": mode]
         if scope == .screen { args["display_id"] = display.map { Int($0.id) } }
         else { args["pid"] = windows.first.map { Int($0.pid) } }
         if scope == .window { args["window_id"] = windows.first.map { Int($0.windowID) } }
@@ -93,15 +105,16 @@ extension Computer {
             }
             included = descendants
         }
-        let matches = stored.rows.filter { row in
-            (included == nil || included!.contains(row["element"] as? Int ?? -1)) &&
-                (query.isEmpty || ["role", "title", "description", "value"].contains { key in
+        let scopeRows = stored.rows.filter { row in included?.contains(row["element"] as? Int ?? -1) ?? true }
+        let matches = hierarchicalAXRows(scopeRows).filter { row in
+            query.isEmpty || ["role", "title", "description", "value", "identifier", "placeholder", "help", "url"].contains { key in
                     (row[key].map { String(describing: $0).lowercased() } ?? "").contains(query)
-                })
+                }
         }
         let page = Array(matches.dropFirst(offset).prefix(limit))
         var data: [String: Any] = ["snapshot_id": stored.id, "elements": page, "total_matches": matches.count,
-            "tree_truncated": stored.truncated, "input_available": snapshot?.id == stored.id]
+            "tree_truncated": (included == nil && stored.incompleteRoots) || scopeRows.contains(where: isIncompleteAXRow),
+            "input_available": snapshot?.id == stored.id]
         if offset + page.count < matches.count { data["next_offset"] = offset + page.count }
         return try result(data)
     }

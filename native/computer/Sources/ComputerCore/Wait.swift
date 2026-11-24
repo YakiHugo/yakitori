@@ -51,7 +51,7 @@ extension Computer {
             target = lastObservation.observationArguments(mode: args["mode"] as? String ?? "ax")
         }
         target["mode"] = target["mode"] ?? "ax"
-        target["disable_diff"] = true
+        target.removeValue(forKey: "diff_only")
         if !change && target["mode"] as? String == "vision" { throw ComputerFailure("invalid_arguments", "AX expectations require mode=ax or both.") }
         _ = try ObservationRequest(target)
         let deadline = ProcessInfo.processInfo.systemUptime + timeout

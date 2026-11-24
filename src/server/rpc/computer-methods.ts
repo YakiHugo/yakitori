@@ -3,6 +3,7 @@ import {
   parseComputerPreviewTarget,
 } from "../../protocol/computer-preview.ts"
 import type { ComputerUseStatus } from "../../protocol/connections.ts"
+import { computerStatusChangedMethod } from "../../protocol/rpc-wire.ts"
 import { McpConnectionError } from "../../runtime/mcp-client.ts"
 import { ComputerControlError } from "../computer-control.ts"
 import { ComputerPreviewError } from "../computer-preview.ts"
@@ -73,8 +74,9 @@ const connectionMethods: readonly RpcMethodDefinition[] = (
           await operation(config)
           await context.computerPreview?.stopAll()
         })
-        const result = await readComputerUseStatus(config)
-        return { result: withControlState(result) }
+        const result = withControlState(await readComputerUseStatus(config))
+        context.broadcastNotification(computerStatusChangedMethod, result)
+        return { result }
       }
       const epoch =
         method === "computer/connect"
@@ -95,9 +97,10 @@ const connectionMethods: readonly RpcMethodDefinition[] = (
           throw cause
         }
       }
-      return {
-        result: withControlState(result),
-      }
+      const next = withControlState(result)
+      if (method !== "computer/status")
+        context.broadcastNotification(computerStatusChangedMethod, next)
+      return { result: next }
     } catch (error) {
       if (
         error instanceof ComputerUseUnavailableError ||

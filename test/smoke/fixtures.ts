@@ -100,6 +100,17 @@ export async function runFauxTurn(page: Page): Promise<void> {
   ).toHaveCount(0)
 }
 
+export async function replaceInlineEditText(page: Page, text: string) {
+  const editor = page.getByRole("textbox", {
+    name: "Edit message",
+    exact: true,
+  })
+  // Select through ProseMirror so replacement uses the editor's own selection.
+  await editor.press("ControlOrMeta+a")
+  await page.keyboard.insertText(text)
+  await expect(editor).toHaveText(text)
+}
+
 export async function runConversationHistoryFlow(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const reads: string[] = []

@@ -1,10 +1,34 @@
+import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { access, mkdir, readFile, rename, rm } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { promisify } from "node:util"
+import type { McpClient } from "../src/runtime/mcp-client.ts"
 
 const run = promisify(execFile)
+
+export function bindComputerFixture(
+  client: McpClient,
+  tools: Awaited<ReturnType<McpClient["start"]>>,
+): ReturnType<McpClient["bindTool"]> {
+  const routes = new Map<string, ReturnType<McpClient["bindTool"]>>()
+  for (const tool of tools) {
+    const schema = tool.inputSchema.properties?.action as { enum?: string[] }
+    assert(Array.isArray(schema?.enum), `Missing action list for ${tool.name}`)
+    const call = client.bindTool(tool)
+    for (const action of schema.enum) {
+      assert(!routes.has(action), `Duplicate fixture action: ${action}`)
+      routes.set(action, call)
+    }
+  }
+  return (input, signal, context) => {
+    const action = (input as { action: string }).action
+    const call = routes.get(action)
+    assert(call, `No native tool accepts fixture action: ${action}`)
+    return call(input, signal, context)
+  }
+}
 
 export async function prepareComputerFixture(
   source = resolve("native/computer/Tests/Fixture.swift"),

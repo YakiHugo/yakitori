@@ -8,11 +8,15 @@ import { computerUseServerName } from "../protocol/connections.ts"
 import { McpClient, McpConnectionError } from "../runtime/mcp-client.ts"
 import {
   type ComputerUseDiscoveryOptions,
+  computerInternalTool,
+  computerToolsEnabled,
   discoverComputerUse,
 } from "./computer-use.ts"
 import type { UserConfigStore } from "./user-config.ts"
 
 export class ComputerPreviewError extends Error {}
+
+class TemporaryComputerPreviewError extends ComputerPreviewError {}
 
 export type ComputerPreviewOwner = Readonly<{
   connectionId: number
@@ -27,7 +31,7 @@ type PreviewConnection = {
   connectionId: number
   cancellation: AbortController
   client?: McpClient
-  call?: ReturnType<McpClient["bindTool"]>
+  calls?: Record<"observe" | "internal", ReturnType<McpClient["bindTool"]>>
   busy: boolean
   idle?: ReturnType<typeof setTimeout>
 }
@@ -68,6 +72,7 @@ export class ComputerPreviewService {
 
   async #run<T>(
     owner: ComputerPreviewOwner,
+    tool: "observe" | "internal",
     operation: (
       call: ReturnType<McpClient["bindTool"]>,
       signal: AbortSignal,
@@ -106,9 +111,7 @@ export class ComputerPreviewService {
       if (
         !configured ||
         configured.enabled === false ||
-        configured.disabledTools?.includes("control") ||
-        (configured.enabledTools !== undefined &&
-          !configured.enabledTools.includes("control"))
+        !computerToolsEnabled(configured)
       )
         throw new ComputerPreviewError(
           "Connect computer use before starting a preview.",
@@ -132,21 +135,28 @@ export class ComputerPreviewService {
         )
         current.client = client
         const tools = await client.start(current.cancellation.signal)
-        const control = tools.find((tool) => tool.name === "control")
-        if (!control)
+        const internal = tools.find(
+          (tool) => tool.name === computerInternalTool,
+        )
+        const observe = tools.find((tool) => tool.name === "observe")
+        if (!internal || !observe)
           throw new McpConnectionError(
-            "The native preview control tool is unavailable.",
+            "The native preview tools are unavailable.",
           )
-        current.call = client.bindTool(control)
+        current.calls = {
+          internal: client.bindTool(internal),
+          observe: client.bindTool(observe),
+        }
       }
-      if (!current.call)
+      if (!current.calls)
         throw new Error(
           "Preview connection initialized without a control binding.",
         )
-      return await operation(current.call, current.cancellation.signal)
+      return await operation(current.calls[tool], current.cancellation.signal)
     } catch (cause) {
       const cancelled = current.cancellation.signal.aborted
-      await this.#retire(key, current)
+      if (cancelled || !(cause instanceof TemporaryComputerPreviewError))
+        await this.#retire(key, current)
       if (cancelled) throw new ComputerPreviewError("Computer preview stopped.")
       throw cause
     } finally {
@@ -162,7 +172,7 @@ export class ComputerPreviewService {
   }
 
   async catalog(owner: ComputerPreviewOwner): Promise<ComputerPreviewCatalog> {
-    return this.#run(owner, async (call, signal) => {
+    return this.#run(owner, "observe", async (call, signal) => {
       const data = structured(await call({ action: "list" }, signal))
       if (
         !Array.isArray(data.apps) ||
@@ -254,7 +264,7 @@ export class ComputerPreviewService {
     owner: ComputerPreviewOwner,
     target: ComputerPreviewTarget,
   ): Promise<ComputerPreviewFrame> {
-    return this.#run(owner, async (call, signal) => {
+    return this.#run(owner, "internal", async (call, signal) => {
       const result = await call(
         {
           action: "preview",
@@ -267,6 +277,20 @@ export class ComputerPreviewService {
         },
         signal,
       )
+      if (
+        result.isError &&
+        [
+          "capture_failed",
+          "native_error",
+          "native_timeout",
+          "stale_snapshot",
+        ].includes(String(result.structuredContent?.code))
+      )
+        throw new TemporaryComputerPreviewError(
+          String(
+            result.structuredContent?.message ?? "Native preview frame failed.",
+          ),
+        )
       const data = structured(result)
       const image = result.content.find((part) => part.type === "image")
       const frame = record(data.frame)
@@ -277,14 +301,15 @@ export class ComputerPreviewService {
         data.snapshot_id !== undefined ||
         typeof data.geometry_stable !== "boolean" ||
         image?.type !== "image" ||
-        image.mimeType !== "image/png" ||
+        image.mimeType !== "image/jpeg" ||
+        image.data.length === 0 ||
         image.data.length > 8 * 1024 * 1024 ||
         ![data.image_width, data.image_height].every(
           (value) =>
             typeof value === "number" &&
             Number.isInteger(value) &&
             value > 0 &&
-            value <= 1024,
+            value <= 1568,
         ) ||
         ![frame.x, frame.y, frame.width, frame.height].every(
           (value) => typeof value === "number" && Number.isFinite(value),
@@ -295,17 +320,17 @@ export class ComputerPreviewService {
         throw new ComputerPreviewError(
           "The native preview image or geometry is invalid.",
         )
-      const header = Buffer.from(image.data.slice(0, 44), "base64")
+      const { default: sharp } = await import("sharp")
+      const metadata = await sharp(Buffer.from(image.data, "base64"))
+        .metadata()
+        .catch(() => undefined)
       if (
-        header.length < 24 ||
-        !header
-          .subarray(0, 8)
-          .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
-        header.readUInt32BE(16) !== data.image_width ||
-        header.readUInt32BE(20) !== data.image_height
+        metadata?.format !== "jpeg" ||
+        metadata.width !== data.image_width ||
+        metadata.height !== data.image_height
       )
         throw new ComputerPreviewError(
-          "The native preview PNG does not match its geometry.",
+          "The native preview JPEG does not match its geometry.",
         )
       if (
         target.scope !== "screen" &&
@@ -324,15 +349,14 @@ export class ComputerPreviewService {
         throw new ComputerPreviewError(
           "The preview process incarnation changed; refresh the target list.",
         )
-      const status = data.geometry_stable
-        ? structured(await call({ action: "status" }, signal))
-        : {}
       const pointer =
-        status.pointer === null || status.pointer === undefined
+        !data.geometry_stable ||
+        data.pointer === null ||
+        data.pointer === undefined
           ? undefined
-          : record(status.pointer)
+          : record(data.pointer)
       return {
-        dataUrl: `data:image/png;base64,${image.data}`,
+        dataUrl: `data:image/jpeg;base64,${image.data}`,
         width: Number(data.image_width),
         height: Number(data.image_height),
         frame: {

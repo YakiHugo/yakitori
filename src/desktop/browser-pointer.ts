@@ -139,15 +139,16 @@ export const browserPointerGeometry = `function(scroll, point) {
   if (!(this instanceof Element) || !this.isConnected || this.ownerDocument !== document || Element.prototype.matches.call(this, ':disabled')) return {ok:false};
   if (scroll) Element.prototype.scrollIntoView.call(this, {block:'center',inline:'center',behavior:'instant'});
   const doc=this.ownerDocument, root=this.getRootNode();
-  let outer=this, outerRoot=root;
-  while (outerRoot instanceof ShadowRoot) { outer=outerRoot.host; outerRoot=outer.getRootNode(); }
+  const roots=new Map();
+  for(let current=root;current instanceof ShadowRoot;current=current.host.getRootNode()) roots.set(current.host,current);
   const hits=(x,y)=>{
-    const globalHit=Document.prototype.elementFromPoint.call(doc,x,y);
-    if (root instanceof ShadowRoot && globalHit !== outer) return false;
-    let hit=root instanceof ShadowRoot ? root.elementFromPoint(x,y) : globalHit;
+    let hit=Document.prototype.elementFromPoint.call(doc,x,y);
     while (hit) {
       if (Node.prototype.contains.call(this,hit)) return true;
-      const hitRoot=hit.getRootNode(); hit=hitRoot instanceof ShadowRoot ? hitRoot.host : null;
+      const inner=roots.get(hit) || hit.shadowRoot;
+      const deeper=inner?.elementFromPoint(x,y);
+      if(!deeper || deeper===hit) return false;
+      hit=deeper;
     }
     return false;
   };
@@ -157,8 +158,10 @@ export const browserPointerGeometry = `function(scroll, point) {
   for(let i=0;i<Math.min(rects.length,16);i++) {
     const rect=rects[i], left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(view.innerWidth,rect.right),bottom=Math.min(view.innerHeight,rect.bottom);
     if(right<=left || bottom<=top)continue;
-    const x=(left+right)/2,y=(top+bottom)/2;
-    if(hits(x,y))return {ok:true,x,y};
+    for(const [dx,dy] of [[.5,.5],[.25,.25],[.75,.25],[.25,.75],[.75,.75]]) {
+      const x=left+(right-left)*dx,y=top+(bottom-top)*dy;
+      if(hits(x,y))return {ok:true,x,y};
+    }
   }
   return {ok:false};
 }`
@@ -209,7 +212,7 @@ export class BrowserFramePointer {
       )
   }
 
-  async prepare(): Promise<void> {
+  async prepare(scroll = true): Promise<void> {
     for (const frame of this.#path) {
       const world = record(
         await this.#read(
@@ -259,20 +262,20 @@ export class BrowserFramePointer {
         backendNodeId: owner.backendNodeId,
         objectId: resolved.objectId,
       })
-      await this.#command(
+      await (scroll ? this.#command : this.#read)(
         "Runtime.callFunctionOn",
         {
           objectId: resolved.objectId,
           returnByValue: true,
           functionDeclaration: browserPointerGeometry,
-          arguments: [{ value: true }, { value: null }],
+          arguments: [{ value: scroll }, { value: null }],
         },
         parent.sessionId,
       )
     }
   }
 
-  async project(point: BrowserPoint): Promise<BrowserPoint> {
+  async project(point: BrowserPoint, verifyHit = true): Promise<BrowserPoint> {
     const root = this.#path[0]
     if (!root) throw new Error("Missing root frame.")
     const transforms = new Map<string, Matrix>([
@@ -322,6 +325,7 @@ export class BrowserFramePointer {
       leafTransform = leaf && transforms.get(leaf.document.frameId)
     if (!leafTransform) throw new Error("Missing leaf projection.")
     const mainPoint = mapPoint(leafTransform, point)
+    if (!verifyHit) return mainPoint
     for (const { parent, objectId } of this.#owners) {
       const transform = transforms.get(parent.document.frameId)
       if (!transform) throw new Error("Missing ancestor projection.")
@@ -387,8 +391,8 @@ export class BrowserPointerTarget {
     this.#frame?.verifyPath(path)
   }
 
-  async prepareFrames(): Promise<void> {
-    await this.#frame?.prepare()
+  async prepareFrames(scroll = true): Promise<void> {
+    await this.#frame?.prepare(scroll)
   }
 
   async flushLayout(): Promise<void> {
@@ -424,8 +428,8 @@ export class BrowserPointerTarget {
     return { x: value.x, y: value.y }
   }
 
-  async scrollIntoView(): Promise<BrowserPoint> {
-    const local = await this.#probe(true)
+  async scrollIntoView(scroll = true): Promise<BrowserPoint> {
+    const local = await this.#probe(scroll)
     this.#localPoint = local
     await this.flushLayout()
     return this.#frame ? this.#frame.project(local) : local

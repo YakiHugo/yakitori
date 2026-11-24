@@ -72,7 +72,7 @@ application.run()
                 case "initialize":
                     result = ["protocolVersion": (request["params"] as? [String: Any])?["protocolVersion"] as? String ?? "2025-11-25", "capabilities": ["tools": [:]], "serverInfo": ["name": "yakitori-computer", "version": "0.1.0"]]
                 case "ping": result = [:]
-                case "tools/list": result = ["tools": tools]
+                case "tools/list": result = ["tools": computerTools.map(\.data)]
                 default:
                     reply(["id": request["id"]!, "error": ["code": -32601, "message": "Unknown method."]])
                     return
@@ -100,14 +100,20 @@ application.run()
             do {
                 let params = request["params"] as? [String: Any] ?? [:]
                 let name = params["name"] as? String
+                guard let tool = computerTools.first(where: { $0.name == name }) else {
+                    throw ComputerFailure("unknown_tool", "Unknown computer tool.")
+                }
+                let args = params["arguments"] as? [String: Any] ?? [:]
+                guard let action = args["action"] as? String, tool.actions.contains(action),
+                      args.keys.allSatisfy({ $0 == "action" || tool.fields.contains($0) }) else {
+                    throw ComputerFailure("invalid_arguments", "Action or fields do not belong to the selected computer tool.")
+                }
                 let result: [String: Any]
-                if name == "turn_ended" {
+                if action == "turn_ended" {
                     try await computer.reset()
                     result = ["content": [["type": "text", "text": "Computer state released."]]]
-                } else if name == "control" {
-                    result = try await computer.execute(params["arguments"] as? [String: Any] ?? [:])
                 } else {
-                    throw ComputerFailure("unknown_tool", "Unknown computer tool.")
+                    result = try await computer.execute(args)
                 }
                 reply(["id": id, "result": result])
             } catch {

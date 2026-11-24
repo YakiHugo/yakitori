@@ -488,7 +488,7 @@ it("cancels a timed-out text dispatch without abandoning its acknowledgement", a
           webContentsId: 17,
           instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
         },
-        reference: "browser_node_00000000-0000-4000-8000-000000000001",
+        reference: "e1",
         text: "Only once",
       },
     })
@@ -536,7 +536,7 @@ it("preserves failed held-input cleanup after cancellation across both IPC endpo
           webContentsId: 17,
           instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
         },
-        reference: "browser_node_00000000-0000-4000-8000-000000000001",
+        reference: "e1",
         text: "",
       },
     })

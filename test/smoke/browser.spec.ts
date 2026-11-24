@@ -12,6 +12,7 @@ import type {
   WorkspaceBrowserBridge,
   WorkspaceBrowserShowRequest,
   WorkspaceBrowserShowResult,
+  WorkspaceBrowserState,
 } from "../../src/desktop/workspace-browser-types.ts"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
@@ -20,6 +21,7 @@ import {
 } from "../fixtures/computer-preview.ts"
 import {
   createSmokeEnvironment,
+  replaceInlineEditText,
   runBudgetedGoal,
   runConversationHistoryFlow,
   runExternalEngineFlow,
@@ -179,6 +181,7 @@ type BrowserViewSmoke = {
   claims: string[]
   completed: { requestId: string; result: WorkspaceBrowserShowResult }[]
   emit: (request: WorkspaceBrowserShowRequest) => void
+  emitState: (state: WorkspaceBrowserState) => void
 }
 
 test("browser display requests select the owned tab and refuse cancelled or foreign requests", async ({
@@ -190,6 +193,7 @@ test("browser display requests select the owned tab and refuse cancelled or fore
   page.on("pageerror", (error) => errors.push(error.message))
   await page.addInitScript(() => {
     let listener: ((request: WorkspaceBrowserShowRequest) => void) | undefined
+    const stateListeners = new Set<(state: WorkspaceBrowserState) => void>()
     const state: BrowserViewSmoke = {
       tabs: [],
       claims: [],
@@ -198,13 +202,17 @@ test("browser display requests select the owned tab and refuse cancelled or fore
         if (!listener) throw new Error("Display listener is not mounted")
         listener(request)
       },
+      emitState(tab) {
+        for (const listener of stateListeners) listener(tab)
+      },
     }
     const browser: WorkspaceBrowserBridge = {
       async create({ tabId }) {
         if (!state.tabs.includes(tabId)) state.tabs.push(tabId)
         return {
           tabId,
-          title: "Owned browser",
+          title:
+            tabId === "agent_tab_fixture" ? "Agent fixture" : "Owned browser",
           url: "https://example.test/",
           loading: false,
           canGoBack: false,
@@ -232,8 +240,11 @@ test("browser display requests select the owned tab and refuse cancelled or fore
           listener = undefined
         }
       },
-      onState() {
-        return () => {}
+      onState(fn) {
+        stateListeners.add(fn)
+        return () => {
+          stateListeners.delete(fn)
+        }
       },
       onSelection() {
         return () => {}
@@ -321,6 +332,21 @@ test("browser display requests select the owned tab and refuse cancelled or fore
           (Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke).claims,
       ),
     ).toEqual(["cancelled", "applied"])
+    await page.evaluate((sessionId) => {
+      ;(Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke).emitState({
+        tabId: "agent_tab_fixture",
+        ownerSessionId: sessionId,
+        title: "Agent fixture",
+        url: "https://example.test/agent",
+        loading: false,
+        canGoBack: false,
+        canGoForward: false,
+      })
+    }, ownerSessionId)
+    await expect(tab).toHaveAttribute("aria-selected", "true")
+    await expect(
+      workspace.getByRole("tab", { name: "Agent fixture" }),
+    ).toHaveAttribute("aria-selected", "false")
     expect(errors).toEqual([])
   } finally {
     await server?.stop()
@@ -379,7 +405,7 @@ test("live computer preview renders decoded frames and pointer positions and sen
           connected: true,
           backend: "yakitori-native",
           serverName: "computer",
-          tools: ["control"],
+          tools: ["observe", "input", "app"],
           permissions: { accessibility: true, screenRecording: true },
         }
       else if (sent.method === "computer/preview/catalog")
@@ -714,9 +740,7 @@ test("edit and undo replace history in one session across open windows", async (
       .getByRole("main")
       .getByRole("button", { name: "Edit & resubmit", exact: true })
       .click()
-    await page
-      .getByRole("textbox", { name: "Edit message", exact: true })
-      .fill("Edited stable prompt")
+    await replaceInlineEditText(page, "Edited stable prompt")
     await page
       .locator(".conversation-inline-edit")
       .getByRole("button", { name: "Send", exact: true })

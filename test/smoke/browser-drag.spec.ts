@@ -77,11 +77,11 @@ test("trusted HTML5 and mouse drags use observed endpoints and leave no held inp
   } as unknown as WebContents)
   const reference = async (name: string) => {
     const observed = await connection.observe(signal())
-    const node = (
-      observed.nodes as { name?: string; elementReference?: string }[]
-    ).find((node) => node.name === name)
-    if (!node?.elementReference) throw new Error(`Missing observed ${name}`)
-    return node.elementReference
+    const node = (observed.nodes as { name?: string; ref?: string }[]).find(
+      (node) => node.name === name,
+    )
+    if (!node?.ref) throw new Error(`Missing observed ${name}`)
+    return node.ref
   }
   try {
     for (const [name, native] of [
@@ -145,12 +145,12 @@ test("trusted HTML5 and mouse drags use observed endpoints and leave no held inp
       const frame = frames.find((frame) => frame.name === name)
       if (!frame) throw new Error(`Missing ${name} frame`)
       const observed = await connection.observe(signal(), frame.frameReference)
-      const node = (
-        observed.nodes as { name?: string; elementReference?: string }[]
-      ).find((node) => node.name === control)
-      if (!node?.elementReference)
+      const node = (observed.nodes as { name?: string; ref?: string }[]).find(
+        (node) => node.name === control,
+      )
+      if (!node?.ref)
         throw new Error(`Missing observed frame control ${control}`)
-      return node.elementReference
+      return node.ref
     }
     const prepared = await connection.drag(
       {

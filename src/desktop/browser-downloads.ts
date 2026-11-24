@@ -212,13 +212,18 @@ export class BrowserDownloads {
     }
   }
 
-  #require(id: string, target: BrowserTarget, owner: BrowserOwner): Download {
+  #require(
+    id: string,
+    target: BrowserTarget | undefined,
+    owner: BrowserOwner,
+  ): Download {
     const job = this.#jobs.get(id)
     if (
       !job ||
-      job.target.instanceId !== target.instanceId ||
-      job.target.tabId !== target.tabId ||
-      job.target.webContentsId !== target.webContentsId ||
+      (target &&
+        (job.target.instanceId !== target.instanceId ||
+          job.target.tabId !== target.tabId ||
+          job.target.webContentsId !== target.webContentsId)) ||
       job.owner.sessionId !== owner.sessionId ||
       job.owner.turnId !== owner.turnId
     )
@@ -251,6 +256,10 @@ export class BrowserDownloads {
 
   inspect(id: string, target: BrowserTarget, owner: BrowserOwner): JsonObject {
     return this.#snapshot(this.#require(id, target, owner))
+  }
+
+  targetFor(id: string, owner: BrowserOwner): BrowserTarget {
+    return this.#require(id, undefined, owner).target
   }
 
   #settle(job: Download): void {
@@ -288,15 +297,19 @@ export class BrowserDownloads {
     target: BrowserTarget,
     owner: BrowserOwner,
     signal: AbortSignal,
+    timeoutMs = 10_000,
   ): Promise<JsonObject> {
     const job = this.#require(id, target, owner),
-      deadline = AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+      deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
     try {
       await this.#awaitTerminal(job, deadline)
     } catch (cause) {
       if (!deadline.aborted || signal.aborted) throw cause
     }
-    return this.#snapshot(job)
+    return {
+      ...this.#snapshot(job),
+      ...(deadline.aborted && !signal.aborted ? { timedOut: true } : {}),
+    }
   }
 
   #requestCancel(job: Download): void {

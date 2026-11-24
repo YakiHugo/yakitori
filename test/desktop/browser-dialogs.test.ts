@@ -96,7 +96,7 @@ it.each([
     await f.dialogs.disarm()
     f.emit(f.dialog)
     expect(f.calls).toHaveLength(2)
-    expect(f.dialogs.inspect()).toEqual({ armed: false })
+    expect(f.dialogs.inspect()).toMatchObject({ armed: false })
   } finally {
     f.dialogs.close()
   }
@@ -151,6 +151,33 @@ it.each([
         ? { expired: true, state: "waiting" }
         : { state: "mismatch" },
     )
+  } finally {
+    f.dialogs.close()
+  }
+})
+
+it("answers only the observed pending dialog in the approved document", async () => {
+  const f = fixture("child_session")
+  const response = { type: "confirm", accept: false } as const
+  try {
+    f.emit(f.dialog, "different_session")
+    await expect(
+      f.dialogs.answer(f.scope, response, f.command),
+    ).rejects.toMatchObject({ code: "browser_dialog_stale" })
+    expect(f.calls).toEqual([])
+    f.emit(f.dialog)
+    f.response.resolve()
+    await expect(
+      f.dialogs.answer(f.scope, response, f.command),
+    ).resolves.toEqual({
+      answered: true,
+      type: "confirm",
+      accepted: false,
+    })
+    await expect(
+      f.dialogs.answer(f.scope, response, f.command),
+    ).rejects.toMatchObject({ code: "browser_dialog_stale" })
+    expect(f.calls).toEqual(["Page.handleJavaScriptDialog"])
   } finally {
     f.dialogs.close()
   }

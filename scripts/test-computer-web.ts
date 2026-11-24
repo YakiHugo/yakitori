@@ -14,7 +14,10 @@ import { join, resolve } from "node:path"
 import { isDeepStrictEqual, parseArgs } from "node:util"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { McpClient } from "../src/runtime/mcp-client.ts"
-import { prepareComputerFixture } from "./computer-fixture.ts"
+import {
+  bindComputerFixture,
+  prepareComputerFixture,
+} from "./computer-fixture.ts"
 
 const { values } = parseArgs({
   options: {
@@ -72,11 +75,7 @@ type State = {
 }
 let failure: unknown
 try {
-  const tools = await client.start()
-  const control = tools.find((tool) => tool.name === "control")
-  const cleanup = tools.find((tool) => tool.name === "turn_ended")
-  assert(control && cleanup)
-  const call = client.bindTool(control)
+  const call = bindComputerFixture(client, await client.start())
   const permissions = (await call({ action: "status" })).structuredContent
   assert(
     permissions?.accessibility && permissions.screenRecording,
@@ -507,7 +506,7 @@ try {
                 JSON.stringify(observed.structuredContent),
               )
               const rows = observed.structuredContent?.elements as Row[]
-              const cleaned = await client.bindTool(cleanup)({})
+              const cleaned = await call({ action: "turn_ended" })
               assert(!cleaned.isError)
               return rows.some(
                 (row) =>
@@ -585,10 +584,7 @@ try {
             () => {},
           )
           try {
-            const tools = await preview.start()
-            const tool = tools.find((tool) => tool.name === "control")
-            assert(tool)
-            const capture = preview.bindTool(tool)
+            const capture = bindComputerFixture(preview, await preview.start())
             const stale = await capture({
               action: "preview",
               mode: "vision",
@@ -746,25 +742,22 @@ try {
               replace: true,
             })
             lastAction = typed.structuredContent
-            if (typed.isError) {
+            assert(!typed.isError, JSON.stringify(typed.structuredContent))
+            assert.equal(typed.structuredContent?.delivered, true)
+            const matched = typed.structuredContent?.readback_matched === true
+            if (!matched) {
               assert.equal(
                 values.delivery,
                 "background",
                 "Foreground text input must retain the complete text",
               )
-              assert.equal(
-                typed.structuredContent?.code,
-                "text_unconfirmed",
-                JSON.stringify(typed.structuredContent),
-              )
-              assert.equal(typed.structuredContent?.value_matches, false)
+              assert.equal(typed.structuredContent?.readback_matched, false)
             } else {
-              assert.equal(typed.structuredContent?.value_matches, true)
               await waitFor(async () => (await state())?.first === text)
             }
             samples.push({
               text,
-              confirmed: !typed.isError,
+              confirmed: matched,
               actual: (await state())?.first,
             })
             assert.equal((await state())?.pastes, initialPastes)
@@ -790,9 +783,10 @@ try {
             text: "ABCD",
           })
           lastAction = typed.structuredContent
-          assert(typed.isError, JSON.stringify(typed.structuredContent))
-          assert.equal(typed.structuredContent?.code, "text_unconfirmed")
-          assert.equal(typed.structuredContent?.value_matches, false)
+          assert(!typed.isError, JSON.stringify(typed.structuredContent))
+          assert.equal(typed.structuredContent?.delivered, true)
+          assert.equal(typed.structuredContent?.readback_matched, false)
+          assert.equal(typed.structuredContent?.observed_value, "ABC")
           await waitFor(async () => (await state())?.bounded === "ABC")
         },
       )
@@ -910,7 +904,7 @@ try {
         },
       )
     } finally {
-      await client.bindTool(cleanup)({})
+      await call({ action: "turn_ended" })
       if (focusPID !== undefined) process.kill(focusPID, "SIGTERM")
       if (nativePID !== undefined) process.kill(nativePID, "SIGTERM")
       const running =

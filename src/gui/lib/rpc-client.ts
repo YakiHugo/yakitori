@@ -1,5 +1,6 @@
 import packageJson from "../../../package.json" with { type: "json" }
 import type { ApiErrorCode } from "../../protocol/application.ts"
+import type { ComputerUseStatus } from "../../protocol/connections.ts"
 import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
 import type { LiveSessionEvent } from "../../protocol/live-events.ts"
 import {
@@ -25,6 +26,7 @@ import type {
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
 import {
+  computerStatusChangedMethod,
   goalChangedMethod,
   mcpStatusChangedMethod,
   projectChangedMethod,
@@ -130,6 +132,9 @@ export type AppRpcClient = {
   subscribeToMcpStatusChanges(
     listener: (notification: McpStatusChangedNotification) => void,
   ): () => void
+  subscribeToComputerStatusChanges(
+    listener: (status: ComputerUseStatus) => void,
+  ): () => void
   // Server-broadcast session activity. `undefined` means the connection
   // re-initialized and the current active set is unknown: refetch lists.
   subscribeToSessionActivity(
@@ -219,6 +224,9 @@ export function createAppRpcClient(options: {
   >()
   const mcpStatusChangedListeners = new Set<
     (notification: McpStatusChangedNotification) => void
+  >()
+  const computerStatusChangedListeners = new Set<
+    (status: ComputerUseStatus) => void
   >()
   const providerChangeListeners = new Set<() => void>()
   const sessionActivityListeners = new Set<
@@ -589,6 +597,10 @@ export function createAppRpcClient(options: {
       const params = message.params as McpStatusChangedNotification
       for (const listener of mcpStatusChangedListeners) listener(params)
     }
+    if (message.method === computerStatusChangedMethod) {
+      const status = message.params as ComputerUseStatus
+      for (const listener of computerStatusChangedListeners) listener(status)
+    }
   }
 
   function dispatchTransient(event: LiveSessionEvent): void {
@@ -747,6 +759,12 @@ export function createAppRpcClient(options: {
       mcpStatusChangedListeners.add(listener)
       return () => {
         mcpStatusChangedListeners.delete(listener)
+      }
+    },
+    subscribeToComputerStatusChanges(listener) {
+      computerStatusChangedListeners.add(listener)
+      return () => {
+        computerStatusChangedListeners.delete(listener)
       }
     },
     subscribeToProviderChanges(listener) {

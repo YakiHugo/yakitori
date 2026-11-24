@@ -3182,83 +3182,18 @@ describe("application composition", () => {
   })
 
   it.each([
-    "browser",
-    "browser_input",
-    "browser_navigate",
-    "browser_upload",
-    "browser_view",
-    "browser_chooser",
-    "browser_dialog",
-    "browser_download",
-    "browser_drag",
-  ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
-    const browserInput =
-      browserTool === "browser_drag"
-        ? {
-            action: "prepare",
-            target: {
-              tabId: "owned",
-              webContentsId: 17,
-              instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
-            },
-            reference: "browser_element_00000000-0000-4000-8000-000000000001",
-          }
-        : browserTool === "browser"
-          ? { action: "list" }
-          : browserTool === "browser_input"
-            ? {
-                action: "type",
-                target: {
-                  tabId: "owned",
-                  webContentsId: 17,
-                  instanceId:
-                    "browser_target_00000000-0000-4000-8000-000000000001",
-                },
-                reference: "browser_node_00000000-0000-4000-8000-000000000001",
-                text: "Must stay blocked",
-              }
-            : browserTool === "browser_upload"
-              ? {
-                  action: "upload",
-                  target: {
-                    tabId: "owned",
-                    webContentsId: 17,
-                    instanceId:
-                      "browser_target_00000000-0000-4000-8000-000000000001",
-                  },
-                  reference:
-                    "browser_element_00000000-0000-4000-8000-000000000001",
-                  fromUrl: "https://owned.test/",
-                  paths: [],
-                }
-              : browserTool === "browser_view" ||
-                  browserTool === "browser_chooser" ||
-                  browserTool === "browser_dialog" ||
-                  browserTool === "browser_download"
-                ? {
-                    action: browserTool === "browser_view" ? "show" : "arm",
-                    target: {
-                      tabId: "owned",
-                      webContentsId: 17,
-                      instanceId:
-                        "browser_target_00000000-0000-4000-8000-000000000001",
-                    },
-                    fromUrl: "https://owned.test/",
-                    ...(browserTool === "browser_dialog"
-                      ? { response: { type: "confirm", accept: true } }
-                      : {}),
-                  }
-                : {
-                    action: "navigate",
-                    target: {
-                      tabId: "owned",
-                      webContentsId: 17,
-                      instanceId:
-                        "browser_target_00000000-0000-4000-8000-000000000001",
-                    },
-                    fromUrl: "",
-                    url: "https://destination.test/",
-                  }
+    ["browser_inspect", { action: "tabs" }],
+    ["browser_inspect", { action: "snapshot", tabId: "owned" }],
+    [
+      "browser_act",
+      { action: "fill", tabId: "owned", ref: "e1", text: "Browser input" },
+    ],
+    [
+      "browser_act",
+      { action: "navigate", tabId: "owned", url: "https://destination.test/" },
+    ],
+    ["browser_wait", { tabId: "owned", until: "load" }],
+  ] as const)("dispatches %s independently of native input (%j)", async (browserTool, browserInput) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
@@ -3269,7 +3204,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "own_native",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -3286,7 +3221,7 @@ describe("application composition", () => {
             },
           ],
         },
-        { content: [{ type: "text", text: "Browser is busy" }] },
+        { content: [{ type: "text", text: "Browser ran" }] },
         {
           stopReason: ModelStopReason.ToolUse,
           content: [
@@ -3298,7 +3233,7 @@ describe("application composition", () => {
             },
           ],
         },
-        { content: [{ type: "text", text: "Browser remains disconnected" }] },
+        { content: [{ type: "text", text: "Browser still runs" }] },
       ])
       let inspections = 0
       const application = await createYakitoriApplication({
@@ -3307,7 +3242,17 @@ describe("application composition", () => {
         desktopBrowser: {
           async finishTurn() {},
           async closeSession() {},
-          async request() {
+          async request(input) {
+            if (input.action === "target")
+              return {
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                url: "https://owned.test/",
+              }
             inspections++
             return { tabs: [] }
           },
@@ -3344,10 +3289,7 @@ describe("application composition", () => {
           }),
         )
         await waitForThreadIdle(application, reader)
-        expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
-          "Computer use is busy in another conversation",
-        )
-        expect(inspections).toBe(0)
+        expect(inspections).toBe(1)
         await rpcRequest(baseUrl, "computer/takeover", {})
         await waitForThreadIdle(application, owner)
         expectOk(
@@ -3360,10 +3302,7 @@ describe("application composition", () => {
           }),
         )
         await waitForThreadIdle(application, reader)
-        expect(JSON.stringify(provider.requests[5]?.messages)).toContain(
-          "Connect computer use before inspecting desktop browser tabs",
-        )
-        expect(inspections).toBe(0)
+        expect(inspections).toBe(2)
       } finally {
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
@@ -3374,56 +3313,19 @@ describe("application composition", () => {
   })
 
   it.each([
-    "browser_input",
-    "browser",
-    "browser_capture",
-    "browser_navigate",
-    "browser_download",
-    "browser_drag",
-  ])("blocks native and browser input after %s cleanup fails until release is confirmed", async (browserTool) => {
+    ["browser_act", { action: "fill", tabId: "owned", ref: "e1", text: "" }],
+    [
+      "browser_act",
+      { action: "navigate", tabId: "owned", url: "https://destination.test/" },
+    ],
+    ["browser_inspect", { action: "snapshot", tabId: "owned" }],
+    ["browser_wait", { tabId: "owned", until: "load" }],
+  ] as const)("quarantines only the affected tab after %s cleanup fails (%j)", async (browserTool, input) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release, called } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
       const cleaning = Promise.withResolvers<void>(),
         releaseCleanup = Promise.withResolvers<void>()
-      const target = {
-        tabId: "owned",
-        webContentsId: 17,
-        instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
-      }
-      const input =
-        browserTool === "browser_drag"
-          ? {
-              action: "drop",
-              target,
-              dragId: "browser_drag_00000000-0000-4000-8000-000000000001",
-              reference: "browser_element_00000000-0000-4000-8000-000000000001",
-            }
-          : browserTool === "browser_download"
-            ? {
-                action: "cancel",
-                target,
-                downloadId:
-                  "browser_download_00000000-0000-4000-8000-000000000001",
-              }
-            : browserTool === "browser"
-              ? { action: "list" }
-              : browserTool === "browser_capture"
-                ? { action: "capture", target, mode: "viewport" }
-                : browserTool === "browser_navigate"
-                  ? {
-                      action: "navigate",
-                      target,
-                      fromUrl: "https://owned.test/",
-                      url: "https://destination.test/",
-                    }
-                  : {
-                      action: "fill",
-                      target,
-                      reference:
-                        "browser_node_00000000-0000-4000-8000-000000000001",
-                      text: "",
-                    }
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,
@@ -3442,7 +3344,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "try_native",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -3453,8 +3355,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "try_browser",
-              name: "browser",
-              input: { action: "list" },
+              name: "browser_inspect",
+              input: { action: "snapshot", tabId: "owned" },
             },
           ],
         },
@@ -3465,8 +3367,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "after_cleanup",
-              name: "browser",
-              input: { action: "list" },
+              name: "browser_inspect",
+              input: { action: "snapshot", tabId: "owned" },
             },
           ],
         },
@@ -3478,7 +3380,17 @@ describe("application composition", () => {
         ...testApplicationOptions({ rootDir, workspace }),
         stream: provider.stream,
         desktopBrowser: {
-          async request() {
+          async request(input) {
+            if (input.action === "target")
+              return {
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                url: "https://owned.test/",
+              }
             requests++
             if (!cleaned)
               throw new BrowserControlError(
@@ -3512,16 +3424,11 @@ describe("application composition", () => {
         )
         await cleaning.promise
         expect(provider.callCount).toBe(4)
-        expect(JSON.stringify(provider.requests[2]?.messages)).toContain(
-          "Computer input cleanup is unconfirmed",
-        )
         expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
-          "Computer input cleanup is unconfirmed",
+          "This tab cannot be operated",
         )
         expect(requests).toBe(1)
-        await expect(readFile(called, "utf8")).rejects.toMatchObject({
-          code: "ENOENT",
-        })
+        expect(await readFile(called, "utf8")).toBe("called")
         expect(application.threadManager.getThread(sessionId)?.status).toBe(
           "active",
         )
@@ -3545,10 +3452,8 @@ describe("application composition", () => {
     })
   })
 
-  it("waits for browser cleanup acknowledgement before completing computer takeover", async () => {
+  it("takes over an owned browser tab without a computer connection and waits for browser cleanup", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
-      const { release } = await writeComputerMcpFixture(rootDir)
-      await writeFile(release, "release")
       const cleaning = Promise.withResolvers<void>(),
         releaseCleanup = Promise.withResolvers<void>()
       const provider = createFauxProvider([
@@ -3558,8 +3463,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "browser_owner",
-              name: "browser",
-              input: { action: "list" },
+              name: "browser_inspect",
+              input: { action: "snapshot", tabId: "owned" },
             },
           ],
         },
@@ -3571,7 +3476,17 @@ describe("application composition", () => {
         ...testApplicationOptions({ rootDir, workspace }),
         stream: provider.stream,
         desktopBrowser: {
-          async request(_input, owner) {
+          async request(input, owner) {
+            if (input.action === "target")
+              return {
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                url: "https://owned.test/",
+              }
             requestOwner = owner
             return { tabs: [] }
           },
@@ -3604,23 +3519,17 @@ describe("application composition", () => {
         await expect.poll(() => provider.callCount).toBe(2)
         expect(requestOwner).toMatchObject({ sessionId })
         let completed = false
-        takeover = rpcRequest(baseUrl, "computer/takeover", {}).then(
-          (value) => {
-            completed = true
-            return value
-          },
-        )
+        takeover = rpcRequest(baseUrl, "browser/takeover", {
+          tabId: "owned",
+        }).then((value) => {
+          completed = true
+          return value
+        })
         await cleaning.promise
         expect(cleanupOwner).toEqual(requestOwner)
         expect(completed).toBe(false)
-        expect(await rpcRequest(baseUrl, "computer/status", {})).toMatchObject({
-          inputOwner: { sessionId },
-        })
         releaseCleanup.resolve()
-        expect(await takeover).toMatchObject({
-          connected: false,
-          takenOver: true,
-        })
+        expect(await takeover).toEqual({})
         await waitForThreadIdle(application, sessionId)
         expect(
           await rpcRequest(baseUrl, "computer/status", {}),
@@ -3650,7 +3559,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "late_input",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -3712,7 +3621,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "owned_input",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -5580,10 +5489,10 @@ import {createInterface} from 'node:readline';
 createInterface({input:process.stdin}).on('line', async line => {
   const m=JSON.parse(line); if(m.id === undefined) return;
   const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}
-    : m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}
+    : m.method==='tools/list'?{tools:['observe','input','app','internal'].map(name=>({name,inputSchema:{type:'object'}}))}
     : {content:[{type:'text',text:'done'}]};
-  if(m.params?.name==='control') writeFileSync(${JSON.stringify(called)}, 'called');
-  if(m.params?.name==='turn_ended') {
+  if(m.params?.name==='input') writeFileSync(${JSON.stringify(called)}, 'called');
+  if(m.params?.name==='internal'&&m.params?.arguments?.action==='turn_ended') {
     writeFileSync(${JSON.stringify(marker)}, 'waiting');
     while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve=>setTimeout(resolve,5));
   }

@@ -20,6 +20,17 @@ export type ComputerUseDiscoveryOptions = Readonly<{
 
 export class ComputerUseUnavailableError extends Error {}
 
+export const computerModelTools: readonly string[] = ["observe", "input", "app"]
+export const computerInternalTool = "internal"
+
+export function computerToolsEnabled(config: McpServerConfig): boolean {
+  return computerModelTools.every(
+    (name) =>
+      !config.disabledTools?.includes(name) &&
+      (config.enabledTools === undefined || config.enabledTools.includes(name)),
+  )
+}
+
 type InstalledComputer = Readonly<{
   command: string
   args: string[]
@@ -49,7 +60,7 @@ export async function discoverComputerUse(
       return undefined
     throw error
   }
-  return { command, args: ["--mcp"], enabledTools: ["control"] }
+  return { command, args: ["--mcp"], enabledTools: [...computerModelTools] }
 }
 
 export async function readComputerUseStatus(
@@ -136,26 +147,26 @@ async function probeComputerUse(
     () => {},
   )
   try {
-    if (
-      config.disabledTools?.includes("control") ||
-      (config.enabledTools !== undefined &&
-        !config.enabledTools.includes("control"))
-    )
+    if (!computerToolsEnabled(config))
       throw new McpConnectionError(
-        "The computer control tool is disabled in configuration.",
+        "A computer tool is disabled in configuration.",
         { code: "catalog_invalid" },
       )
     const tools = await client.start()
-    const control = tools.find((tool) => tool.name === "control")
+    const internal = tools.find((tool) => tool.name === computerInternalTool)
     if (
-      control === undefined ||
-      !tools.some((tool) => tool.name === "turn_ended")
+      internal === undefined ||
+      !computerModelTools.every((name) =>
+        tools.some((tool) => tool.name === name),
+      ) ||
+      tools.find((tool) => tool.name === "observe")?.annotations
+        ?.readOnlyHint !== true
     )
       throw new McpConnectionError(
-        "The computer service did not advertise its desktop tool and cleanup hook.",
+        "The computer service did not advertise its desktop tools and internal control.",
         { code: "catalog_invalid" },
       )
-    const result = await client.bindTool(control)({
+    const result = await client.bindTool(internal)({
       action: requestPermissions ? "permissions" : "status",
     })
     const permissions = result.structuredContent
@@ -186,7 +197,7 @@ function status(
     connected,
     backend: "yakitori-native",
     serverName: computerUseServerName,
-    tools: connected ? ["control"] : [],
+    tools: connected ? computerModelTools : [],
     ...(permissions === undefined ? {} : { permissions }),
     ...(permissions &&
     (!permissions.accessibility || !permissions.screenRecording)

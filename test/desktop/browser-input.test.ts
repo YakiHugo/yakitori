@@ -15,7 +15,7 @@ const target = {
   webContentsId: 17,
   instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
 }
-const ownerReference = "browser_node_00000000-0000-4000-8000-000000000001"
+const ownerReference = "e1"
 
 it("accepts bounded text input only with an exact observation reference", () => {
   const valid = {
@@ -266,10 +266,13 @@ function fixture(
     navigate: () => {
       documentId = "replacement"
     },
-    async clickRequest(): Promise<BrowserPointerRequest> {
+    async clickRequest(): Promise<
+      Extract<BrowserPointerRequest, { action: "click" }> & {
+        reference: string
+      }
+    > {
       const observed = await connection.observe(new AbortController().signal)
-      const reference = (observed.nodes as { elementReference: string }[])[0]
-        ?.elementReference
+      const reference = (observed.nodes as { ref: string }[])[0]?.ref
       if (!reference) throw new Error("Missing pointer reference")
       return { action: "click", target, reference }
     },
@@ -280,8 +283,7 @@ function fixture(
     },
     async request(text = "你好 🌍"): Promise<BrowserTextInputRequest> {
       const observed = await connection.observe(new AbortController().signal)
-      const reference = (observed.nodes as { inputReference: string }[])[0]
-        ?.inputReference
+      const reference = (observed.nodes as { ref: string }[])[0]?.ref
       if (!reference) throw new Error("Missing observed input reference")
       return { action: "type", target, reference, text }
     },
@@ -325,7 +327,7 @@ it("refuses a hidden drag view before delivering any mouse input", async () => {
   }
 })
 
-it("consumes an observation once and verifies the exact text receipt", async () => {
+it("reuses a text reference within the same document and verifies each insertion", async () => {
   const f = fixture()
   try {
     const input = await f.request()
@@ -334,9 +336,12 @@ it("consumes an observation once and verifies the exact text receipt", async () 
     ).toMatchObject({ delivered: true, textVerified: true })
     expect(f.value()).toBe("first你好 🌍")
     await expect(
-      f.connection.inputText(input, new AbortController().signal),
-    ).rejects.toMatchObject({ code: "browser_reference_stale" })
-    expect(f.inputCalls()).toBe(1)
+      f.connection.inputText(
+        { ...input, text: " again" },
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ delivered: true, textVerified: true })
+    expect(f.value()).toBe("first你好 🌍 again")
   } finally {
     await f.connection.close()
   }
@@ -505,16 +510,18 @@ it("never takes a user debugger to release an uncertain key and accepts target d
   expect(f.keyDowns()).toBe(1)
 })
 
-it("accepts a click only through an exact pointer reference without text or raw commands", () => {
+it("accepts either an exact pointer reference or a viewport point, but not both", () => {
   const input = {
     action: "click",
     target,
-    reference: "browser_element_00000000-0000-4000-8000-000000000001",
+    reference: "e1",
   }
   expect(parseBrowserInputRequest(input)).toEqual(input)
+  const position = { action: "click", target, x: 41, y: 70 }
+  expect(parseBrowserInputRequest(position)).toEqual(position)
   for (const invalid of [
     { ...input, text: "" },
-    { ...input, reference: ownerReference },
+    { ...input, x: 41, y: 70 },
     { ...input, action: "mousePressed" },
   ])
     expect(() => parseBrowserInputRequest(invalid)).toThrow()
@@ -601,7 +608,7 @@ it("ends a pending read when the owned root debugger closes even if the renderer
   }
 })
 
-it("presses and releases once after hit testing the same captured control", async () => {
+it("presses and releases once per explicit click on the same observed control", async () => {
   const f = fixture({ pointer: true })
   try {
     const input = await f.clickRequest()
@@ -616,8 +623,9 @@ it("presses and releases once after hit testing the same captured control", asyn
     expect(f.releases()).toBe(1)
     await expect(
       f.connection.inputPointer(input, new AbortController().signal),
-    ).rejects.toMatchObject({ code: "browser_reference_stale" })
-    expect(f.presses()).toBe(1)
+    ).resolves.toMatchObject({ delivered: true })
+    expect(f.presses()).toBe(2)
+    expect(f.releases()).toBe(2)
   } finally {
     await f.connection.close()
   }
@@ -680,26 +688,10 @@ it("does not detach a pressed mouse button until its release is acknowledged", a
   expect(f.attached()).toBe(false)
 })
 
-it("does not use a text reference as a pointer target", async () => {
-  const f = fixture()
-  try {
-    const input = await f.request()
-    await expect(
-      f.connection.inputPointer(
-        { action: "click", target, reference: input.reference },
-        new AbortController().signal,
-      ),
-    ).rejects.toMatchObject({ code: "browser_reference_stale" })
-    expect(f.presses()).toBe(0)
-  } finally {
-    await f.connection.close()
-  }
-})
-
 it("parses pointer variants without accepting cross-action fields or unbounded wheel jumps", () => {
   const shared = {
     target,
-    reference: "browser_element_00000000-0000-4000-8000-000000000001",
+    reference: "e1",
   }
   for (const action of ["hover", "click"])
     expect(parseBrowserInputRequest({ action, ...shared })).toMatchObject({
@@ -734,7 +726,7 @@ it("parses pointer variants without accepting cross-action fields or unbounded w
     expect(() => parseBrowserInputRequest(input)).toThrow()
 })
 
-it("hovers without pressing a button and consumes the observation", async () => {
+it("hovers repeatedly without pressing a button", async () => {
   const f = fixture({ pointer: true })
   try {
     const request = { ...(await f.clickRequest()), action: "hover" as const }
@@ -746,7 +738,8 @@ it("hovers without pressing a button and consumes the observation", async () => 
     expect(f.moves()).toBe(1)
     await expect(
       f.connection.inputPointer(request, new AbortController().signal),
-    ).rejects.toMatchObject({ code: "browser_reference_stale" })
+    ).resolves.toMatchObject({ delivered: true })
+    expect(f.moves()).toBe(2)
   } finally {
     await f.connection.close()
   }
@@ -855,7 +848,7 @@ it("accepts exact keyboard targets and rejects unvalidated keys, duplicate modif
   const input = {
     action: "press",
     target,
-    reference: "browser_element_00000000-0000-4000-8000-000000000001",
+    reference: "e1",
     key: "Enter",
   }
   expect(parseBrowserInputRequest(input)).toEqual(input)
@@ -875,7 +868,7 @@ it("accepts exact keyboard targets and rejects unvalidated keys, duplicate modif
     { modifiers: ["Command"] },
     { modifiers: [["Meta"]] },
     { text: "unrequested" },
-    { reference: ownerReference },
+    { reference: "foreign" },
     { commands: ["paste"] },
   ])
     expect(() => parseBrowserInputRequest({ ...input, ...override })).toThrow()
@@ -943,8 +936,8 @@ it("delivers a keyboard chord and unwinds only its owned key and modifiers in re
     ])
     await expect(
       f.connection.pressKey(input, new AbortController().signal),
-    ).rejects.toMatchObject({ code: "browser_reference_stale" })
-    expect(f.keyDowns()).toBe(3)
+    ).resolves.toMatchObject({ delivered: true })
+    expect(f.keyDowns()).toBe(6)
   } finally {
     await f.connection.close()
   }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
 import {
   type BrowserWindow,
+  type BrowserWindowConstructorOptions,
   clipboard,
   ipcMain,
   Menu,
@@ -17,6 +18,7 @@ import {
 import type { JsonObject } from "../protocol/events.ts"
 import { BrowserDownloads } from "./browser-downloads.ts"
 import { BrowserDocumentConnection } from "./browser-observation.ts"
+import { BrowserTelemetry } from "./browser-telemetry.ts"
 import { BrowserViewRequests } from "./browser-view-requests.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
 import type {
@@ -39,6 +41,9 @@ type BrowserTab = {
   preview?: { navigation: number; dataUrl: string }
   requestedUrl?: string
   error?: string
+  openerTabId?: string
+  ownerSessionId?: string
+  telemetry: BrowserTelemetry
 }
 
 export function registerWorkspaceBrowser(
@@ -48,6 +53,7 @@ export function registerWorkspaceBrowser(
   const loads = new Set<string>()
   const viewRequests = new BrowserViewRequests(window)
   let showing = false
+  let activeTabId: string | undefined
   type OwnedConnection = {
     owner: BrowserOwner
     targetId: string
@@ -55,19 +61,41 @@ export function registerWorkspaceBrowser(
     connection: BrowserDocumentConnection
     busy: boolean
   }
-  // One current debugger per turn. Switching tabs closes the previous target;
-  // model steps reuse the connection until the owning turn confirms cleanup.
+  // Each tab's debugger stays attached until that tab's owning turn settles.
   const connections = new Map<string, OwnedConnection>()
   const isAgentOwned = (tab: BrowserTab) =>
+    loads.has(tab.instanceId) ||
     [...connections.values()].some((entry) => entry.targetId === tab.instanceId)
   const closeConnection = async (key: string, entry: OwnedConnection) => {
     await entry.connection.close()
     if (!entry.contents.isDestroyed())
       entry.contents.setIgnoreMenuShortcuts(false)
-    connections.delete(key)
+    if (connections.get(key) === entry) connections.delete(key)
   }
-  const ownerKey = (owner: BrowserOwner) =>
-    JSON.stringify([owner.sessionId, owner.turnId])
+  const sameOwner = (left: BrowserOwner, right: BrowserOwner) =>
+    left.sessionId === right.sessionId && left.turnId === right.turnId
+  const claimConnection = (
+    tabId: string,
+    tab: BrowserTab,
+    owner: BrowserOwner,
+    allowBlank = false,
+  ) => {
+    const contents = tab.view.webContents
+    const entry = {
+      owner,
+      targetId: tab.instanceId,
+      contents,
+      connection: new BrowserDocumentConnection(
+        contents,
+        (signal) => waitForView(tabId, tab, signal),
+        { telemetry: tab.telemetry, allowBlank },
+      ),
+      busy: false,
+    }
+    connections.set(tabId, entry)
+    contents.setIgnoreMenuShortcuts(true)
+    return entry
+  }
   const confirmCleanup = async (operations: Promise<unknown>[]) => {
     const results = await Promise.allSettled(operations)
     const failures = results.flatMap((result) =>
@@ -81,19 +109,20 @@ export function registerWorkspaceBrowser(
       )
   }
   const finishTurn = async (owner: BrowserOwner) => {
-    const key = ownerKey(owner),
-      entry = connections.get(key)
-    if (entry) entry.busy = true
+    const owned = [...connections].filter(([, entry]) =>
+      sameOwner(entry.owner, owner),
+    )
+    for (const [, entry] of owned) entry.busy = true
     try {
       // A stalled network cancellation cannot delay releasable keys/buttons.
       // Downloads own their turn independently of the current debugger target.
       await confirmCleanup([
         Promise.resolve().then(() => viewRequests.finishTurn(owner)),
-        ...(entry ? [closeConnection(key, entry)] : []),
+        ...owned.map(([key, entry]) => closeConnection(key, entry)),
         downloads.finishTurn(owner),
       ])
     } finally {
-      if (entry) entry.busy = false
+      for (const [, entry] of owned) entry.busy = false
     }
   }
 
@@ -147,6 +176,12 @@ export function registerWorkspaceBrowser(
       canGoBack: contents.navigationHistory.canGoBack(),
       canGoForward: contents.navigationHistory.canGoForward(),
       ...(tab.error === undefined ? {} : { error: tab.error }),
+      ...(tab.openerTabId === undefined
+        ? {}
+        : { openerTabId: tab.openerTabId }),
+      ...(tab.ownerSessionId === undefined
+        ? {}
+        : { ownerSessionId: tab.ownerSessionId }),
     }
   }
   function publish(tabId: string, tab: BrowserTab) {
@@ -197,12 +232,19 @@ export function registerWorkspaceBrowser(
       action,
     } satisfies WorkspaceBrowserSelection)
   }
-  function create(tabId: string, url?: string): BrowserTab {
+  function create(
+    tabId: string,
+    url?: string,
+    popup?: { openerTabId: string; options: BrowserWindowConstructorOptions },
+    ownerSessionId?: string,
+  ): BrowserTab {
     const existing = tabs.get(tabId)
     if (existing) return existing
     const initialUrl = url ? normalizeBrowserUrl(url) : undefined
     const view = new WebContentsView({
+      ...popup?.options,
       webPreferences: {
+        ...popup?.options.webPreferences,
         session: profile,
         sandbox: true,
         contextIsolation: true,
@@ -215,6 +257,9 @@ export function registerWorkspaceBrowser(
       instanceId: `browser_target_${randomUUID()}`,
       navigation: 0,
       layout: 0,
+      telemetry: new BrowserTelemetry(view.webContents),
+      ...(popup ? { openerTabId: popup.openerTabId } : {}),
+      ...(ownerSessionId === undefined ? {} : { ownerSessionId }),
     }
     tabs.set(tabId, tab)
     view.setVisible(false)
@@ -273,9 +318,29 @@ export function registerWorkspaceBrowser(
       if (!isBrowserNavigation(target)) event.preventDefault()
     })
     contents.setWindowOpenHandler(({ url: target }) => {
-      // Keep user-opened links inside the same isolated browser surface.
-      if (isBrowserNavigation(target)) navigate(tabId, tab, target)
-      return { action: "deny" }
+      // Bound renderer allocations from untrusted pages, regardless of origin.
+      if (!isBrowserNavigation(target) || tabs.size >= 32)
+        return { action: "deny" }
+      return {
+        action: "allow",
+        createWindow(options) {
+          const id = `popup_${randomUUID()}`
+          const child = create(id, undefined, {
+            openerTabId: tabId,
+            options,
+          })
+          publish(id, child)
+          return child.view.webContents
+        },
+      }
+    })
+    contents.once("destroyed", () => {
+      if (tabs.get(tabId) === tab) {
+        tabs.delete(tabId)
+        if (activeTabId === tabId) activeTabId = undefined
+        if (!window.isDestroyed()) window.contentView.removeChildView(tab.view)
+        notifyClosed(tabId)
+      }
     })
     contents.on(
       "did-fail-load",
@@ -452,6 +517,7 @@ export function registerWorkspaceBrowser(
         !tab.error &&
         Boolean(state(tabId, tab).url)
       if (visible) {
+        activeTabId = tabId
         for (const other of tabs.values()) {
           if (other !== tab) other.view.setVisible(false)
         }
@@ -527,12 +593,26 @@ export function registerWorkspaceBrowser(
   }
   function closeTab(tabId: string, tab: BrowserTab) {
     tabs.delete(tabId)
+    if (activeTabId === tabId) activeTabId = undefined
     tab.view.setVisible(false)
     if (tab.view.webContents.isFocused() && !window.isDestroyed())
       window.webContents.focus()
     window.contentView.removeChildView(tab.view)
     if (!tab.view.webContents.isDestroyed())
       tab.view.webContents.close({ waitForBeforeUnload: false })
+    notifyClosed(tabId)
+  }
+  function notifyClosed(tabId: string) {
+    if (!window.isDestroyed() && !window.webContents.isDestroyed())
+      window.webContents.send("yakitori:browser-state", {
+        tabId,
+        url: "",
+        title: "",
+        loading: false,
+        canGoBack: false,
+        canGoForward: false,
+        closed: true,
+      } satisfies WorkspaceBrowserState)
   }
   window.webContents.on(
     "did-start-navigation",
@@ -571,17 +651,53 @@ export function registerWorkspaceBrowser(
   return {
     async request(input, owner, signal = new AbortController().signal) {
       signal.throwIfAborted()
-      viewRequests.assertIdle()
-      if (showing)
-        throw new BrowserControlError(
-          "browser_busy",
-          "A workspace display request is still settling.",
-        )
       if (window.isDestroyed())
         throw new BrowserControlError(
           "browser_unavailable",
           "The desktop window is closed.",
         )
+      const item = (tabId: string, tab: BrowserTab) => {
+        const contents = tab.view.webContents
+        const url = contents.getURL()
+        const title = contents.getTitle()
+        return {
+          target: {
+            tabId,
+            webContentsId: contents.id,
+            instanceId: tab.instanceId,
+          },
+          title: title.slice(0, 2048),
+          url: url.slice(0, 8192),
+          metadataTruncated: url.length > 8192 || title.length > 2048,
+          loading: contents.isLoadingMainFrame(),
+          active: tabId === activeTabId,
+        }
+      }
+      if (input.action === "new_tab") {
+        if (tabs.has(input.tabId))
+          throw new BrowserControlError(
+            "browser_target_changed",
+            "The requested new tab already exists.",
+          )
+        const tab = create(input.tabId, input.url, undefined, owner.sessionId)
+        publish(input.tabId, tab)
+        return item(input.tabId, tab)
+      }
+      if (input.action === "target") {
+        const id =
+          input.tabId ??
+          activeTabId ??
+          (tabs.size === 1 ? tabs.keys().next().value : undefined)
+        const tab = id === undefined ? undefined : tabs.get(id)
+        if (!id || !tab || tab.view.webContents.isDestroyed())
+          throw new BrowserControlError(
+            "browser_target_changed",
+            "Select an existing tab or provide its tabId.",
+          )
+        return item(id, tab)
+      }
+      if (input.action === "download_target")
+        return { target: downloads.targetFor(input.downloadId, owner) }
       if (input.action === "list") {
         const current = [...tabs].filter(
           ([, tab]) => !tab.view.webContents.isDestroyed(),
@@ -594,23 +710,11 @@ export function registerWorkspaceBrowser(
           if (!entry)
             throw new Error("Browser catalog index changed synchronously.")
           const [tabId, tab] = entry
-          const url = tab.view.webContents.getURL(),
-            title = tab.view.webContents.getTitle()
-          const item = {
-            target: {
-              tabId,
-              webContentsId: tab.view.webContents.id,
-              instanceId: tab.instanceId,
-            },
-            url: url.slice(0, 8192),
-            title: title.slice(0, 2048),
-            metadataTruncated: url.length > 8192 || title.length > 2048,
-            loading: tab.view.webContents.isLoadingMainFrame(),
-          }
-          const size = Buffer.byteLength(JSON.stringify(item))
+          const row = item(tabId, tab)
+          const size = Buffer.byteLength(JSON.stringify(row))
           // Bound one catalog reply while keeping later targets reachable.
           if (bytes + size > 256 * 1024) break
-          listed.push(item)
+          listed.push(row)
           bytes += size
         }
         return {
@@ -619,13 +723,14 @@ export function registerWorkspaceBrowser(
         }
       }
       const { target } = input
+      const key = target.tabId
+      const current = connections.get(key)
+      if (current && (!sameOwner(current.owner, owner) || current.busy))
+        throw new BrowserControlError(
+          "browser_busy",
+          "This browser tab has an active owner or request.",
+        )
       if ("downloadId" in input) {
-        const current = connections.get(ownerKey(owner))
-        if (current?.busy)
-          throw new BrowserControlError(
-            "browser_busy",
-            "The owning browser request is still settling.",
-          )
         if (current) current.busy = true
         try {
           // A completed file remains owned even after its original tab closes.
@@ -641,6 +746,7 @@ export function registerWorkspaceBrowser(
                 target,
                 owner,
                 signal,
+                input.timeoutMs,
               )
               break
             case "download_cancel":
@@ -678,23 +784,104 @@ export function registerWorkspaceBrowser(
           "browser_target_changed",
           "The listed browser tab closed or was replaced. List targets again.",
         )
-      if (loads.has(target.instanceId))
+      if (input.action === "console")
+        return { target, ...tab.telemetry.console(input.offset) }
+      if (
+        input.action === "network" &&
+        !isBrowserNavigation(tab.view.webContents.getURL())
+      ) {
+        if (input.requestId)
+          throw new BrowserControlError(
+            "browser_request_stale",
+            "The tab has no active network connection.",
+          )
+        return { target, entries: [] }
+      }
+      if (loads.has(target.instanceId) && input.action !== "wait")
         throw new BrowserControlError(
           "browser_busy",
           "An agent navigation is still settling for this target.",
         )
-      if (input.action === "show") {
-        const current = connections.get(ownerKey(owner))
-        if (
-          current?.busy ||
-          [...connections.values()].some(
-            (entry) =>
-              entry !== current && entry.targetId === target.instanceId,
+      if (
+        input.action === "wait" &&
+        (input.until === "load" || input.until === "url")
+      ) {
+        const deadline = performance.now() + (input.timeoutMs ?? 5000)
+        const contents = tab.view.webContents
+        const value = input.value ?? ""
+        let pattern: RegExp | undefined
+        if (input.regex) {
+          const unescaped = value.replace(/\\[.*+?^${}()[\]|/\\-]/g, "x")
+          if (
+            /[()[\]{}|\\]/.test(unescaped) ||
+            (unescaped.match(/[*+?]/g)?.length ?? 0) > 1
           )
+            throw new BrowserControlError(
+              "invalid_arguments",
+              "URL wait regex accepts anchors, literals, escaped punctuation, dots and one quantifier.",
+            )
+          try {
+            pattern = new RegExp(value)
+          } catch {
+            throw new BrowserControlError(
+              "invalid_arguments",
+              "Invalid URL wait regex.",
+            )
+          }
+        }
+        do {
+          signal.throwIfAborted()
+          if (tabs.get(target.tabId) !== tab || contents.isDestroyed())
+            throw new BrowserControlError(
+              "browser_target_changed",
+              "The tab closed during the wait.",
+            )
+          const url = contents.getURL()
+          if (
+            input.until === "load"
+              ? !contents.isLoadingMainFrame()
+              : pattern
+                ? pattern.test(url.slice(0, 8192))
+                : url.includes(value)
+          )
+            return { target, matched: true, url }
+          await delay(100, undefined, { signal })
+        } while (performance.now() < deadline)
+        return { target, matched: false, timedOut: true }
+      }
+      if (
+        input.action === "back" ||
+        input.action === "forward" ||
+        input.action === "reload" ||
+        input.action === "stop"
+      ) {
+        const contents = tab.view.webContents
+        if (contents.getURL() !== input.fromUrl)
+          throw new BrowserControlError(
+            "browser_target_changed",
+            "The browser URL changed before navigation.",
+          )
+        current?.connection.assertInputIdle()
+        signal.throwIfAborted()
+        const history = contents.navigationHistory
+        if (
+          (input.action === "back" && !history.canGoBack()) ||
+          (input.action === "forward" && !history.canGoForward())
         )
+          return { target, dispatched: false, url: contents.getURL() }
+        tab.navigation++
+        if (input.action === "back") history.goBack()
+        else if (input.action === "forward") history.goForward()
+        else if (input.action === "reload") contents.reload()
+        else contents.stop()
+        return { target, dispatched: true, url: contents.getURL() }
+      }
+      if (input.action === "show" || input.action === "close") {
+        viewRequests.assertIdle()
+        if (showing)
           throw new BrowserControlError(
             "browser_busy",
-            "This browser target has an active owner or request.",
+            "A workspace display request is still settling.",
           )
         current?.connection.assertInputIdle()
         const isCurrent = () =>
@@ -707,6 +894,10 @@ export function registerWorkspaceBrowser(
             "browser_target_changed",
             "The browser source URL changed before displaying it.",
           )
+        if (input.action === "close") {
+          closeTab(target.tabId, tab)
+          return { target, closed: true }
+        }
         showing = true
         try {
           await viewRequests.show(target.tabId, owner, isCurrent, signal)
@@ -715,9 +906,10 @@ export function registerWorkspaceBrowser(
               "browser_target_changed",
               "The browser target changed during its display request.",
             )
-          let visible = true
+          activeTabId = target.tabId
+          let visible = isBrowserNavigation(input.fromUrl)
           try {
-            await waitForView(target.tabId, tab, signal)
+            if (visible) await waitForView(target.tabId, tab, signal)
           } catch (cause) {
             if (
               !(cause instanceof BrowserControlError) ||
@@ -742,18 +934,7 @@ export function registerWorkspaceBrowser(
             "invalid_arguments",
             "Use an HTTP(S) destination without credentials.",
           )
-        const current = connections.get(ownerKey(owner))
-        if (
-          current?.busy ||
-          [...connections.values()].some(
-            (entry) =>
-              entry !== current && entry.targetId === target.instanceId,
-          )
-        )
-          throw new BrowserControlError(
-            "browser_busy",
-            "This browser target has an active owner or request.",
-          )
+        current?.connection.assertInputIdle()
         const contents = tab.view.webContents
         const assertCurrent = () => {
           signal.throwIfAborted()
@@ -769,9 +950,20 @@ export function registerWorkspaceBrowser(
             )
         }
         assertCurrent()
-        const previous = connections.get(ownerKey(owner))
-        if (previous) await closeConnection(ownerKey(owner), previous)
-        assertCurrent()
+        const navigationEntry =
+          current ??
+          (tab.ownerSessionId && isBrowserNavigation(contents.getURL())
+            ? claimConnection(target.tabId, tab, owner, true)
+            : undefined)
+        if (navigationEntry) {
+          navigationEntry.busy = true
+          try {
+            await navigationEntry.connection.enableNetwork(signal)
+            assertCurrent()
+          } finally {
+            navigationEntry.busy = false
+          }
+        }
         const navigation = ++tab.navigation
         tab.requestedUrl = input.url
         delete tab.error
@@ -784,6 +976,18 @@ export function registerWorkspaceBrowser(
           )
             contents.stop()
         }
+        const onPreventUnload = (event: Electron.Event) => {
+          // Electron can still veto after the matching CDP dialog was
+          // accepted. Never override an unarmed or mismatched unload.
+          if (
+            !signal.aborted &&
+            tab.navigation === navigation &&
+            contents.getURL() === input.fromUrl &&
+            navigationEntry?.connection.allowNavigationUnload(input.fromUrl)
+          )
+            event.preventDefault()
+        }
+        contents.on("will-prevent-unload", onPreventUnload)
         signal.addEventListener("abort", cancel, { once: true })
         loads.add(target.instanceId)
         try {
@@ -816,23 +1020,12 @@ export function registerWorkspaceBrowser(
             )
           throw cause
         } finally {
+          contents.off("will-prevent-unload", onPreventUnload)
           signal.removeEventListener("abort", cancel)
           loads.delete(target.instanceId)
         }
       }
-      const key = ownerKey(owner)
-      let entry = connections.get(key)
-      if (
-        entry?.busy ||
-        [...connections.values()].some(
-          (current) =>
-            current !== entry && current.targetId === target.instanceId,
-        )
-      )
-        throw new BrowserControlError(
-          "browser_busy",
-          "This browser target already has an active owner or request.",
-        )
+      let entry = current
       if (
         entry &&
         (entry.targetId !== target.instanceId || entry.connection.closed)
@@ -849,6 +1042,9 @@ export function registerWorkspaceBrowser(
         !entry &&
         input.action !== "observe" &&
         input.action !== "capture" &&
+        input.action !== "text" &&
+        input.action !== "wait" &&
+        input.action !== "network" &&
         input.action !== "frames"
       )
         throw new BrowserControlError(
@@ -856,20 +1052,7 @@ export function registerWorkspaceBrowser(
           "Observe this target in the current turn before typing.",
         )
       if (!entry) {
-        entry = {
-          owner,
-          targetId: target.instanceId,
-          contents: tab.view.webContents,
-          connection: new BrowserDocumentConnection(
-            tab.view.webContents,
-            (signal) => waitForView(target.tabId, tab, signal),
-          ),
-          busy: false,
-        }
-        connections.set(key, entry)
-        // Agent key events belong to the page. App menu accelerators and the
-        // renderer's workspace shortcuts resume only after confirmed cleanup.
-        entry.contents.setIgnoreMenuShortcuts(true)
+        entry = claimConnection(key, tab, owner, input.action === "network")
       }
       entry.busy = true
       let observation: JsonObject
@@ -892,6 +1075,7 @@ export function registerWorkspaceBrowser(
             )
             break
           case "dialog_arm":
+          case "dialog_answer":
           case "dialog_inspect":
           case "dialog_disarm":
             observation = await entry.connection.dialog(input, signal)
@@ -907,6 +1091,39 @@ export function registerWorkspaceBrowser(
               signal,
             )
             break
+          case "text":
+            observation = await entry.connection.text(input, signal)
+            break
+          case "network":
+            observation = await entry.connection.network(
+              input.offset,
+              input.requestId,
+              signal,
+            )
+            break
+          case "file_target":
+            observation = await entry.connection.fileTarget(
+              input.reference,
+              signal,
+            )
+            break
+          case "wait": {
+            if (input.until === "load" || input.until === "url")
+              throw new Error("Workspace wait was not dispatched.")
+            const deadline = performance.now() + (input.timeoutMs ?? 5000)
+            let matched = false
+            do {
+              matched = await entry.connection.matchesWait(
+                input.until,
+                input.value ?? "",
+                signal,
+              )
+              if (matched) break
+              await delay(100, undefined, { signal })
+            } while (performance.now() < deadline)
+            observation = { matched, timedOut: !matched }
+            break
+          }
           case "capture":
             observation = await entry.connection.capture(input, signal)
             break
@@ -914,6 +1131,7 @@ export function registerWorkspaceBrowser(
             observation = await entry.connection.observe(
               signal,
               input.frameReference,
+              input,
             )
             break
           case "press":

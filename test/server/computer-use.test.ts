@@ -19,7 +19,7 @@ afterEach(async () => {
 })
 
 async function fixture(
-  toolName = "control",
+  toolName = "observe",
   permissions = { accessibility: true, screenRecording: true },
 ) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-computer-"))
@@ -36,8 +36,10 @@ async function fixture(
       const result = request.method === "initialize"
         ? {protocolVersion: request.params.protocolVersion, capabilities: {tools: {}}, serverInfo: {name: "test-computer", version: "1"}}
         : request.method === "tools/call"
-          ? {content: [], structuredContent: ${JSON.stringify(permissions)}}
-          : {tools: [{name: ${JSON.stringify(toolName)}, inputSchema: {type:"object"}}, {name:"turn_ended",inputSchema:{type:"object"}}]};
+          ? request.params.name === "internal" && ["status", "permissions"].includes(request.params.arguments.action)
+            ? {content: [], structuredContent: ${JSON.stringify(permissions)}}
+            : {content: [], isError: true}
+          : {tools: [${JSON.stringify(toolName)}, "input", "app", "internal"].map(name => ({name, annotations: {readOnlyHint: name === "observe"}, inputSchema: {type:"object"}}))};
       process.stdout.write(JSON.stringify({jsonrpc:"2.0", id:request.id, result}) + "\\n");
     });`,
     { mode: 0o755 },
@@ -62,7 +64,7 @@ describe("computer use connection", () => {
     expect(connected).toMatchObject({
       available: true,
       connected: true,
-      tools: ["control"],
+      tools: ["observe", "input", "app"],
     })
     expect(JSON.stringify(connected)).not.toContain("codex")
     const reloaded = createUserConfigStore({ configPath })
@@ -70,12 +72,12 @@ describe("computer use connection", () => {
     expect(saved.baseInstructions).toBe("preserve this")
     expect(saved.mcpServers?.computer).toMatchObject({
       enabled: true,
-      enabledTools: ["control"],
+      enabledTools: ["observe", "input", "app"],
       args: ["--mcp"],
     })
     expect(await readComputerUseStatus(reloaded, options)).toMatchObject({
       connected: true,
-      tools: ["control"],
+      tools: ["observe", "input", "app"],
     })
     expect(await disconnectComputerUse(reloaded, options)).toMatchObject({
       connected: false,
@@ -86,7 +88,7 @@ describe("computer use connection", () => {
   })
 
   it("reports a connected helper with missing OS access without claiming it is ready", async () => {
-    const { config, options } = await fixture("control", {
+    const { config, options } = await fixture("observe", {
       accessibility: false,
       screenRecording: true,
     })
@@ -111,7 +113,7 @@ describe("computer use connection", () => {
     await connectComputerUse(config, options)
     await config.writeValue({
       keyPath: ["mcp_servers", "computer", "disabled_tools"],
-      value: ["control"],
+      value: ["input"],
     })
     expect(await readComputerUseStatus(config, options)).toMatchObject({
       connected: false,

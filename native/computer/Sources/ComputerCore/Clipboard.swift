@@ -49,22 +49,25 @@ private final class PasteReadReceipt: NSObject, NSPasteboardItemDataProvider, @u
     var wasRead: Bool { lock.withLock { supplied } }
 }
 
-@MainActor func withPasteContent<T>(_ item: NSPasteboardItem, board: NSPasteboard = .general, body: () async throws -> T) async throws -> T {
+@MainActor func withPasteContent<T>(_ item: NSPasteboardItem, board: NSPasteboard = .general,
+    onSkippedFormats: ([String]) -> Void = { _ in }, body: () async throws -> T) async throws -> T {
     let resource = try await NativeResources.acquire(["clipboard"])
     defer { withExtendedLifetime(resource) {} }
     let originalRevision = board.changeCount
-    let previous = try (board.pasteboardItems ?? []).map { original in
+    var skipped = Set<String>()
+    let previous = try (board.pasteboardItems ?? []).compactMap { original -> NSPasteboardItem? in
         let copy = NSPasteboardItem()
         for type in original.types {
             // Pasteboard advertises this derived encoding even when it cannot
             // materialize it. Preserving canonical UTF-8 recreates conversion.
             if type.rawValue == "public.utf16-external-plain-text", original.data(forType: type) == nil,
                original.data(forType: .string) != nil { continue }
-            guard let data = original.data(forType: type), copy.setData(data, forType: type) else {
+            guard let data = original.data(forType: type) else { skipped.insert(type.rawValue); continue }
+            guard copy.setData(data, forType: type) else {
                 throw ComputerFailure("clipboard_failed", "The existing clipboard format \(type.rawValue) could not be preserved; no paste was issued.")
             }
         }
-        return copy
+        return copy.types.isEmpty ? nil : copy
     }
     var values: [NSPasteboard.PasteboardType: Data] = [:]
     for type in item.types {
@@ -75,6 +78,7 @@ private final class PasteReadReceipt: NSObject, NSPasteboardItemDataProvider, @u
     let promised = NSPasteboardItem()
     guard promised.setDataProvider(receipt, forTypes: Array(values.keys)) else { throw ComputerFailure("clipboard_failed", "Could not prepare the paste read receipt.") }
     guard board.changeCount == originalRevision else { throw ComputerFailure("clipboard_changed", "Another writer changed the clipboard while preserving it; no paste was issued.") }
+    if !skipped.isEmpty { onSkippedFormats(skipped.sorted()) }
     board.clearContents()
     guard board.writeObjects([promised]) else {
         board.clearContents()

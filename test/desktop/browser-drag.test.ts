@@ -10,7 +10,7 @@ const target = {
   webContentsId: 17,
   instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
 }
-const reference = "browser_element_00000000-0000-4000-8000-000000000001"
+const reference = "e1"
 const dragId = "browser_drag_00000000-0000-4000-8000-000000000001"
 
 function fixture() {

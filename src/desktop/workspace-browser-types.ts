@@ -6,6 +6,9 @@ export type WorkspaceBrowserState = Readonly<{
   canGoBack: boolean
   canGoForward: boolean
   error?: string
+  openerTabId?: string
+  ownerSessionId?: string
+  closed?: boolean
 }>
 
 export type WorkspaceBrowserSelection = Readonly<{

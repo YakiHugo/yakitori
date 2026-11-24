@@ -10,12 +10,7 @@ import {
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
 import { isJsonObject } from "../protocol/json.ts"
-import { plainToolName } from "../runtime/tools/tool-name.ts"
-import type {
-  RuntimeTool,
-  ToolExecutionContext,
-  ToolFailure,
-} from "../runtime/tools/types.ts"
+import type { RuntimeTool } from "../runtime/tools/types.ts"
 
 function parse(input: unknown) {
   if (
@@ -98,55 +93,15 @@ async function snapshotDownload(
   }
 }
 
-export function createBrowserDownloadTool(
+export function createBrowserDownload(
   browser: DesktopBrowser,
-  admit: (context: ToolExecutionContext) => Promise<ToolFailure | undefined>,
-  markCleanupPending: (context: ToolExecutionContext) => void,
-): RuntimeTool {
+): Pick<RuntimeTool, "execute"> {
   return {
-    toolName: plainToolName("browser_download"),
-    description:
-      "Capture the next download from an exact Yakitori browser tab, including its frames. First observe the tab, then arm with target and its root document fromUrl; optional url restricts the initial URL before redirects (HTTP(S), blob or data). Arming supplies no file and does not trigger a download: use browser_input on the page's download control. HTTP navigation can itself start a download: if navigation reports unconfirmed, inspect this download ID before considering another page action. The rule accepts at most one download from that tab; root document replacement expires an unconsumed rule; same-document history changes preserve it. While a download rule is armed, mismatched or additional downloads from that tab are cancelled rather than opening an OS save picker. Tabs without a download rule keep their normal handling, including during read-only observation. status returns native state/byte counters and bounded, untrusted filename/URL metadata. wait waits up to ten seconds and may return an ongoing transfer; cancellation of a wait leaves the download owned. cancel waits for Chromium's terminal acknowledgement before removing scratch files. collect persists a completed file in this rollout's immutable attachment area and returns its path/reference, byteLength and SHA-256; use normal file tools to read or copy it to a user destination. It never writes a website-selected name to a user directory. Safety boundaries: sixteen retained jobs per host, one retained job per tab and four per owning turn, 64MiB artifact-memory/observed-transfer cutoff. Native progress events can lag disk writes, so the transfer stop is not an exact disk quota. Changing the current browser target preserves an already armed or captured download; ending the turn cancels captured unfinished transfers and removes remaining scratch data. Cancelling an unconsumed rule disarms capture rather than undoing the page action that might trigger it. Download IDs belong to the original target and turn. Normal command approval and shared computer ownership apply to every action. Unknown native cancellation completion keeps all computer input quarantined; never repeat the page click to retry collection.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["action", "target"],
-      properties: {
-        action: {
-          type: "string",
-          enum: ["arm", "status", "wait", "cancel", "collect"],
-        },
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["tabId", "webContentsId", "instanceId"],
-          properties: {
-            tabId: { type: "string" },
-            webContentsId: { type: "integer", minimum: 1 },
-            instanceId: { type: "string" },
-          },
-        },
-        fromUrl: { type: "string", maxLength: 8192 },
-        url: { type: "string", maxLength: 8192 },
-        downloadId: { type: "string" },
-      },
-    },
-    effect: "mutate",
-    exposure: "deferred",
-    supportsParallelToolCalls: false,
-    approvalRequirement: {
-      kind: "approval",
-      action: "command_execution",
-      subject:
-        "Capture or collect a file downloaded by the connected desktop browser",
-    },
     async execute(input, context) {
       context.signal?.throwIfAborted()
       let savedFile: JsonObject | undefined
       try {
-        const request = parse(input),
-          refusal = await admit(context)
-        if (refusal) return refusal
+        const request = parse(input)
         if (!context.threadId || !context.turnId)
           throw new Error(
             "Browser downloads require an owning session and turn.",
@@ -220,7 +175,6 @@ export function createBrowserDownloadTool(
         }
       } catch (cause) {
         if (!(cause instanceof BrowserControlError)) throw cause
-        if (cause.code === "browser_cleanup_failed") markCleanupPending(context)
         const message = savedFile
           ? `${cause.message} The completed file is already saved at ${savedFile.path}; do not download it again.`
           : cause.message

@@ -12,6 +12,9 @@ function record(value: unknown): value is Record<string, unknown> {
 // Child CDP lifetimes and configuration belong to the connection, independently
 // of the document references created by an individual frame observation.
 export class BrowserFrameSessions {
+  readonly #frameChanges = new Set<
+    (method: string, params: unknown, sessionId?: string) => void
+  >()
   #retired = new Set<(sessionId: string) => void>()
   readonly #debug: WebContents["debugger"]
   #enabled = false
@@ -31,6 +34,19 @@ export class BrowserFrameSessions {
     params: unknown,
     parentSessionId?: string,
   ) => {
+    if (
+      [
+        "Page.frameAttached",
+        "Page.frameNavigated",
+        "Page.frameDetached",
+        "Page.navigatedWithinDocument",
+        "Target.attachedToTarget",
+        "Target.detachedFromTarget",
+      ].includes(method)
+    ) {
+      for (const listener of this.#frameChanges)
+        listener(method, params, parentSessionId)
+    }
     if (
       !this.#enabled ||
       !["Target.attachedToTarget", "Target.detachedFromTarget"].includes(method)
@@ -88,6 +104,13 @@ export class BrowserFrameSessions {
     }
   }
 
+  onFrameChange(
+    listener: (method: string, params: unknown, sessionId?: string) => void,
+  ): () => void {
+    this.#frameChanges.add(listener)
+    return () => this.#frameChanges.delete(listener)
+  }
+
   close(): void {
     this.#enabled = false
     for (const session of this.#sessions.values())
@@ -100,6 +123,7 @@ export class BrowserFrameSessions {
     this.#sessions.clear()
     this.#configured.clear()
     this.#retired.clear()
+    this.#frameChanges.clear()
     this.#debug.off("message", this.#message)
   }
 
@@ -193,6 +217,7 @@ export class BrowserFrameSessions {
     }
     if (!this.#configured.has("")) {
       await command("Target.setAutoAttach", autoAttach)
+      if (!this.#overflow) await command("Page.enable")
       this.#configured.add("")
     }
     // New nested sessions arrive before their parent's configuration ack.
@@ -206,6 +231,8 @@ export class BrowserFrameSessions {
           autoAttach,
           sessionId,
         )
+        if (this.#sessions.has(sessionId))
+          await this.#sessionCommand(command, "Page.enable", {}, sessionId)
         if (this.#sessions.has(sessionId)) this.#configured.add(sessionId)
       }
     }

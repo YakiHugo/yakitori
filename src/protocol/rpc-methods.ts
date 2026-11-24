@@ -262,6 +262,7 @@ export type RpcMethodParams = Readonly<
       "computer/connect": Readonly<Record<string, never>>
       "computer/disconnect": Readonly<Record<string, never>>
       "computer/takeover": Readonly<Record<string, never>>
+      "browser/takeover": Readonly<{ tabId: string }>
       "computer/preview/catalog": Readonly<{ viewerId: string }>
       "computer/preview/capture": Readonly<{
         viewerId: string
@@ -344,6 +345,7 @@ export type RpcMethodResponses = Readonly<
       "computer/connect": ComputerUseStatus
       "computer/disconnect": ComputerUseStatus
       "computer/takeover": ComputerUseStatus
+      "browser/takeover": Readonly<Record<string, never>>
       "computer/preview/catalog": ComputerPreviewCatalog
       "computer/preview/capture": ComputerPreviewFrame
       "computer/preview/stop": Readonly<Record<string, never>>

@@ -21,7 +21,7 @@ it.each([
     input: {
       action: ["drag_drop"],
       target,
-      reference: "browser_element_00000000-0000-4000-8000-000000000002",
+      reference: "e2",
       dragId: "browser_drag_00000000-0000-4000-8000-000000000003",
     },
   },

@@ -1,8 +1,62 @@
 import { spawn } from "node:child_process"
+import { execFile } from "node:child_process"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { promisify } from "node:util"
 import { expect, test } from "@playwright/test"
+
+test("managed tabs preserve popup openers and armed unload during slow navigation", async () => {
+  test.skip(
+    process.platform !== "darwin",
+    "Native Chromium widget acceptance runs on macOS.",
+  )
+  const root = await mkdtemp(join(tmpdir(), "yakitori-browser-workspace-"))
+  try {
+    const { build } = await import("vite")
+    await writeFile(join(root, "package.json"), '{"type":"module"}')
+    await build({
+      configFile: false,
+      publicDir: false,
+      logLevel: "silent",
+      build: {
+        ssr: true,
+        outDir: root,
+        emptyOutDir: false,
+        lib: {
+          entry: {
+            "browser-workspace": resolve("src/desktop/workspace-browser.ts"),
+          },
+          formats: ["es"],
+        },
+        rollupOptions: { external: ["electron", /^node:/] },
+      },
+    })
+    const { stdout } = await promisify(execFile)(
+      resolve(
+        "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+      ),
+      [
+        resolve("test/fixtures/browser-workspace-native.cjs"),
+        join(root, "browser-workspace.js"),
+        join(root, "profile"),
+        resolve("src/desktop/preload.cjs"),
+      ],
+      {
+        timeout: 35_000,
+        killSignal: "SIGKILL",
+        env: Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([key]) => key !== "ELECTRON_RUN_AS_NODE",
+          ),
+        ),
+      },
+    )
+    expect(stdout).toContain("BROWSER_WORKSPACE:passed")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test("unfocused embedded Chromium delivers cold clicks without OS focus", async () => {
   test.skip(

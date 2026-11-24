@@ -17,6 +17,7 @@ export const sessionsActivityMethod = "sessions/activity"
 export const sessionQueueChangedMethod = "session/queue/changed"
 export const projectChangedMethod = "project/changed"
 export const mcpStatusChangedMethod = "mcp/statusChanged"
+export const computerStatusChangedMethod = "computer/statusChanged"
 export const providerConfigurationChangedMethod =
   "provider/configuration/changed"
 export const sessionPermissionRequestMethod = "session/permission/request"

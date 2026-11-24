@@ -14,7 +14,7 @@ import {
   parseBrowserCaptureRequest,
 } from "../../src/protocol/desktop-browser.ts"
 import { isJsonObject } from "../../src/protocol/json.ts"
-import { createBrowserCaptureTool } from "../../src/server/browser-capture-tool.ts"
+import { createBrowserScreenshot } from "../../src/server/browser-screenshot.ts"
 
 const target = {
   tabId: "owned",
@@ -262,18 +262,15 @@ it("stores browser pixels as a conversation asset and projects an image without 
     assets = createRolloutAssets(root, {
       withMutationLease: (_id, mutate) => mutate(),
     })
-  const tool = createBrowserCaptureTool(
-    {
-      request: async () => ({
-        imageBase64: bytes.toString("base64"),
-        capture: { mode: "viewport" },
-        target,
-      }),
-      finishTurn: async () => {},
-      closeSession: async () => {},
-    },
-    async () => undefined,
-  )
+  const tool = createBrowserScreenshot({
+    request: async () => ({
+      imageBase64: bytes.toString("base64"),
+      capture: { mode: "viewport" },
+      target,
+    }),
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   try {
     await mkdir(join(root, "rollouts", "rollout_owned"), { recursive: true })
     const result = await tool.execute(input, {
@@ -321,17 +318,14 @@ it("stores browser pixels as a conversation asset and projects an image without 
 
 it("refuses screenshot dispatch for a text-only model", async () => {
   let dispatched = false
-  const tool = createBrowserCaptureTool(
-    {
-      request: async () => {
-        dispatched = true
-        return {}
-      },
-      finishTurn: async () => {},
-      closeSession: async () => {},
+  const tool = createBrowserScreenshot({
+    request: async () => {
+      dispatched = true
+      return {}
     },
-    async () => undefined,
-  )
+    finishTurn: async () => {},
+    closeSession: async () => {},
+  })
   expect(
     await tool.execute(input, {
       workspaceRoot: "/unused",

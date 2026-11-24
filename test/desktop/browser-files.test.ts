@@ -120,9 +120,9 @@ function fixture(mismatch = false, directory = false) {
     clears: () => clears,
     async reference() {
       const observed = await connection.observe(new AbortController().signal),
-        node = (observed.nodes as { elementReference?: string }[])[0]
-      if (!node?.elementReference) throw new Error("Missing file reference")
-      return node.elementReference
+        node = (observed.nodes as { ref?: string }[])[0]
+      if (!node?.ref) throw new Error("Missing file reference")
+      return node.ref
     },
   }
 }

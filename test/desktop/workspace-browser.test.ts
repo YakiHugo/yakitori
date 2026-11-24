@@ -113,6 +113,7 @@ function setup() {
   const webContents = Object.assign(new EventEmitter(), {
     mainFrame,
     send: sent,
+    isDestroyed: () => false,
     getZoomFactor: () => 1,
     focus: vi.fn(),
   })
@@ -776,6 +777,7 @@ it("isolates host menus and workspace shortcuts during agent ownership and resto
         events.emit("detach")
       },
       async sendCommand(method: string) {
+        if (method === "Page.enable" || method === "Network.enable") return {}
         if (method === "Page.getFrameTree")
           return {
             frameTree: {
@@ -865,6 +867,7 @@ it.each([
         events.emit("detach")
       },
       async sendCommand(method: string, params: Record<string, unknown> = {}) {
+        if (method === "Page.enable" || method === "Network.enable") return {}
         if (method === "Page.getFrameTree")
           return {
             frameTree: {
@@ -931,8 +934,7 @@ it.each([
   const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
   if (!target) throw new Error("Missing owned target")
   const observed = await browser.request({ action: "observe", target })
-  const reference = (observed.nodes as { elementReference: string }[])[0]
-    ?.elementReference
+  const reference = (observed.nodes as { ref: string }[])[0]?.ref
   if (!reference) throw new Error("Missing directory reference")
   if (completion === "timeout") vi.useFakeTimers({ toFake: ["performance"] })
   const pending = browser.request(
@@ -1024,6 +1026,7 @@ it.each([
           events.emit("detach")
         },
         async sendCommand(method: string) {
+          if (method === "Page.enable" || method === "Network.enable") return {}
           if (method === "Page.getFrameTree")
             return {
               frameTree: {
@@ -1083,7 +1086,7 @@ it.each([
       ).find((row) => row.target.tabId === "other")?.target
       if (!second) throw new Error("Missing listed second target")
       await browser.request({ action: "observe", target: second })
-      expect(debug.attached).toBe(false)
+      expect(debug.attached).toBe(true)
     }
     const listener: unknown = electron.profile.on.mock.calls.at(-1)?.[1]
     if (typeof listener !== "function")

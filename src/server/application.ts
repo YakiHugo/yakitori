@@ -32,10 +32,7 @@ import {
   type SqliteMateStore,
 } from "../mates/index.ts"
 import { computerUseServerName } from "../protocol/connections.ts"
-import {
-  BrowserControlError,
-  type DesktopBrowser,
-} from "../protocol/desktop-browser.ts"
+import type { DesktopBrowser } from "../protocol/desktop-browser.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
@@ -95,16 +92,9 @@ import {
   type AttachmentUploads,
   createAttachmentUploads,
 } from "./attachment-uploads.ts"
-import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
-import { createBrowserChooserTool } from "./browser-chooser-tool.ts"
-import { createBrowserDialogTool } from "./browser-dialog-tool.ts"
-import { createBrowserDownloadTool } from "./browser-download-tool.ts"
-import { createBrowserDragTool } from "./browser-drag-tool.ts"
-import { createBrowserInputTool } from "./browser-input-tool.ts"
-import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
-import { createBrowserObservationTool } from "./browser-observation-tool.ts"
-import { createBrowserUploadTool } from "./browser-upload-tool.ts"
-import { createBrowserViewTool } from "./browser-view-tool.ts"
+import { createBrowserActTool } from "./browser-act-tool.ts"
+import { createBrowserInspectTool } from "./browser-inspect-tool.ts"
+import { createBrowserWaitTool } from "./browser-wait-tool.ts"
 import {
   type ChatGPTConnections,
   createChatGPTConnections,
@@ -114,6 +104,8 @@ import {
   createChatGPTModelConnections,
 } from "./chatgpt-model-connections.ts"
 import { ComputerControl, type ComputerUseOwner } from "./computer-control.ts"
+import { BrowserControl } from "./browser-control.ts"
+import { computerInternalTool, computerModelTools } from "./computer-use.ts"
 import { ComputerPreviewService } from "./computer-preview.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import {
@@ -460,29 +452,8 @@ export async function createYakitoriApplication(
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
     const computerControl = new ComputerControl()
-    const rawBrowser = options.desktopBrowser
-    const desktopBrowser: DesktopBrowser | undefined = rawBrowser
-      ? {
-          async request(input, owner, signal) {
-            try {
-              return await rawBrowser.request(input, owner, signal)
-            } catch (cause) {
-              // Even a read can close an older connection. Its cleanup failure
-              // must quarantine native input as well as browser mutations.
-              const current = computerControl.owner
-              if (
-                cause instanceof BrowserControlError &&
-                cause.code === "browser_cleanup_failed" &&
-                current?.sessionId === owner.sessionId &&
-                current.turnId === owner.turnId
-              )
-                computerControl.markCleanupPending(current)
-              throw cause
-            }
-          },
-          finishTurn: (owner) => rawBrowser.finishTurn(owner),
-          closeSession: (sessionId) => rawBrowser.closeSession(sessionId),
-        }
+    const desktopBrowser = options.desktopBrowser
+      ? new BrowserControl(options.desktopBrowser)
       : undefined
     if (
       userConfiguration.mcpServers?.[computerUseServerName]?.enabled === false
@@ -1102,38 +1073,6 @@ export async function createYakitoriApplication(
                 : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
         return { ok: false, code: refusal, message, content: message }
       }
-      async function admitBrowser(
-        context: ToolExecutionContext,
-      ): Promise<ToolFailure | undefined> {
-        const configured = (await userConfig.readConfiguration()).mcpServers?.[
-          computerUseServerName
-        ]
-        if (
-          !configured ||
-          configured.enabled === false ||
-          configured.disabledTools?.includes("control") ||
-          (configured.enabledTools !== undefined &&
-            !configured.enabledTools.includes("control"))
-        ) {
-          const message =
-            "Connect computer use before inspecting desktop browser tabs."
-          return {
-            ok: false,
-            code: "computer_disconnected",
-            message,
-            content: message,
-          }
-        }
-        return claimComputer(context)
-      }
-      function markBrowserCleanupPending(context: ToolExecutionContext): void {
-        const owner = computerControl.owner
-        if (
-          owner?.sessionId === stored.metadata.id &&
-          owner.turnId === context.turnId
-        )
-          computerControl.markCleanupPending(owner)
-      }
       const toolRegistry = createToolRegistry([
         ...createTrustedTools(sessionShellEnv, !sideConversation).filter(
           (tool) =>
@@ -1142,44 +1081,9 @@ export async function createYakitoriApplication(
         ),
         ...(desktopBrowser
           ? [
-              createBrowserObservationTool(desktopBrowser, admitBrowser),
-              createBrowserInputTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserUploadTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserViewTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserNavigationTool(desktopBrowser, admitBrowser),
-              createBrowserDownloadTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserDragTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserDialogTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserChooserTool(
-                desktopBrowser,
-                admitBrowser,
-                markBrowserCleanupPending,
-              ),
-              createBrowserCaptureTool(desktopBrowser, admitBrowser),
+              createBrowserInspectTool(desktopBrowser),
+              createBrowserActTool(desktopBrowser),
+              createBrowserWaitTool(desktopBrowser),
             ]
           : []),
       ])
@@ -1200,8 +1104,8 @@ export async function createYakitoriApplication(
                   ),
                 turnEndTools: {
                   [computerUseServerName]: {
-                    name: "turn_ended",
-                    input: () => ({}),
+                    name: computerInternalTool,
+                    input: () => ({ action: "turn_ended" }),
                   },
                 },
                 onBackgroundError: (cause) =>
@@ -1215,14 +1119,19 @@ export async function createYakitoriApplication(
               mapTools: (name, tools) =>
                 name !== computerUseServerName
                   ? tools
-                  : tools.map((tool) => ({
-                      ...tool,
-                      async execute(input, context) {
-                        const refusal = claimComputer(context)
-                        if (refusal) return refusal
-                        return tool.execute(input, context)
-                      },
-                    })),
+                  : tools
+                      .filter((tool) =>
+                        computerModelTools.includes(tool.toolName.name),
+                      )
+                      .map((tool) => ({
+                        ...tool,
+                        supportsParallelToolCalls: false,
+                        async execute(input, context) {
+                          const refusal = claimComputer(context)
+                          if (refusal) return refusal
+                          return tool.execute(input, context)
+                        },
+                      })),
             })
       const mcpManager = mcpExtension?.manager
       mcpManager?.subscribeStatus(() =>
@@ -1408,47 +1317,39 @@ export async function createYakitoriApplication(
               // Cleanup failures also flow through task settlement; retain a
               // rejection handler when no takeover caller is waiting on it.
               void released.promise.catch(() => {})
-              const owner: ComputerUseOwner = {
+              const identity = {
                 sessionId: stored.metadata.id,
                 turnId: input.submissionId,
-                released: released.promise,
-                async interrupt() {
-                  goalRuntime.pauseForInterrupt(
-                    stored.metadata.id,
-                    input.submissionId,
-                  )
-                  await session.endpoints.send({
-                    type: "interrupt",
-                    expectedTurnId: input.submissionId,
-                    reason: "User took over the computer.",
-                  })
-                },
               }
+              const interrupt = async (reason: string) => {
+                goalRuntime.pauseForInterrupt(
+                  stored.metadata.id,
+                  input.submissionId,
+                )
+                await session.endpoints.send({
+                  type: "interrupt",
+                  expectedTurnId: input.submissionId,
+                  reason,
+                })
+              }
+              const owner: ComputerUseOwner = {
+                ...identity,
+                released: released.promise,
+                interrupt: () => interrupt("User took over the computer."),
+              }
+              desktopBrowser?.track(identity, () =>
+                interrupt("User took over the browser tab."),
+              )
               activeComputerTurn = owner
               const releaseComputer = async () => {
                 try {
                   if (computerControl.owner === owner) {
-                    await settleTaskResources(async () => {
-                      const results = await Promise.allSettled([
-                        mcpManager?.finishTurn(),
-                        desktopBrowser?.finishTurn({
-                          sessionId: owner.sessionId,
-                          turnId: owner.turnId,
-                        }),
-                      ])
-                      const errors = results.flatMap((result) =>
-                        result.status === "rejected" ? [result.reason] : [],
-                      )
-                      if (errors.length)
-                        throw new AggregateError(
-                          errors,
-                          "Computer turn cleanup failed.",
-                        )
-                    })
+                    await mcpManager?.finishTurn()
                     computerControl.release(owner)
                   }
                   released.resolve()
                 } catch (cause) {
+                  computerControl.markCleanupPending(owner)
                   released.reject(cause)
                   throw cause
                 } finally {
@@ -1459,7 +1360,20 @@ export async function createYakitoriApplication(
               try {
                 return await task.run(session, execution)
               } finally {
-                await releaseComputer()
+                await settleTaskResources(async () => {
+                  const results = await Promise.allSettled([
+                    releaseComputer(),
+                    desktopBrowser?.finishTurn(identity),
+                  ])
+                  const errors = results.flatMap((result) =>
+                    result.status === "rejected" ? [result.reason] : [],
+                  )
+                  if (errors.length)
+                    throw new AggregateError(
+                      errors,
+                      "Turn input cleanup failed.",
+                    )
+                })
               }
             },
           }
@@ -1480,9 +1394,7 @@ export async function createYakitoriApplication(
           const resourceResults = await Promise.allSettled([
             hookRunner?.dispose(),
           ])
-          // A failed turn cleanup keeps the computer occupied until its owning
-          // Session confirms that both native and browser resources are closed.
-          if (mcpResult.every((result) => result.status === "fulfilled"))
+          if (mcpResult[0]?.status === "fulfilled")
             computerControl.releaseSession(stored.metadata.id)
           const results = [...mcpResult, ...processorResult, ...resourceResults]
           const errors = results.flatMap((result) =>
@@ -1788,6 +1700,9 @@ export async function createYakitoriApplication(
           subscriptionUsage,
           userConfig: routedUserConfig,
           computerControl,
+          ...(desktopBrowser === undefined
+            ? {}
+            : { browserControl: desktopBrowser }),
           ...(computerPreview === undefined ? {} : { computerPreview }),
           availableProviders: modelRouter.namespaces,
           rolloutAssets,

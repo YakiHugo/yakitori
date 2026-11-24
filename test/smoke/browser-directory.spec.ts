@@ -102,11 +102,10 @@ test("directory selection waits for native enumeration and verifies nested relat
         observed.nodes as {
           role?: string
           name?: string
-          elementReference?: string
+          ref?: string
         }[]
       ).find((node) => node.role === "button" && node.name === "Folder")
-      if (!node?.elementReference)
-        throw new Error("Missing exact directory input")
+      if (!node?.ref) throw new Error("Missing exact directory input")
       const receipt = await connection.uploadFiles(
         {
           action: "upload_directory",
@@ -115,7 +114,7 @@ test("directory selection waits for native enumeration and verifies nested relat
             webContentsId: 17,
             instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
           },
-          reference: node.elementReference,
+          reference: node.ref,
           fromUrl: page.url(),
           directory: folder,
           files: expected,
@@ -163,10 +162,10 @@ test("directory selection waits for native enumeration and verifies nested relat
       observed.nodes as {
         role?: string
         name?: string
-        elementReference?: string
+        ref?: string
       }[]
     ).find((node) => node.role === "button" && node.name === "Folder")
-    if (!emptyNode?.elementReference)
+    if (!emptyNode?.ref)
       throw new Error("Missing directory input for empty selection")
     expect(
       await connection.uploadFiles(
@@ -177,7 +176,7 @@ test("directory selection waits for native enumeration and verifies nested relat
             webContentsId: 17,
             instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
           },
-          reference: emptyNode.elementReference,
+          reference: emptyNode.ref,
           fromUrl: page.url(),
           directory: emptyFolder,
           files: [],

@@ -22,6 +22,7 @@ import {
 import { captureBrowserPage } from "./browser-capture.ts"
 import { BrowserFileChooser } from "./browser-chooser.ts"
 import { BrowserDialogs } from "./browser-dialogs.ts"
+import { readBrowserTextPage, scanBrowserControls } from "./browser-dom.ts"
 import { setBrowserDirectory } from "./browser-directory.ts"
 import { BrowserDrag } from "./browser-drag.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
@@ -29,7 +30,7 @@ import { BrowserPageFocus } from "./browser-focus.ts"
 import { BrowserFrames } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import { BrowserPendingMutations } from "./browser-mutations.ts"
-import { BrowserPointerTarget } from "./browser-pointer.ts"
+import { BrowserFramePointer, BrowserPointerTarget } from "./browser-pointer.ts"
 import {
   type BrowserDocumentScope,
   type BrowserFrameReadMethod,
@@ -41,12 +42,19 @@ import {
   verifyBrowserSelection,
 } from "./browser-select.ts"
 import { BrowserFrameSessions } from "./browser-sessions.ts"
+import type { BrowserTelemetry } from "./browser-telemetry.ts"
+import {
+  readBrowserTextControl,
+  setBrowserInputValue,
+} from "./browser-text-input.ts"
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error("Chromium returned invalid browser observation data.")
   return value as Record<string, unknown>
 }
+
+const referenceSequences = new WeakMap<WebContents, number>()
 
 export class BrowserDocumentConnection {
   #closed = false
@@ -57,6 +65,7 @@ export class BrowserDocumentConnection {
     params: Record<string, unknown>
   }>[] = []
   #references = new Map<string, BrowserControlReference>()
+  #mainObservation: BrowserControlReference["document"] | undefined
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
   readonly #sessions: BrowserFrameSessions
@@ -68,6 +77,10 @@ export class BrowserDocumentConnection {
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
   readonly #viewReady: (signal: AbortSignal) => Promise<void>
+  readonly #telemetry: BrowserTelemetry | undefined
+  #recordingNetwork = false
+  readonly #networkMessage = (_event: unknown, method: string, data: unknown) =>
+    this.#telemetry?.receive(method, data)
   readonly #detached = () => {
     this.#closed = true
     this.#lifetime.abort(
@@ -81,6 +94,7 @@ export class BrowserDocumentConnection {
     this.#sessions.close()
     this.#chooser.close()
     this.#dialogs.disconnected()
+    this.#debug.off("message", this.#networkMessage)
   }
 
   constructor(
@@ -88,15 +102,20 @@ export class BrowserDocumentConnection {
     viewReady: (signal: AbortSignal) => Promise<void> = async (signal) => {
       signal.throwIfAborted()
     },
+    options: { telemetry?: BrowserTelemetry; allowBlank?: boolean } = {},
   ) {
     this.#contents = contents
     this.#viewReady = viewReady
+    this.#telemetry = options.telemetry
     this.#mutations = new BrowserPendingMutations(() => contents.isDestroyed())
     const debug = contents.debugger
     this.#debug = debug
     if (
       contents.isDestroyed() ||
-      !/^https?:\/\//.test(contents.getURL()) ||
+      !(
+        /^https?:\/\//.test(contents.getURL()) ||
+        (options.allowBlank && ["", "about:blank"].includes(contents.getURL()))
+      ) ||
       contents.isLoadingMainFrame()
     )
       throw new BrowserControlError(
@@ -124,8 +143,49 @@ export class BrowserDocumentConnection {
     debug.on("detach", this.#detached)
   }
 
+  async enableNetwork(signal: AbortSignal): Promise<void> {
+    if (!this.#telemetry || this.#recordingNetwork) return
+    this.#debug.on("message", this.#networkMessage)
+    try {
+      await this.#read(signal, async (command) => {
+        await command("Page.enable")
+        this.#telemetry?.startNetworkAttachment()
+        await command("Network.enable", {
+          maxTotalBufferSize: 1024 * 1024,
+          maxResourceBufferSize: 64 * 1024,
+        })
+      })
+      this.#recordingNetwork = true
+    } finally {
+      if (!this.#recordingNetwork)
+        this.#debug.off("message", this.#networkMessage)
+    }
+  }
+
+  async network(
+    offset: number | undefined,
+    requestId: string | undefined,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    const telemetry = this.#telemetry
+    if (!telemetry) return { entries: [] }
+    await this.enableNetwork(signal)
+    return this.#read(signal, (command) =>
+      telemetry.network(command, offset, requestId),
+    )
+  }
+
   get closed(): boolean {
     return this.#closed || this.#contents.isDestroyed()
+  }
+
+  #issueReference(): string {
+    const sequence = (referenceSequences.get(this.#contents) ?? 0) + 1
+    referenceSequences.set(this.#contents, sequence)
+    return `e${sequence}`
+  }
+  allowNavigationUnload(fromUrl: string): boolean {
+    return this.#dialogs.allowNavigationUnload(fromUrl)
   }
 
   assertInputIdle(): void {
@@ -225,6 +285,7 @@ export class BrowserDocumentConnection {
     )
     this.#references.clear()
     this.#debug.off("detach", this.#detached)
+    this.#debug.off("message", this.#networkMessage)
     this.#frameCatalog.close()
     this.#sessions.close()
     this.#chooser.close()
@@ -327,9 +388,17 @@ export class BrowserDocumentConnection {
   }
 
   async frames(offset: number, signal: AbortSignal): Promise<JsonObject> {
-    this.#references.clear()
     return this.#read(signal, async (command) => {
-      const { result, root } = await this.#frameCatalog.list(command, offset)
+      const pinned = new Set(
+        [...this.#references.values()].flatMap((reference) =>
+          reference.frame ? [reference.frame.reference] : [],
+        ),
+      )
+      const { result, root } = await this.#frameCatalog.list(
+        command,
+        offset,
+        pinned,
+      )
       if (this.#contents.isDestroyed() || this.#contents.getURL() !== root.url)
         throw new BrowserControlError(
           "browser_target_changed",
@@ -339,11 +408,161 @@ export class BrowserDocumentConnection {
     })
   }
 
+  async text(
+    input: { offset?: number; limit?: number; frameReference?: string },
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    return this.#read(signal, async (command) => {
+      const selection = input.frameReference
+        ? await this.#frameCatalog.resolve(input.frameReference, command)
+        : undefined
+      const sessionId = selection?.frame.sessionId
+      const before =
+        selection?.frame.document ??
+        documentIdentity(await command("Page.getFrameTree"))
+      const world = object(
+        await command(
+          "Page.createIsolatedWorld",
+          {
+            frameId: before.frameId,
+            worldName: "yakitori-browser-observation",
+          },
+          sessionId,
+        ),
+      )
+      if (typeof world.executionContextId !== "number")
+        throw new Error("Missing browser text world.")
+      const offset = input.offset ?? 0
+      const evaluated = object(
+        await command(
+          "Runtime.evaluate",
+          {
+            contextId: world.executionContextId,
+            returnByValue: true,
+            expression: `(${readBrowserTextPage.toString()})(${offset},${input.limit ?? 80})`,
+          },
+          sessionId,
+        ),
+      )
+      const value = object(object(evaluated.result).value)
+      const after = input.frameReference
+        ? (await this.#frameCatalog.resolve(input.frameReference, command))
+            .frame.document
+        : documentIdentity(await command("Page.getFrameTree"))
+      if (
+        before.frameId !== after.frameId ||
+        before.documentId !== after.documentId ||
+        before.url !== after.url
+      )
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The document changed while reading text.",
+        )
+      if (
+        !Array.isArray(value.blocks) ||
+        !value.blocks.every((block) => typeof block === "string")
+      )
+        throw new Error("Invalid browser text blocks.")
+      return {
+        text: value.blocks.join("\n\n"),
+        offset,
+        truncated: value.truncated === true,
+        ...(typeof value.nextOffset === "number"
+          ? { nextOffset: value.nextOffset }
+          : {}),
+      }
+    })
+  }
+
+  async matchesWait(
+    until: "text" | "text_gone" | "ref_or_role",
+    value: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    return this.#read(signal, async (command) => {
+      if (until === "ref_or_role") {
+        const reference = this.#references.get(value)
+        if (!reference && /^e[1-9][0-9]{0,15}$/.test(value)) return false
+        let document: BrowserControlReference["document"]
+        if (reference?.frame) {
+          try {
+            document = (
+              await this.#frameCatalog.resolve(
+                reference.frame.reference,
+                command,
+              )
+            ).frame.document
+          } catch (cause) {
+            if (
+              cause instanceof BrowserControlError &&
+              cause.code === "browser_frame_stale"
+            )
+              return false
+            throw cause
+          }
+        } else document = documentIdentity(await command("Page.getFrameTree"))
+        if (reference && reference.document.documentId !== document.documentId)
+          return false
+        const result = object(
+          await command(
+            "Accessibility.getFullAXTree",
+            {
+              frameId: document.frameId,
+              depth: 8,
+            },
+            reference?.frame?.sessionId,
+          ),
+        )
+        if (!Array.isArray(result.nodes))
+          throw new Error("Missing accessibility nodes during wait.")
+        return result.nodes.some((raw) => {
+          const node = object(raw)
+          return (
+            node.ignored !== true &&
+            (reference
+              ? reference.backendNodeId === node.backendDOMNodeId
+              : node.role !== undefined && object(node.role).value === value)
+          )
+        })
+      }
+      const document = documentIdentity(await command("Page.getFrameTree"))
+      const world = object(
+        await command("Page.createIsolatedWorld", {
+          frameId: document.frameId,
+          worldName: "yakitori-browser-observation",
+        }),
+      )
+      const response = object(
+        await command("Runtime.evaluate", {
+          contextId: world.executionContextId,
+          returnByValue: true,
+          expression: `(() => { const text = document.body?.innerText ?? ""; return { found: text.slice(0, 65536).includes(${JSON.stringify(value)}), complete: text.length <= 65536 }; })()`,
+        }),
+      )
+      const result = object(object(response.result).value)
+      return until === "text"
+        ? result.found === true
+        : result.found === false && result.complete === true
+    })
+  }
+
   async observe(
     signal: AbortSignal,
     frameReference?: string,
+    options: Readonly<{ interactiveOnly?: boolean; scopeRef?: string }> = {},
   ): Promise<JsonObject> {
+    await this.enableNetwork(signal)
+    const scoped = options.scopeRef
+      ? this.#references.get(options.scopeRef)
+      : undefined
+    if (options.scopeRef && !scoped)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "The snapshot scope reference is no longer available.",
+      )
+    frameReference ??= scoped?.frame?.reference
     this.#references.clear()
+    this.#mainObservation = undefined
     const contents = this.#contents
     return this.#read(signal, async (command) => {
       const selected = frameReference
@@ -353,13 +572,64 @@ export class BrowserDocumentConnection {
         selected?.frame.document ??
         documentIdentity(await command("Page.getFrameTree"))
       const root = selected?.root ?? before
-      const { nodes, references, truncated } = browserAccessibility(
+      if (
+        scoped &&
+        (scoped.document.frameId !== before.frameId ||
+          scoped.document.documentId !== before.documentId)
+      )
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "The scope reference belongs to a different document.",
+        )
+      const axTree = object(
         await command(
           "Accessibility.getFullAXTree",
           { frameId: before.frameId, depth: 8 },
           selected?.frame.sessionId,
         ),
+      )
+      const needsDom =
+        Array.isArray(axTree.nodes) &&
+        axTree.nodes.some((raw) => {
+          const node = object(raw)
+          return (
+            node.ignored === true ||
+            (node.role !== undefined &&
+              ["generic", "RootWebArea", "Date", "Time"].includes(
+                String(object(node.role).value),
+              ))
+          )
+        })
+      let dom: Awaited<ReturnType<typeof scanBrowserControls>> = []
+      if (needsDom) {
+        const group = `yakitori_${randomUUID()}`
+        try {
+          dom = await scanBrowserControls(
+            command,
+            before.frameId,
+            group,
+            selected?.frame.sessionId,
+          )
+        } finally {
+          if (!this.closed)
+            await this.#sessions.releaseObjects(
+              group,
+              command,
+              selected?.frame.sessionId,
+            )
+        }
+      }
+      const { nodes, references, outline, truncated } = browserAccessibility(
+        axTree,
         before,
+        () => this.#issueReference(),
+        {
+          ...(options.interactiveOnly === undefined
+            ? {}
+            : { interactiveOnly: options.interactiveOnly }),
+          ...(scoped ? { scopeBackendId: scoped.backendNodeId } : {}),
+          dom,
+        },
       )
       const after = frameReference
         ? (await this.#frameCatalog.resolve(frameReference, command)).frame
@@ -388,6 +658,7 @@ export class BrowserDocumentConnection {
           references.set(token, { ...reference, frame })
       }
       this.#references = references
+      this.#mainObservation = root
       return {
         document: { ...after, url: after.url.slice(0, 8192) },
         ...(frameReference
@@ -397,6 +668,8 @@ export class BrowserDocumentConnection {
             }
           : {}),
         nodes,
+        outline,
+        ...(this.#telemetry ? { consoleErrors: this.#telemetry.errors } : {}),
         truncated,
         depth: 8,
         urlTruncated: after.url.length > 8192,
@@ -422,7 +695,10 @@ export class BrowserDocumentConnection {
           "The browser target closed during capture.",
         )
       const zoom = contents.getZoomFactor()
-      const image = await captureBrowserPage(input, command, zoom)
+      const image =
+        input.mode === "ref"
+          ? await this.#captureReference(input, command, signal, zoom)
+          : await captureBrowserPage(input, command, zoom)
       const after = documentIdentity(await command("Page.getFrameTree"))
       if (
         before.frameId !== after.frameId ||
@@ -444,15 +720,203 @@ export class BrowserDocumentConnection {
     })
   }
 
+  async #captureReference(
+    input: Extract<BrowserCaptureRequest, { mode: "ref" }>,
+    command: BrowserProtocolCommand,
+    signal: AbortSignal,
+    zoom: number,
+  ): Promise<JsonObject> {
+    const reference = this.#references.get(input.reference)
+    if (!reference)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Take a snapshot before capturing an element.",
+      )
+    const group = `yakitori_${randomUUID()}`
+    const address = await this.#verifyDocument(reference, signal)
+    const read: BrowserProtocolCommand = (method, params, sessionId) =>
+      command(method, params, sessionId)
+    const frame = address
+      ? new BrowserFramePointer(address.path, read, read, group)
+      : undefined
+    try {
+      const objectId = await this.#resolveReference(reference, group, signal)
+      const reply = object(
+        await command(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: `function() {
+          if (!(this instanceof Element) || !this.isConnected || this.ownerDocument !== document) return null;
+          const {left, top, right, bottom} = Element.prototype.getBoundingClientRect.call(this);
+          return { left, top, right, bottom, width: innerWidth, height: innerHeight };
+        }`,
+          },
+          reference.frame?.sessionId,
+        ),
+      )
+      const rect = object(reply.result).value
+      if (!rect)
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "The screenshot element no longer exists.",
+        )
+      const { left, top, right, bottom, width, height } = object(rect)
+      if (
+        typeof left !== "number" ||
+        typeof top !== "number" ||
+        typeof right !== "number" ||
+        typeof bottom !== "number" ||
+        typeof width !== "number" ||
+        typeof height !== "number"
+      )
+        throw new Error("Chromium returned no element rectangle.")
+      const x0 = frame ? Math.max(0, left) : left,
+        x1 = frame ? Math.min(width, right) : right
+      const y0 = frame ? Math.max(0, top) : top,
+        y1 = frame ? Math.min(height, bottom) : bottom
+      if (x1 <= x0 || y1 <= y0)
+        throw new BrowserControlError(
+          "browser_capture_size",
+          "The element has no visible area in its document.",
+        )
+      await frame?.prepare(false)
+      const corners = [
+        { x: x0, y: y0 },
+        { x: x1, y: y0 },
+        { x: x0, y: y1 },
+        { x: x1, y: y1 },
+      ]
+      const points = frame
+        ? await Promise.all(corners.map((point) => frame.project(point, false)))
+        : corners
+      const metrics = object(await command("Page.getLayoutMetrics"))
+      const viewport = object(metrics.cssVisualViewport),
+        content = object(metrics.cssContentSize)
+      if (
+        typeof viewport.pageX !== "number" ||
+        typeof viewport.pageY !== "number" ||
+        typeof content.width !== "number" ||
+        typeof content.height !== "number"
+      )
+        throw new Error("Chromium returned no document dimensions.")
+      const x = Math.max(
+        0,
+        Math.min(...points.map((point) => point.x)) + viewport.pageX,
+      )
+      const y = Math.max(
+        0,
+        Math.min(...points.map((point) => point.y)) + viewport.pageY,
+      )
+      const clip = {
+        x,
+        y,
+        width:
+          Math.min(
+            content.width,
+            Math.max(...points.map((point) => point.x)) + viewport.pageX,
+          ) - x,
+        height:
+          Math.min(
+            content.height,
+            Math.max(...points.map((point) => point.y)) + viewport.pageY,
+          ) - y,
+      }
+      if (clip.width <= 0 || clip.height <= 0)
+        throw new BrowserControlError(
+          "browser_capture_size",
+          "The element is outside the captured document.",
+        )
+      const image = await captureBrowserPage(
+        { action: "capture", target: input.target, mode: "clip", clip },
+        command,
+        zoom,
+      )
+      await this.#verifyDocument(reference, signal)
+      return {
+        ...image,
+        capture: {
+          ...object(image.capture),
+          mode: "ref",
+          ref: input.reference,
+        },
+      }
+    } finally {
+      await Promise.all(
+        [
+          ...new Set([reference.frame?.sessionId, ...(frame?.sessions ?? [])]),
+        ].map((sessionId) =>
+          this.#sessions.releaseObjects(
+            group,
+            (method, params, id) => this.#debug.sendCommand(method, params, id),
+            sessionId,
+          ),
+        ),
+      )
+    }
+  }
+
+  async fileTarget(token: string, signal: AbortSignal): Promise<JsonObject> {
+    const reference = this.#references.get(token)
+    if (!reference)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Take a snapshot before selecting a file control.",
+      )
+    const group = `yakitori_${randomUUID()}`
+    const sessionId = reference.frame?.sessionId
+    try {
+      const objectId = await this.#resolveReference(reference, group, signal)
+      const reply = object(
+        await this.#inputReadCommand(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: `function() {
+          if (!(this instanceof Element) || !this.isConnected || this.ownerDocument !== document) return null;
+          const fileInput = this instanceof HTMLInputElement && this.type === 'file';
+          return { fileInput, directory: fileInput && this.webkitdirectory };
+        }`,
+          },
+          signal,
+          sessionId,
+        ),
+      )
+      const value = object(reply.result).value
+      if (!value)
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "The file control no longer exists.",
+        )
+      const { fileInput, directory } = object(value)
+      await this.#verifyDocument(reference, signal)
+      return {
+        fileInput: fileInput === true,
+        directory: directory === true,
+        fromUrl: reference.document.url,
+        ...(reference.frame
+          ? { frameReference: reference.frame.reference }
+          : {}),
+      }
+    } finally {
+      await this.#sessions.releaseObjects(
+        group,
+        (method, params, id) => this.#debug.sendCommand(method, params, id),
+        sessionId,
+      )
+    }
+  }
+
   #consumeReference(
     token: string,
-    kind: BrowserControlReference["kind"],
+    kind: "element" | "text",
   ): BrowserControlReference {
     this.assertInputIdle()
     const reference = this.#references.get(token)
-    this.#references.clear()
     this.#preparedDrag = undefined
-    if (!reference || reference.kind !== kind || this.closed)
+    if (!reference || (kind === "text" && !reference.editable) || this.closed)
       throw new BrowserControlError(
         "browser_reference_stale",
         "Observe this document again before typing or clicking.",
@@ -577,14 +1041,24 @@ export class BrowserDocumentConnection {
   ): Promise<JsonObject> {
     signal.throwIfAborted()
     this.assertInputIdle()
-    if (input.action !== "dialog_arm") {
+    if (input.action === "dialog_disarm" || input.action === "dialog_inspect") {
       if (input.action === "dialog_disarm") {
         await this.#dialogs.disarm()
         return { armed: false }
       }
       return this.#dialogs.inspect()
     }
+    if (!("fromUrl" in input))
+      throw new Error("Missing dialog document binding.")
     const scope = await this.#documentScope(input, signal)
+    if (input.action === "dialog_answer") {
+      return this.#dialogs.answer(
+        scope,
+        input.response,
+        (method, params, sessionId) =>
+          this.#inputCommand(method, params ?? {}, signal, sessionId),
+      )
+    }
     let attempted = false
     try {
       await this.#dialogs.arm(
@@ -688,14 +1162,13 @@ export class BrowserDocumentConnection {
         throw cause
       }
     }
-    this.#references.clear()
     return this.#read(signal, async () => {
       const { scope, backendNodeId } = this.#chooser.inspect()
       await this.#verifyDocument(scope, signal)
       if (backendNodeId === undefined)
         return { armed: true, opened: false, fromUrl: scope.document.url }
       const reference: BrowserControlReference = {
-          kind: "element",
+          editable: false,
           backendNodeId,
           document: scope.document,
           ...(scope.frame ? { frame: scope.frame } : {}),
@@ -727,12 +1200,12 @@ export class BrowserDocumentConnection {
             "The opened HTML file input is no longer available.",
           )
         await this.#verifyDocument(reference, signal)
-        const token = `browser_element_${randomUUID()}`
+        const token = this.#issueReference()
         this.#references.set(token, reference)
         return {
           armed: true,
           opened: true,
-          elementReference: token,
+          ref: token,
           fromUrl: scope.document.url,
           multiple: state.multiple,
           directory: state.directory,
@@ -756,7 +1229,7 @@ export class BrowserDocumentConnection {
       ? await this.#frameCatalog.resolve(
           reference.frame.reference,
           (method, params = {}, sessionId) => {
-            if (method === "Page.getFrameTree")
+            if (method === "Page.getFrameTree" || method === "Page.enable")
               return this.#inputReadCommand(method, params, signal, sessionId)
             if (method === "Target.setAutoAttach")
               return this.#read(
@@ -791,7 +1264,7 @@ export class BrowserDocumentConnection {
   }
 
   async #documentChanged(
-    reference: BrowserControlReference,
+    reference: Pick<BrowserControlReference, "document" | "frame">,
     signal: AbortSignal,
   ): Promise<boolean> {
     try {
@@ -936,16 +1409,7 @@ export class BrowserDocumentConnection {
           objectId,
           returnByValue: true,
           arguments: [{ value: requireFocus }, { value: selectAll }],
-          functionDeclaration: `function(requireFocus, selectAll) {
-            if (!this.isConnected || this.ownerDocument !== document || (requireFocus && this.getRootNode().activeElement !== this) || this.disabled || this.readOnly) return {ok:false};
-            if (!(this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement)) return {ok:false};
-            if (typeof this.selectionStart !== 'number' || typeof this.selectionEnd !== 'number' || this.value.length > 65536) return {ok:false};
-            if (selectAll) {
-              if (this instanceof HTMLInputElement) HTMLInputElement.prototype.select.call(this);
-              else HTMLTextAreaElement.prototype.select.call(this);
-            }
-            return {ok:true,value:this.value,start:this.selectionStart,end:this.selectionEnd};
-          }`,
+          functionDeclaration: readBrowserTextControl.toString(),
         }
         const response = object(
           await (selectAll
@@ -968,13 +1432,38 @@ export class BrowserDocumentConnection {
             "browser_input_unavailable",
             "The exact text control is unavailable, read-only or no longer focused.",
           )
-        return { value: value.value, start: value.start, end: value.end }
+        return {
+          value: value.value,
+          start: value.start,
+          end: value.end,
+          setter: value.setter === true,
+        }
       }
       const before = await read(true, input.action === "fill")
+      const expected =
+        before.value.slice(0, before.start) +
+        input.text +
+        before.value.slice(before.end)
       await verifyDocument()
       signal.throwIfAborted()
       dispatched = true
-      if (input.action === "fill" && input.text === "") {
+      if (before.setter) {
+        const response = object(
+          await command("Runtime.callFunctionOn", {
+            objectId,
+            returnByValue: true,
+            arguments: [{ value: expected }],
+            functionDeclaration: setBrowserInputValue.toString(),
+          }),
+        )
+        if (object(object(response.result).value).applied !== true) {
+          dispatched = false
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            "The input rejected the value for its field type; no text was sent.",
+          )
+        }
+      } else if (input.action === "fill" && input.text === "") {
         if (this.closed)
           throw new BrowserControlError(
             "browser_unavailable",
@@ -1008,10 +1497,6 @@ export class BrowserDocumentConnection {
         )
       await verifyDocument()
       const after = await read(false)
-      const expected =
-        before.value.slice(0, before.start) +
-        input.text +
-        before.value.slice(before.end)
       if (after.value !== expected)
         throw new BrowserControlError(
           "browser_input_unconfirmed",
@@ -1690,125 +2175,218 @@ export class BrowserDocumentConnection {
     signal: AbortSignal,
   ): Promise<JsonObject> {
     signal.throwIfAborted()
-    const reference = this.#consumeReference(input.reference, "element"),
-      group = `yakitori_${randomUUID()}`
+    this.assertInputIdle()
+    const reference = input.reference
+      ? this.#consumeReference(input.reference, "element")
+      : undefined
+    const address =
+      reference ??
+      (this.#mainObservation ? { document: this.#mainObservation } : undefined)
+    if (!address)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Observe this tab before using viewport coordinates or scrolling it.",
+      )
+    const group = `yakitori_${randomUUID()}`
     let pointer: BrowserPointerTarget | undefined
     const verifyDocument = async () => {
-      const frame = await this.#verifyDocument(reference, signal)
+      const frame = await this.#verifyDocument(address, signal)
       if (frame) pointer?.verifyPath(frame.path)
     }
     let dispatched = false,
       result: JsonObject | undefined,
       failure: unknown
     try {
-      const objectId = await this.#resolveReference(reference, group, signal)
-      pointer = await this.#pointerTarget(reference, objectId, group, signal)
-      await pointer.prepareFrames()
-      if (reference.frame) await verifyDocument()
-      const point = await pointer.scrollIntoView()
-      const verifyPoint = () => {
-        if (!pointer) throw new Error("Missing pointer target.")
-        return pointer.verifyPoint(point)
-      }
-      dispatched = input.action === "hover"
-      if (input.action === "click")
-        await this.#pointerFocus.enable((enabled, confirmed) => {
-          if (this.closed)
-            throw new BrowserControlError(
-              "browser_cleanup_failed",
-              "The page focus completion channel disconnected.",
-            )
-          return this.#mutations.run(
-            () =>
-              this.#debug
-                .sendCommand("Emulation.setFocusEmulationEnabled", { enabled })
-                .then((result) => {
-                  confirmed?.()
-                  return result
-                }),
-            this.#mutationDeadline(),
-          )
-        })
-      await this.#inputCommand(
-        "Input.dispatchMouseEvent",
-        {
-          type: "mouseMoved",
-          ...point,
-          buttons: 0,
-        },
-        signal,
-      )
-      await verifyDocument()
-      await pointer.flushLayout()
-      await verifyPoint()
-      await verifyDocument()
-      signal.throwIfAborted()
-      if (this.closed)
-        throw new BrowserControlError(
-          "browser_unavailable",
-          "The owned debugger disconnected.",
-        )
-      if (input.action === "click") {
-        const button = input.button ?? "left"
-        for (
-          let clickCount = 1;
-          clickCount <= (input.clickCount ?? 1);
-          clickCount++
-        ) {
-          // A double click is two intentional press/release pairs. A failed
-          // pair stops the sequence; cleanup never replays a press.
-          await verifyDocument()
-          await verifyPoint()
-          signal.throwIfAborted()
-          if (this.closed)
-            throw new BrowserControlError(
-              "browser_unavailable",
-              "The owned debugger disconnected.",
-            )
-          this.#heldInputs.push({
-            method: "Input.dispatchMouseEvent",
-            params: {
-              type: "mouseReleased",
-              ...point,
-              button,
-              buttons: 0,
-              clickCount,
+      const scrollIntoView = input.action !== "scroll"
+      if (!reference && input.action === "scroll") {
+        await verifyDocument()
+        const world = object(
+          await this.#inputReadCommand(
+            "Page.createIsolatedWorld",
+            {
+              frameId: address.document.frameId,
+              worldName: "yakitori-browser-input",
             },
+            signal,
+          ),
+        )
+        if (typeof world.executionContextId !== "number")
+          throw new Error("Missing viewport input world.")
+        await verifyDocument()
+        dispatched = true
+        await this.#inputCommand(
+          "Runtime.evaluate",
+          {
+            contextId: world.executionContextId,
+            returnByValue: true,
+            expression: `window.scrollBy({left:${input.deltaX},top:${input.deltaY},behavior:'instant'})`,
+          },
+          signal,
+        )
+        result = {
+          delivered: true,
+          action: "scroll",
+          route: "viewport",
+          documentChanged: await this.#documentChanged(address, signal),
+        }
+      } else {
+        if (reference) {
+          const objectId = await this.#resolveReference(
+            reference,
+            group,
+            signal,
+          )
+          pointer = await this.#pointerTarget(
+            reference,
+            objectId,
+            group,
+            signal,
+          )
+          await pointer.prepareFrames(scrollIntoView)
+          if (reference.frame) await verifyDocument()
+        }
+        const viewportPoint = async (point?: { x: number; y: number }) => {
+          const metrics = object(
+            await this.#inputReadCommand("Page.getLayoutMetrics", {}, signal),
+          )
+          const { clientWidth, clientHeight } = object(
+            metrics.cssVisualViewport,
+          )
+          if (
+            typeof clientWidth !== "number" ||
+            typeof clientHeight !== "number" ||
+            clientWidth <= 0 ||
+            clientHeight <= 0
+          )
+            throw new BrowserControlError(
+              "browser_input_unavailable",
+              "The tab has no positive viewport dimensions.",
+            )
+          const next = point ?? { x: clientWidth / 2, y: clientHeight / 2 }
+          if (
+            next.x < 0 ||
+            next.y < 0 ||
+            next.x >= clientWidth ||
+            next.y >= clientHeight
+          )
+            throw new BrowserControlError(
+              "browser_input_unavailable",
+              "The pointer coordinates are outside the current browser viewport.",
+            )
+          return next
+        }
+        const requested =
+          input.x !== undefined && input.y !== undefined
+            ? { x: input.x, y: input.y }
+            : undefined
+        if (!pointer) await verifyDocument()
+        const point = pointer
+          ? await pointer.scrollIntoView(scrollIntoView)
+          : await viewportPoint(requested)
+        const verifyPoint = () =>
+          pointer ? pointer.verifyPoint(point) : viewportPoint(point)
+        dispatched = input.action === "hover"
+        if (input.action === "click")
+          await this.#pointerFocus.enable((enabled, confirmed) => {
+            if (this.closed)
+              throw new BrowserControlError(
+                "browser_cleanup_failed",
+                "The page focus completion channel disconnected.",
+              )
+            return this.#mutations.run(
+              () =>
+                this.#debug
+                  .sendCommand("Emulation.setFocusEmulationEnabled", {
+                    enabled,
+                  })
+                  .then((result) => {
+                    confirmed?.()
+                    return result
+                  }),
+              this.#mutationDeadline(),
+            )
           })
+        await this.#inputCommand(
+          "Input.dispatchMouseEvent",
+          {
+            type: "mouseMoved",
+            ...point,
+            buttons: 0,
+          },
+          signal,
+        )
+        await verifyDocument()
+        await pointer?.flushLayout()
+        await verifyPoint()
+        await verifyDocument()
+        signal.throwIfAborted()
+        if (this.closed)
+          throw new BrowserControlError(
+            "browser_unavailable",
+            "The owned debugger disconnected.",
+          )
+        if (input.action === "click") {
+          const button = input.button ?? "left"
+          for (
+            let clickCount = 1;
+            clickCount <= (input.clickCount ?? 1);
+            clickCount++
+          ) {
+            // A double click is two intentional press/release pairs. A failed
+            // pair stops the sequence; cleanup never replays a press.
+            await verifyDocument()
+            await verifyPoint()
+            signal.throwIfAborted()
+            if (this.closed)
+              throw new BrowserControlError(
+                "browser_unavailable",
+                "The owned debugger disconnected.",
+              )
+            this.#heldInputs.push({
+              method: "Input.dispatchMouseEvent",
+              params: {
+                type: "mouseReleased",
+                ...point,
+                button,
+                buttons: 0,
+                clickCount,
+              },
+            })
+            dispatched = true
+            await this.#inputCommand(
+              "Input.dispatchMouseEvent",
+              {
+                type: "mousePressed",
+                ...point,
+                button,
+                buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
+                clickCount,
+              },
+              signal,
+            )
+            await this.#releaseInput()
+          }
+        } else if (input.action === "scroll") {
           dispatched = true
           await this.#inputCommand(
             "Input.dispatchMouseEvent",
             {
-              type: "mousePressed",
+              type: "mouseWheel",
               ...point,
-              button,
-              buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
-              clickCount,
+              buttons: 0,
+              deltaX: input.deltaX,
+              deltaY: input.deltaY,
             },
             signal,
           )
-          await this.#releaseInput()
         }
-      } else if (input.action === "scroll") {
-        dispatched = true
-        await this.#inputCommand(
-          "Input.dispatchMouseEvent",
-          {
-            type: "mouseWheel",
-            ...point,
-            buttons: 0,
-            deltaX: input.deltaX,
-            deltaY: input.deltaY,
-          },
-          signal,
-        )
-      }
-      const documentChanged = await this.#documentChanged(reference, signal)
-      result = {
-        delivered: true,
-        action: input.action,
-        point,
-        documentChanged,
+        const documentChanged = await this.#documentChanged(address, signal)
+        result = {
+          delivered: true,
+          action: input.action,
+          point,
+          documentChanged,
+        }
       }
     } catch (cause) {
       failure =
@@ -1823,7 +2401,7 @@ export class BrowserDocumentConnection {
     await this.#finishInput(
       group,
       failure,
-      reference.frame?.sessionId,
+      reference?.frame?.sessionId,
       pointer?.sessions,
     )
     if (!result) throw new Error("Browser pointer input produced no result.")

@@ -18,6 +18,10 @@ type FrameTicket = Readonly<{
   root: BrowserDocumentIdentity
   frame: BrowserFrameBinding
 }>
+type FrameSnapshot = {
+  root: BrowserDocumentIdentity
+  frames: Map<string, BrowserFrameBinding>
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -38,6 +42,9 @@ export class BrowserFrames {
   readonly #sessions: BrowserFrameSessions
   #references = new Map<string, FrameTicket>()
   readonly #unsubscribe: () => void
+  readonly #unsubscribeChanges: () => void
+  #cached: FrameSnapshot | undefined
+  #version = 0
 
   constructor(sessions: BrowserFrameSessions) {
     this.#sessions = sessions
@@ -45,18 +52,89 @@ export class BrowserFrames {
       for (const [token, ticket] of this.#references)
         if (ticket.frame.sessionId === sessionId) this.#references.delete(token)
     })
+    this.#unsubscribeChanges = sessions.onFrameChange(
+      (method, params, sessionId) => {
+        this.#version++
+        const cached = this.#cached
+        if (!cached) return
+        if (!record(params)) {
+          this.#cached = undefined
+          return
+        }
+        if (
+          method === "Page.navigatedWithinDocument" &&
+          typeof params.frameId === "string" &&
+          typeof params.url === "string"
+        ) {
+          const known = cached.frames.get(params.frameId)
+          if (!known || known.sessionId !== sessionId) return
+          const document = { ...known.document, url: params.url }
+          cached.frames.set(params.frameId, { ...known, document })
+          if (document.frameId === cached.root.frameId) cached.root = document
+          return
+        }
+        if (
+          method === "Page.frameNavigated" &&
+          record(params.frame) &&
+          typeof params.frame.id === "string" &&
+          typeof params.frame.loaderId === "string" &&
+          typeof params.frame.url === "string"
+        ) {
+          const document = documentIdentity({
+            frameTree: { frame: params.frame },
+          })
+          const known = cached.frames.get(document.frameId)
+          if (
+            known &&
+            known.sessionId === sessionId &&
+            document.frameId !== cached.root.frameId
+          ) {
+            cached.frames.set(document.frameId, {
+              ...known,
+              document,
+              ...(typeof params.frame.parentId === "string"
+                ? { parentId: params.frame.parentId }
+                : {}),
+            })
+            this.#dropDescendants(cached, document.frameId)
+            return
+          }
+        }
+        if (
+          method === "Page.frameDetached" &&
+          typeof params.frameId === "string" &&
+          params.frameId !== cached.root.frameId
+        ) {
+          this.#dropDescendants(cached, params.frameId)
+          cached.frames.delete(params.frameId)
+          return
+        }
+        this.#cached = undefined
+      },
+    )
+  }
+
+  #dropDescendants(snapshot: FrameSnapshot, frameId: string): void {
+    const removed = new Set([frameId])
+    for (const parent of removed)
+      for (const [id, frame] of snapshot.frames)
+        if (frame.parentId === parent) {
+          removed.add(id)
+          snapshot.frames.delete(id)
+        }
   }
 
   close(): void {
     this.#unsubscribe()
+    this.#unsubscribeChanges()
     this.#references.clear()
+    this.#cached = undefined
   }
 
-  async #snapshot(command: BrowserProtocolCommand): Promise<{
-    root: BrowserDocumentIdentity
-    frames: Map<string, BrowserFrameBinding>
-  }> {
+  async #snapshot(command: BrowserProtocolCommand): Promise<FrameSnapshot> {
     await this.#sessions.configure(command)
+    if (this.#cached) return this.#cached
+    const version = this.#version
     const frames = new Map<string, BrowserFrameBinding>()
     const add = (
       value: unknown,
@@ -121,14 +199,22 @@ export class BrowserFrames {
         sessionId,
         parent.parentFrameId,
       )
-    return { root, frames }
+    const snapshot = { root, frames }
+    if (version === this.#version) this.#cached = snapshot
+    return snapshot
   }
 
   async list(
     command: BrowserProtocolCommand,
     offset: number,
+    pinned: Iterable<string> = [],
   ): Promise<{ result: JsonObject; root: BrowserDocumentIdentity }> {
-    this.#references.clear()
+    const retained = new Map<string, FrameTicket>()
+    for (const token of pinned) {
+      const ticket = this.#references.get(token)
+      if (ticket) retained.set(token, ticket)
+    }
+    this.#references = retained
     const snapshot = await this.#snapshot(command)
     const after = documentIdentity(await command("Page.getFrameTree"))
     if (!sameDocument(snapshot.root, after))
@@ -194,6 +280,45 @@ export class BrowserFrames {
       throw new BrowserControlError(
         "browser_frame_stale",
         "The observed frame document, renderer or parent changed. List frames again.",
+      )
+    const version = this.#version
+    const rootTree = await command("Page.getFrameTree")
+    if (!sameDocument(ticket.root, documentIdentity(rootTree)))
+      throw new BrowserControlError(
+        "browser_frame_stale",
+        "The observed main document changed. List frames again.",
+      )
+    const frameTree =
+      frame.sessionId === undefined
+        ? rootTree
+        : await this.#sessions.readInSession(
+            command,
+            "Page.getFrameTree",
+            {},
+            frame.sessionId,
+          )
+    const pending = [record(frameTree) ? frameTree.frameTree : undefined]
+    let confirmed = false
+    for (const entry of pending) {
+      if (!record(entry) || !record(entry.frame)) continue
+      if (entry.frame.id === frame.document.frameId) {
+        confirmed =
+          sameDocument(
+            frame.document,
+            documentIdentity({ frameTree: entry }),
+          ) &&
+          (typeof entry.frame.parentId !== "string" ||
+            entry.frame.parentId === frame.parentId)
+        break
+      }
+      if (Array.isArray(entry.childFrames))
+        for (const child of entry.childFrames) pending.push(child)
+      if (pending.length > 512) break
+    }
+    if (!confirmed || version !== this.#version)
+      throw new BrowserControlError(
+        "browser_frame_stale",
+        "The frame changed during verification. List frames again.",
       )
     const path: BrowserFrameBinding[] = [frame]
     const visited = new Set([frame.document.frameId])

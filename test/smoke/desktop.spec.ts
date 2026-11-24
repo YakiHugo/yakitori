@@ -19,6 +19,7 @@ import {
 } from "../fixtures/computer-preview.ts"
 import {
   createSmokeEnvironment,
+  replaceInlineEditText,
   runBudgetedGoal,
   runConversationHistoryFlow,
   runExternalEngineFlow,
@@ -270,9 +271,7 @@ test("desktop edit and undo replace history in the same session", async ({
       .getByRole("main")
       .getByRole("button", { name: "Edit & resubmit", exact: true })
       .click()
-    await page
-      .getByRole("textbox", { name: "Edit message", exact: true })
-      .fill("Edited desktop prompt")
+    await replaceInlineEditText(page, "Edited desktop prompt")
     await page
       .locator(".conversation-inline-edit")
       .getByRole("button", { name: "Send", exact: true })
@@ -656,1288 +655,289 @@ test("embedded browser selections attach editable excerpts to main and side draf
   }
 })
 
-test("agent browser observations and actions use the exact owned tab through real desktop IPC and approval", async ({
+test("agent creates a tab, batches form input and inspects diagnostics through desktop IPC", async ({
   desktop,
-}, testInfo) => {
-  const { page, application, userData, sidecarUrl, rendererErrors } = desktop
-  // The fixture's Playwright connection must not race the production dialog
-  // responder with its own automatic native dismissal.
-  const ignoreDialog = () => {},
-    bindDialogs = (page: Page) => {
-      page.on("dialog", ignoreDialog)
-    }
-  application.context().on("page", bindDialogs)
-  application.context().pages().forEach(bindDialogs)
+}) => {
+  const { page, sidecarUrl, userData, rendererErrors } = desktop
   const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
-  const observed = Promise.withResolvers<void>(),
-    releaseCompletion = Promise.withResolvers<void>(),
-    failed = Promise.withResolvers<Error>()
-  let modelCalls = 0,
-    thirdRequests = 0,
-    clearKeyUps = 0,
-    frameAfterReady = 0
-  const uploadPath = join(userData, "upload-你好.txt")
-  const uploadText = "Owned upload 你好 🌍\n"
-  const uploadDirectory = join(userData, "folder-你好")
-  const uploadedDirectoryFiles: { path: string; text: string }[][] = []
-  const uploadedFiles: { name: string; text: string }[][] = []
-  const chooserFiles: { name: string; text: string }[][] = []
-  const dialogReplies: { value: boolean; trusted: boolean }[] = []
-  const promptReplies: { value: string | null; trusted: boolean }[] = []
-  const dragReplies: { text: string; trusted: boolean }[] = []
-  const downloadBytes = Buffer.from([0, 255, 1, 2, 3])
-  let downloadArtifact: Record<string, unknown> | undefined
-  const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
-    []
-  const frameSelectEvents: {
-    type: string
-    values: string[]
-    trusted: boolean
-  }[] = []
-  const framePointerEvents: { kind: string; trusted: boolean }[] = []
-  const frameSubmittedValues: (string | null)[] = []
-  let frameAfterObservation: Record<string, unknown> | undefined
-  const frameObservations: Record<string, unknown>[] = []
-  let frameCatalog: {
-    frameReference: string
-    frameId: string
-    url: string
-    main: boolean
-    remote: boolean
-    parentFrameId?: string
-  }[] = []
-  const captureReceipts: Record<string, unknown>[] = []
-  const modelImages = new Set<string>()
-  const keyboardEvents: {
-    type: string
-    key?: string
-    trusted?: boolean
-    meta?: boolean
-    shift?: boolean
-    value?: string
-  }[] = []
-  const pointerEvents: {
-    type: string
-    trusted: boolean
-    button: number
-    detail: number
-    deltaX: number
-    deltaY: number
-    scrollTop: number
-  }[] = []
-  let wantedUrl = "",
-    destinationUrl = "",
-    navigationUrl = ""
-  let observation: Record<string, unknown> | undefined,
-    receipt: Record<string, unknown> | undefined,
-    filledObservation: Record<string, unknown> | undefined,
-    clearedObservation: Record<string, unknown> | undefined,
-    clearReceipt: Record<string, unknown> | undefined,
-    clickedObservation: Record<string, unknown> | undefined,
-    shadowObservation: Record<string, unknown> | undefined,
-    pointerReceipt: Record<string, unknown> | undefined,
-    navigationReceipt: Record<string, unknown> | undefined,
-    navigatedObservation: Record<string, unknown> | undefined,
-    insertion:
-      | {
-          action: "type" | "fill"
-          target: unknown
-          reference: string
-          text: string
-        }
-      | undefined
-  const errors: string[] = []
-  const toolResult = (
-    messages: { role?: string; content?: unknown }[],
-    key: string,
-  ): Record<string, unknown> => {
-    for (const message of [...messages].reverse()) {
-      if (message.role !== "tool" || typeof message.content !== "string")
-        continue
-      let data: unknown
-      try {
-        // Chat appends image provenance markers after this tool's JSON text.
-        data = JSON.parse(message.content.split("\n", 1)[0] ?? "")
-      } catch (cause) {
-        if (cause instanceof SyntaxError) {
-          if (key === "delivered") break
-          continue
-        }
-        throw cause
-      }
-      if (
-        typeof data === "object" &&
-        data !== null &&
-        !Array.isArray(data) &&
-        key in data
-      )
-        return data as Record<string, unknown>
-      if (key === "delivered") break
-    }
-    const last = messages.findLast((message) => message.role === "tool")
-    throw new Error(
-      `Missing browser tool result ${key}: ${String(last?.content).slice(0, 512)}`,
-    )
-  }
-  const textRequest = (
-    observed: Record<string, unknown>,
-    action: "type" | "fill",
-    text: string,
-    name = "Target field",
-  ) => {
-    const field = (
-      observed.nodes as {
-        name: string
-        role: string
-        inputReference?: string
-      }[]
-    ).find((node) => node.name === name && node.role === "textbox")
-    if (!field?.inputReference)
-      throw new Error("Missing exact text control reference")
-    return {
-      action,
-      target: observed.target,
-      reference: field.inputReference,
-      text,
-    }
-  }
-  const pointerRequest = (observed: Record<string, unknown>, name: string) => {
-    const button = (
-      observed.nodes as {
-        role: string
-        name: string
-        elementReference?: string
-      }[]
-    ).find((node) => node.role === "button" && node.name === name)
-    if (!button?.elementReference)
-      throw new Error(`Missing captured browser button ${name}`)
-    return {
-      action: "click",
-      target: observed.target,
-      reference: button.elementReference,
-    }
-  }
-  const framePress = (
-    observed: Record<string, unknown>,
-    kind: string,
-    key: string,
-    modifiers?: string[],
-  ) => {
-    const field = (
-      observed.nodes as {
-        role: string
-        name: string
-        elementReference?: string
-      }[]
-    ).find(
-      (node) => node.role === "textbox" && node.name === `${kind} frame field`,
-    )
-    if (!field?.elementReference)
-      throw new Error("Missing exact frame keyboard reference")
-    return {
-      action: "press",
-      target: observed.target,
-      reference: field.elementReference,
-      key,
-      ...(modifiers ? { modifiers } : {}),
-    }
-  }
+  const failed = Promise.withResolvers<unknown>()
+  const filePath = join(userData, "browser-fixture.txt")
+  await writeFile(filePath, "yakitori upload")
+  const submitted: string[] = []
+  const uploads: string[] = []
+  let formUrl = "",
+    modelCalls = 0,
+    tabId = ""
   const source = createServer((request, response) => {
-    if (
-      request.method === "POST" &&
-      [
-        "/file-bytes",
-        "/file-choice",
-        "/directory-bytes",
-        "/chooser-bytes",
-        "/dialog-reply",
-        "/prompt-reply",
-        "/drag-reply",
-      ].includes(request.url ?? "")
-    ) {
-      let body = ""
-      request.setEncoding("utf8")
-      request.on("data", (chunk: string) => {
-        body += chunk
-      })
-      request.on("end", () => {
-        if (request.url === "/file-bytes") uploadedFiles.push(JSON.parse(body))
-        else if (request.url === "/chooser-bytes")
-          chooserFiles.push(JSON.parse(body))
-        else if (request.url === "/directory-bytes")
-          uploadedDirectoryFiles.push(JSON.parse(body))
-        else if (request.url === "/dialog-reply")
-          dialogReplies.push(JSON.parse(body))
-        else if (request.url === "/prompt-reply")
-          promptReplies.push(JSON.parse(body))
-        else if (request.url === "/drag-reply")
-          dragReplies.push(JSON.parse(body))
-        else fileChoiceEvents.push(JSON.parse(body))
-        response.writeHead(204)
-        response.end()
-      })
+    if (request.url === "/form") {
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(`<!doctype html><title>Agent browser form</title>
+        <style>label{display:block} button{min-height:26px} output{display:block}</style>
+        <label>Name<input id="name"></label>
+        <label>City<input id="city"></label>
+        <label>Size<select id="size"><option value="s">Small</option><option value="l">Large</option></select></label>
+        <button id="submit">Send form</button>
+        <input type="file" id="upload" hidden>
+        <button id="picker">Choose local file</button><output id="result"></output>
+        <div style="display:flex;gap:80px;margin:20px">
+          <button draggable="true" id="source">Drag item</button>
+          <button id="destination">Drop here</button>
+        </div>
+        <a id="download" href="/artifact" download="fixture.txt">Download report</a>
+        <script>
+          const element = (id) => document.getElementById(id);
+          element('submit').onclick = async () => {
+            await fetch('/api', {method:'POST',body:['name','city','size'].map(id=>element(id).value).join('/')});
+            console.error('fixture console error');
+            element('result').textContent = 'Form submitted';
+          };
+          element('picker').onclick = () => element('upload').click();
+          element('upload').onchange = async () => fetch('/file', {method:'POST',body:await element('upload').files[0].text()});
+          element('source').ondragstart = (event) => event.dataTransfer.setData('text/plain', 'dragged');
+          element('destination').ondragover = (event) => event.preventDefault();
+          element('destination').ondrop = (event) => { element('destination').textContent = event.dataTransfer.getData('text/plain'); };
+        </script>`)
       return
     }
-    if (request.method === "POST" && request.url === "/frame-select") {
-      let body = ""
-      request.setEncoding("utf8")
-      request.on("data", (chunk: string) => {
-        body += chunk
-      })
-      request.on("end", () => {
-        frameSelectEvents.push(JSON.parse(body))
-        response.writeHead(204)
-        response.end()
-      })
-      return
-    }
-    if (request.method === "POST" && request.url === "/frame-pointer") {
-      let body = ""
-      request.setEncoding("utf8")
-      request.on("data", (chunk: string) => {
-        body += chunk
-      })
-      request.on("end", () => {
-        framePointerEvents.push(JSON.parse(body))
-        response.writeHead(204)
-        response.end()
-      })
-      return
-    }
-    if (request.method === "POST" && request.url === "/frame-ready") {
-      frameAfterReady++
-      response.writeHead(204)
-      response.end()
-      return
-    }
-    if (request.method === "GET" && request.url?.startsWith("/frame-after")) {
-      frameSubmittedValues.push(
-        new URL(request.url, "http://fixture.test").searchParams.get("field"),
-      )
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-      response.end(
-        `<!doctype html><title>After frame</title><body onload="navigator.sendBeacon('/frame-ready','')"><label>After frame field<input value="submitted"></label><button onclick="navigator.sendBeacon('/dialog-reply',JSON.stringify({trusted:event.isTrusted,value:confirm('Owned confirmation?')}))">Native confirmation</button>`,
-      )
-      return
-    }
-    if (request.method === "POST" && request.url === "/keyboard-event") {
-      let body = ""
-      request.setEncoding("utf8")
-      request.on("data", (chunk: string) => {
-        body += chunk
-      })
-      request.on("end", () => {
-        keyboardEvents.push(JSON.parse(body))
-        response.writeHead(204)
-        response.end()
-      })
-      return
-    }
-    if (request.method === "POST" && request.url === "/pointer-event") {
-      let body = ""
-      request.setEncoding("utf8")
-      request.on("data", (chunk: string) => {
-        body += chunk
-      })
-      request.on("end", () => {
-        pointerEvents.push(JSON.parse(body))
-        response.writeHead(204)
-        response.end()
-      })
-      return
-    }
-    if (request.method === "POST" && request.url === "/key-up") {
-      clearKeyUps++
-      response.writeHead(204)
-      response.end()
-      return
-    }
-    if (request.method === "GET" && request.url?.startsWith("/frame-")) {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-      const kind =
-        request.url === "/frame-local"
-          ? "Local"
-          : request.url === "/frame-remote"
-            ? "Remote"
-            : "Nested"
-      response.end(
-        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label><label>Remote files<input type="file" multiple oninput="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}))" onchange="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}));if(this.files.length)Promise.all(Array.from(this.files,async file=>({name:file.name,text:await file.text()}))).then(files=>fetch('/file-bytes',{method:'POST',body:JSON.stringify(files)}))"></label><button id="pick-hidden" type="button">Remote picker</button><script>document.getElementById('pick-hidden').onclick=()=>{const input=document.createElement('input');input.type='file';input.hidden=true;input.onchange=async()=>{const files=await Promise.all(Array.from(input.files,async file=>({name:file.name,text:await file.text()})));await fetch('/chooser-bytes',{method:'POST',body:JSON.stringify(files)})};document.body.append(input);input.click()};</script><label>Remote folder<input type="file" webkitdirectory onchange="Promise.all(Array.from(this.files,async file=>({path:file.webkitRelativePath,text:await file.text()}))).then(files=>fetch('/directory-bytes',{method:'POST',body:JSON.stringify(files)}))"></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
-      )
-      return
-    }
-    if (request.method === "GET" && request.url?.startsWith("/first")) {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-      response.end(
-        '<!doctype html><title>First owned source</title><label>First field<input value="first"></label>',
-      )
-      return
-    }
-    if (request.method === "GET" && request.url?.startsWith("/second")) {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-      response.end(
-        `<!doctype html><title>Second owned source</title><body style="background:#113a66;min-height:1800px"><div style="position:absolute;left:400px;top:1000px;width:64px;height:64px;background:#12a05b"></div><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form><iframe title="Local scope" src="/frame-local" style="display:block;width:400px;height:180px;border:5px solid red;padding:6px;transform:rotate(3deg) scale(.8);transform-origin:0 0"></iframe><iframe title="Remote scope" src="${new URL(wantedUrl).origin.replace("127.0.0.1", "localhost")}/frame-remote" style="display:block;width:500px;height:350px;border:5px solid red;padding:6px;transform:perspective(600px) rotateY(10deg);transform-origin:0 0"></iframe>`,
-      )
-      return
-    }
-    if (request.method === "GET" && request.url === "/jump") {
-      response.writeHead(302, { location: "/third#arrived" })
-      response.end()
-      return
-    }
-    if (request.method === "GET" && request.url === "/native-download") {
+    if (request.url === "/artifact") {
       response.writeHead(200, {
-        "content-type": "application/octet-stream",
-        "content-length": downloadBytes.length,
-        "content-disposition":
-          "attachment; filename*=UTF-8''download-%E4%BD%A0%E5%A5%BD.bin",
+        "content-type": "text/plain",
+        "content-disposition": "attachment; filename=fixture.txt",
       })
-      response.end(downloadBytes)
+      response.end("owned browser artifact")
       return
     }
-    if (request.method === "GET" && request.url?.startsWith("/third")) {
-      thirdRequests++
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-      response.end(
-        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt;window.dragProbe=[];for(const type of ["mousedown","mousemove","mouseup","dragstart"])document.addEventListener(type,e=>dragProbe.push({type,target:e.target.getAttribute("aria-label"),x:e.clientX,y:e.clientY,buttons:e.buttons,trusted:e.isTrusted}))</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button><a href="/native-download" download>Native download</a><div role="button" aria-label="Native drag source" tabindex="0" draggable="true" style="width:120px;height:60px;margin:20px" ondragstart="event.dataTransfer.setData('text/plain','你好 猫 🌍')">Drag</div><div role="button" aria-label="Native drag destination" tabindex="0" style="width:150px;height:60px;margin:20px 240px" ondragover="event.preventDefault()" ondrop="event.preventDefault();navigator.sendBeacon('/drag-reply',JSON.stringify({trusted:event.isTrusted,text:event.dataTransfer.getData('text/plain')}))">Drop</div>`,
-      )
-      return
-    }
-    if (request.method === "GET") {
-      response.writeHead(200, { "content-type": "application/json" })
-      response.end(JSON.stringify({ data: [{ id: "browser-model" }] }))
+    if (
+      !["/api", "/file", "/v1/chat/completions"].includes(request.url ?? "")
+    ) {
+      response.writeHead(404).end()
       return
     }
     let raw = ""
-    request.setEncoding("utf8")
-    request.on("data", (chunk: string) => {
+    request.setEncoding("utf8").on("data", (chunk: string) => {
       raw += chunk
     })
-    request.on("end", async () => {
+    request.on("end", () => {
+      if (request.url === "/api" || request.url === "/file") {
+        ;(request.url === "/api" ? submitted : uploads).push(raw)
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end('{"status":"ok"}')
+        return
+      }
       try {
         const body = JSON.parse(raw) as {
-          tools?: unknown[]
-          messages?: { role?: string; content?: unknown }[]
+          tools?: { function?: { name?: string } }[]
+          messages?: {
+            role?: string
+            tool_call_id?: string
+            content?: unknown
+          }[]
         }
-        for (const message of body.messages ?? []) {
-          if (!Array.isArray(message.content)) continue
-          for (const block of message.content) {
-            if (
-              typeof block !== "object" ||
-              block === null ||
-              block.type !== "image_url" ||
-              typeof block.image_url?.url !== "string"
-            )
-              continue
-            if (block.image_url.url.startsWith("data:image/jpeg;base64,"))
-              modelImages.add(block.image_url.url)
-          }
+        const calls: {
+          id: string
+          name: string
+          input: Record<string, unknown>
+        }[] = []
+        const call = (
+          id: string,
+          name: string,
+          input: Record<string, unknown>,
+        ) => calls.push({ id, name, input })
+        const resultText = (id: string) => {
+          const message = body.messages?.findLast(
+            (row) => row.role === "tool" && row.tool_call_id === id,
+          )
+          if (typeof message?.content !== "string")
+            throw new Error(`Missing result for ${id}`)
+          return message.content
         }
-        let tool: { name: string; input: unknown; id: string } | undefined
-        let text = "Browser observation"
-        if (body.tools?.length) {
-          const step = modelCalls++
-          if (step === 0)
-            tool = {
-              name: "tool_search",
-              input: { query: "browser" },
-              id: "find_browser",
-            }
-          else if (step === 1)
-            tool = {
-              name: "browser",
-              input: { action: "list" },
-              id: "list_browser",
-            }
-          else if (step === 2) {
-            const listed = toolResult(body.messages ?? [], "tabs")
-            const tab = (
-              listed.tabs as { url: string; target: unknown }[]
-            ).find((tab) => tab.url === wantedUrl)
-            if (!tab) throw new Error("The second owned tab was not listed")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: tab.target },
-              id: "observe_browser",
-            }
-          } else if (step === 3) {
-            const previous = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: previous.target },
-              id: "observe_again",
-            }
-          } else if (step === 4) {
-            const previous = toolResult(body.messages ?? [], "nodes")
-            insertion = textRequest(previous, "type", "你好 🌍")
-            tool = {
-              name: "browser_input",
-              input: insertion,
-              id: "type_browser",
-            }
-          } else if (step === 5) {
-            receipt = toolResult(body.messages ?? [], "textVerified")
-            if (!insertion) throw new Error("Missing prior insertion")
-            tool = {
-              name: "browser_input",
-              input: { ...insertion, text: "MUST_NOT_REPEAT" },
-              id: "replay_browser",
-            }
-          } else if (step === 6) {
-            if (
-              !JSON.stringify(body.messages).includes(
-                "Observe this document again before typing",
-              )
+        const result = (id: string) => {
+          const content = resultText(id)
+          const line = content
+            .split("\n")
+            .find((entry) => entry.startsWith("{"))
+          if (!line) throw new Error(`Invalid result for ${id}: ${content}`)
+          return JSON.parse(line)
+        }
+        const ref = (name: string) => {
+          const line = resultText("observe")
+            .split("\n")
+            .find((line) => line.includes(JSON.stringify(name)))
+          const ref = line?.match(/\[(e\d+)\]/)?.[1]
+          if (!ref)
+            throw new Error(
+              `Missing browser ref for ${name}\n${resultText("observe")}`,
             )
-              throw new Error("Reused input reference was not refused")
-            if (!insertion) throw new Error("Missing prior target")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: insertion.target },
-              id: "observe_input_receipt",
+          return ref
+        }
+        if (body.tools?.length)
+          switch (modelCalls++) {
+            case 0:
+              call("discover", "tool_search", {
+                query: "browser",
+              })
+              break
+            case 1: {
+              const names = (result("discover").tools as { name: string }[])
+                .map((tool) => tool.name)
+                .filter((name) => name.startsWith("browser"))
+              expect(names.sort()).toEqual([
+                "browser_act",
+                "browser_inspect",
+                "browser_wait",
+              ])
+              call("tabs", "browser_inspect", { action: "tabs" })
+              call("open", "browser_act", { action: "new_tab" })
+              break
             }
-          } else if (step === 7) {
-            observation = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: textRequest(observation, "fill", "filled 内容"),
-              id: "fill_browser",
-            }
-          } else if (step === 8) {
-            if (!observation) throw new Error("Missing pre-fill observation")
-            toolResult(body.messages ?? [], "textVerified")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: observation.target },
-              id: "observe_fill",
-            }
-          } else if (step === 9) {
-            filledObservation = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: textRequest(filledObservation, "fill", ""),
-              id: "clear_browser",
-            }
-          } else if (step === 10) {
-            if (!filledObservation)
-              throw new Error("Missing filled observation")
-            clearReceipt = toolResult(body.messages ?? [], "textVerified")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: filledObservation.target },
-              id: "observe_clear",
-            }
-          } else if (step === 11) {
-            clearedObservation = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: pointerRequest(clearedObservation, "Covered action"),
-              id: "covered_browser_click",
-            }
-          } else if (step === 12) {
-            if (
-              !JSON.stringify(body.messages).includes(
-                "no visible unoccluded click point",
-              )
-            )
-              throw new Error("Covered browser click was not refused")
-            if (!clearedObservation) throw new Error("Missing cleared target")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: clearedObservation.target },
-              id: "observe_after_covered",
-            }
-          } else if (step === 13) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: pointerRequest(current, "Click action"),
-              id: "click_browser",
-            }
-          } else if (step === 14) {
-            pointerReceipt = toolResult(body.messages ?? [], "point")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: pointerReceipt.target },
-              id: "observe_clicked",
-            }
-          } else if (step === 15) {
-            clickedObservation = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: pointerRequest(clickedObservation, "Shadow action"),
-              id: "click_closed_shadow",
-            }
-          } else if (step === 16) {
-            const clicked = toolResult(body.messages ?? [], "point")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: clicked.target },
-              id: "observe_shadow_clicked",
-            }
-          } else if (step >= 17 && step <= 26) {
-            if (step === 17)
-              shadowObservation = toolResult(body.messages ?? [], "nodes")
-            if (step % 2 === 0) {
-              const previous = toolResult(body.messages ?? [], "point")
-              tool = {
-                name: "browser",
-                input: { action: "observe", target: previous.target },
-                id: `observe_pointer_${step}`,
-              }
-            } else {
-              const previous = toolResult(body.messages ?? [], "nodes")
-              const actions = [
-                { action: "hover" },
-                { action: "scroll", deltaX: 70, deltaY: 280 },
-                { action: "click", button: "right" },
-                { action: "click", clickCount: 2 },
-                { action: "click", button: "middle" },
-              ]
-              const action = actions[(step - 17) / 2]
-              if (!action) throw new Error("Missing pointer action")
-              tool = {
-                name: "browser_input",
-                input: {
-                  ...pointerRequest(previous, "Pointer surface"),
-                  ...action,
-                },
-                id: `pointer_${step}`,
-              }
-            }
-          } else if (step >= 27 && step <= 36) {
-            if (step % 2 === 0) {
-              const previous = toolResult(body.messages ?? [], "delivered")
-              if (previous.action !== "press")
-                throw new Error("Keyboard input was not acknowledged")
-              tool = {
-                name: "browser",
-                input: { action: "observe", target: previous.target },
-                id: `observe_key_${step}`,
-              }
-            } else {
-              const previous = toolResult(body.messages ?? [], "nodes")
-              const plans = [
-                { name: "Keyboard field", key: "a", modifiers: ["Meta"] },
-                { name: "Keyboard field", key: "r", modifiers: ["Shift"] },
-                { name: "Keyboard field", key: "Tab" },
-                { name: "Submit keys", key: "Enter" },
-                { name: "Pointer surface", key: "t", modifiers: ["Meta"] },
-              ]
-              const plan = plans[(step - 27) / 2]
-              const node = (
-                previous.nodes as {
-                  name: string
-                  role: string
-                  elementReference?: string
-                }[]
-              ).find(
-                (node) =>
-                  node.name === plan?.name &&
-                  ["textbox", "button"].includes(node.role),
-              )
-              if (!plan || !node?.elementReference)
-                throw new Error("Missing exact keyboard control")
-              tool = {
-                name: "browser_input",
-                input: {
-                  action: "press",
-                  target: previous.target,
-                  reference: node.elementReference,
-                  key: plan.key,
-                  ...(plan.modifiers ? { modifiers: plan.modifiers } : {}),
-                },
-                id: `press_${step}`,
-              }
-            }
-          } else if (step >= 37 && step <= 39) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            if (step > 37)
-              captureReceipts.push(toolResult(body.messages ?? [], "capture"))
-            if (step === 39)
-              await application.evaluate(({ webContents }, url) => {
-                const contents = webContents
-                  .getAllWebContents()
-                  .find((contents) => contents.getURL() === url)
-                if (!contents) throw new Error("Missing zoomed capture target")
-                contents.setZoomFactor(1.5)
-              }, wantedUrl)
-            tool = {
-              name: "browser_capture",
-              input: {
-                action: "capture",
-                target: current.target,
-                mode: step === 37 ? "viewport" : step === 38 ? "page" : "clip",
-                ...(step === 39
-                  ? { clip: { x: 400, y: 1000, width: 64, height: 64 } }
-                  : {}),
-              },
-              id: `capture_${step}`,
-            }
-          } else if (step === 40) {
-            captureReceipts.push(toolResult(body.messages ?? [], "capture"))
-            await application.evaluate(({ webContents }, url) => {
-              const contents = webContents
-                .getAllWebContents()
-                .find((contents) => contents.getURL() === url)
-              if (!contents) throw new Error("Missing capture target")
-              contents.setZoomFactor(1.5)
-            }, wantedUrl)
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: { action: "frames", target: current.target },
-              id: "catalog_frames",
-            }
-          } else if (step === 41 || step === 44 || step === 47) {
-            if (step === 41)
-              frameCatalog = toolResult(body.messages ?? [], "frames")
-                .frames as typeof frameCatalog
-            else
-              frameObservations.push(toolResult(body.messages ?? [], "nodes"))
-            const path =
-              step === 41
-                ? "/frame-local"
-                : step === 44
-                  ? "/frame-remote"
-                  : "/frame-nested"
-            const selected = frameCatalog.find(
-              (frame) => new URL(frame.url).pathname === path,
-            )
-            if (!selected) throw new Error(`Missing owned frame ${path}`)
-            const current = toolResult(body.messages ?? [], "capture")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: current.target,
-                frameReference: selected.frameReference,
-              },
-              id: `observe_frame_${step}`,
-            }
-          } else if (step === 42 || step === 45 || step === 50) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            const kind =
-              step === 42 ? "Local" : step === 45 ? "Remote" : "Nested"
-            tool = {
-              name: "browser_input",
-              input: textRequest(
-                current,
-                step === 50 ? "type" : "fill",
-                `${step === 50 ? "typed" : "filled"}_${kind}你好`,
-                `${kind} frame field`,
-              ),
-              id: `type_frame_${step}`,
-            }
-          } else if (step === 43 || step === 46 || step === 49 || step === 51) {
-            const previous = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: previous.target,
-                frameReference: previous.frameReference,
-              },
-              id: `verify_frame_${step}`,
-            }
-          } else if (step === 48) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: framePress(current, "Nested", "a", ["Meta"]),
-              id: "select_nested_text",
-            }
-          } else if (step >= 52 && step <= 57) {
-            const kind = step <= 53 ? "Local" : step <= 55 ? "Remote" : "Nested"
-            if (step === 52)
-              frameObservations.push(toolResult(body.messages ?? [], "nodes"))
-            if (step % 2 === 0) {
-              if (step > 52) toolResult(body.messages ?? [], "delivered")
-              const selected = frameCatalog.find(
-                (frame) =>
-                  new URL(frame.url).pathname ===
-                  `/frame-${kind.toLowerCase()}`,
-              )
-              if (!selected) throw new Error("Missing pointer frame")
-              const current = toolResult(body.messages ?? [], "nodes")
-              tool = {
-                name: "browser",
-                input: {
-                  action: "observe",
-                  target: current.target,
-                  frameReference: selected.frameReference,
-                },
-                id: `observe_pointer_${kind}`,
-              }
-            } else {
-              const current = toolResult(body.messages ?? [], "nodes")
-              tool = {
-                name: "browser_input",
-                input: pointerRequest(current, `${kind} pointer`),
-                id: `click_pointer_${kind}`,
-              }
-            }
-          } else if (step === 58) {
-            toolResult(body.messages ?? [], "delivered")
-            const selected = frameCatalog.find(
-              (frame) => new URL(frame.url).pathname === "/frame-remote",
-            )
-            if (!selected) throw new Error("Missing remote form frame")
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: current.target,
-                frameReference: selected.frameReference,
-              },
-              id: "observe_remote_form",
-            }
-          } else if (step === 59) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            const control = (
-              current.nodes as {
-                role: string
-                name: string
-                elementReference?: string
-              }[]
-            ).find(
-              (node) =>
-                node.role === "listbox" && node.name === "Remote choices",
-            )
-            if (!control?.elementReference)
-              throw new Error("Missing remote select reference")
-            tool = {
-              name: "browser_input",
-              input: {
-                action: "select",
-                target: current.target,
-                reference: control.elementReference,
-                options: [{ label: "Green" }, { index: 2 }],
-              },
-              id: "select_remote_options",
-            }
-          } else if (step === 60) {
-            const selected = toolResult(body.messages ?? [], "delivered")
-            if (
-              selected.action !== "select" ||
-              selected.selectionVerified !== true ||
-              JSON.stringify(selected.values) !== JSON.stringify(["g", "b"]) ||
-              selected.events !== "synthetic"
-            )
-              throw new Error("Remote selection receipt was not verified")
-            const previous = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: previous.target,
-                frameReference: previous.frameReference,
-              },
-              id: "observe_selected_frame",
-            }
-          } else if (step === 61 || step === 63) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            const control = (
-              current.nodes as {
-                role: string
-                name: string
-                elementReference?: string
-              }[]
-            ).find(
-              (node) => node.role === "button" && node.name === "Remote files",
-            )
-            if (!control?.elementReference)
-              throw new Error("Missing remote file input")
-            tool = {
-              name: "browser_upload",
-              input: {
-                action: "upload",
-                target: current.target,
-                reference: control.elementReference,
-                fromUrl: (current.document as { url: string }).url,
-                paths: step === 61 ? [uploadPath] : [],
-              },
-              id: step === 61 ? "provide_remote_file" : "clear_remote_file",
-            }
-          } else if (step === 62 || step === 64) {
-            const selected = toolResult(body.messages ?? [], "filesVerified")
-            if (
-              selected.filesVerified !== true ||
-              selected.cleared !== (step === 64)
-            )
-              throw new Error("File list receipt was not verified")
-            if (step === 62)
-              await expect.poll(() => uploadedFiles.length).toBe(1)
-            const previous = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: previous.target,
-                frameReference: previous.frameReference,
-              },
-              id: `observe_file_selection_${step}`,
-            }
-          } else if (step === 65) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_chooser",
-              input: {
-                action: "arm",
-                target: current.target,
-                fromUrl: (current.document as { url: string }).url,
-                frameReference: current.frameReference,
-              },
-              id: "arm_remote_picker",
-            }
-          } else if (step === 66) {
-            const armed = toolResult(body.messages ?? [], "armed")
-            if (armed.armed !== true)
-              throw new Error("Remote chooser was not armed")
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: pointerRequest(current, "Remote picker"),
-              id: "open_hidden_picker",
-            }
-          } else if (step === 67) {
-            const clicked = toolResult(body.messages ?? [], "delivered")
-            tool = {
-              name: "browser_chooser",
-              input: { action: "inspect", target: clicked.target },
-              id: "inspect_hidden_picker",
-            }
-          } else if (step === 68) {
-            const opened = toolResult(body.messages ?? [], "opened")
-            if (
-              opened.opened !== true ||
-              typeof opened.elementReference !== "string"
-            )
-              throw new Error("No exact hidden file input was captured")
-            tool = {
-              name: "browser_upload",
-              input: {
-                action: "upload",
-                target: opened.target,
-                reference: opened.elementReference,
-                fromUrl: opened.fromUrl,
-                paths: [uploadPath],
-              },
-              id: "provide_hidden_file",
-            }
-          } else if (step === 69) {
-            const selected = toolResult(body.messages ?? [], "filesVerified")
-            if (selected.filesVerified !== true)
-              throw new Error("Hidden file selection was not verified")
-            await expect.poll(() => chooserFiles.length).toBe(1)
-            tool = {
-              name: "browser_chooser",
-              input: { action: "disarm", target: selected.target },
-              id: "disarm_remote_picker",
-            }
-          } else if (step === 70) {
-            const disabled = toolResult(
-              body.messages ?? [],
-              "interceptionDisabled",
-            )
-            if (
-              disabled.interceptionDisabled !== true ||
-              disabled.armed !== false
-            )
-              throw new Error("File picker interception did not stop")
-            const previous = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: previous.target,
-                frameReference: previous.frameReference,
-              },
-              id: "observe_after_hidden_picker",
-            }
-          } else if (step === 71) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_view",
-              input: {
-                action: "show",
-                target: current.target,
-                fromUrl: wantedUrl,
-              },
-              id: "display_directory_target",
-            }
-          } else if (step === 72) {
-            const shown = toolResult(body.messages ?? [], "selectionApplied")
-            if (shown.selectionApplied !== true || shown.visible !== true)
-              throw new Error(
-                "The requested browser tab did not become visible",
-              )
-            const current = toolResult(body.messages ?? [], "nodes")
-            const control = (
-              current.nodes as {
-                role: string
-                name: string
-                elementReference?: string
-              }[]
-            ).find(
-              (node) => node.role === "button" && node.name === "Remote folder",
-            )
-            if (!control?.elementReference)
-              throw new Error("Missing remote directory input")
-            tool = {
-              name: "browser_upload",
-              input: {
-                action: "upload_directory",
-                target: current.target,
-                reference: control.elementReference,
-                fromUrl: (current.document as { url: string }).url,
-                paths: [uploadDirectory],
-              },
-              id: "provide_remote_directory",
-            }
-          } else if (step === 73) {
-            const selected = toolResult(body.messages ?? [], "filesVerified")
-            if (
-              selected.action !== "upload_directory" ||
-              selected.filesVerified !== true ||
-              selected.events !== "chromium"
-            )
-              throw new Error("Directory selection receipt was not verified")
-            await expect.poll(() => uploadedDirectoryFiles.length).toBe(1)
-            await page
-              .getByRole("button", { name: "Hide workspace", exact: true })
-              .click()
-            const previous = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: previous.target,
-                frameReference: previous.frameReference,
-              },
-              id: "observe_directory_selection",
-            }
-          } else if (step === 74) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_input",
-              input: framePress(current, "Remote", "Enter"),
-              id: "submit_remote_form",
-            }
-          } else if (step === 75) {
-            const receipt = toolResult(body.messages ?? [], "delivered")
-            if (receipt.action !== "press" || receipt.key !== "Enter")
-              throw new Error("Remote form key was not acknowledged")
-            await expect.poll(() => frameAfterReady).toBe(1)
-            tool = {
-              name: "browser",
-              input: { action: "frames", target: receipt.target },
-              id: "catalog_after_frame_navigation",
-            }
-          } else if (step === 76) {
-            const current = toolResult(body.messages ?? [], "frames")
-            const selected = (
-              current.frames as { url: string; frameReference: string }[]
-            ).find((frame) => new URL(frame.url).pathname === "/frame-after")
-            if (!selected) throw new Error("Missing navigated form frame")
-            tool = {
-              name: "browser",
-              input: {
-                action: "observe",
-                target: current.target,
-                frameReference: selected.frameReference,
-              },
-              id: "observe_submitted_frame",
-            }
-          } else if (step === 77) {
-            frameAfterObservation = toolResult(body.messages ?? [], "nodes")
-            const current = frameAfterObservation
-            tool = {
-              name: "browser_dialog",
-              input: {
-                action: "arm",
-                target: current.target,
-                frameReference: current.frameReference,
-                fromUrl: (current.document as { url: string }).url,
-                response: {
-                  type: "confirm",
-                  accept: false,
-                  message: "Owned confirmation?",
-                },
-              },
-              id: "arm_native_dialog",
-            }
-          } else if (step === 78) {
-            const current = toolResult(body.messages ?? [], "nodes"),
-              button = (
-                current.nodes as { name: string; elementReference?: string }[]
-              ).find((node) => node.name === "Native confirmation")
-            if (!button?.elementReference)
-              throw new Error("Missing native confirmation button")
-            tool = {
-              name: "browser_input",
-              input: {
-                action: "press",
-                key: "Enter",
-                target: current.target,
-                reference: button.elementReference,
-              },
-              id: "trigger_native_dialog",
-            }
-          } else if (step === 79) {
-            const current = toolResult(body.messages ?? [], "delivered")
-            await expect.poll(() => dialogReplies.length).toBe(1)
-            tool = {
-              name: "browser_dialog",
-              input: { action: "inspect", target: current.target },
-              id: "inspect_native_dialog",
-            }
-          } else if (step === 80) {
-            const current = toolResult(body.messages ?? [], "state")
-            if (current.state !== "answered" || current.expired !== false)
-              throw new Error("Native dialog response was not acknowledged")
-            tool = {
-              name: "browser_dialog",
-              input: { action: "disarm", target: current.target },
-              id: "disarm_native_dialog",
-            }
-          } else if (step === 81) {
-            const current = frameAfterObservation
-            if (!current) throw new Error("Missing submitted frame observation")
-            tool = {
-              name: "browser_navigate",
-              input: {
+            case 2:
+              expect(result("tabs").tabs).toEqual([])
+              tabId = result("open").tabId
+              expect(tabId).toMatch(/^agent_tab_/)
+              call("navigate", "browser_act", {
                 action: "navigate",
-                target: current.target,
-                fromUrl: wantedUrl,
-                url: navigationUrl,
-              },
-              id: "navigate_browser",
-            }
-          } else if (step === 82) {
-            navigationReceipt = toolResult(body.messages ?? [], "loaded")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: navigationReceipt.target },
-              id: "observe_navigation",
-            }
-          } else if (step === 83) {
-            navigatedObservation = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_dialog",
-              input: {
-                action: "arm",
-                target: navigatedObservation.target,
-                fromUrl: destinationUrl,
-                response: {
-                  type: "prompt",
-                  accept: true,
-                  message: "Owned text?",
-                  promptText: "你好 猫 🌍",
-                },
-              },
-              id: "arm_native_prompt",
-            }
-          } else if (step === 84) {
-            const current = toolResult(body.messages ?? [], "nodes"),
-              button = (
-                current.nodes as { name: string; elementReference?: string }[]
-              ).find((node) => node.name === "Native prompt")
-            if (!button?.elementReference)
-              throw new Error("Missing native prompt button")
-            tool = {
-              name: "browser_input",
-              input: {
-                action: "press",
-                key: "Enter",
-                target: current.target,
-                reference: button.elementReference,
-              },
-              id: "trigger_native_prompt",
-            }
-          } else if (step === 85) {
-            const current = toolResult(body.messages ?? [], "delivered")
-            await expect.poll(() => promptReplies.length).toBe(1)
-            tool = {
-              name: "browser_dialog",
-              input: { action: "inspect", target: current.target },
-              id: "inspect_native_prompt",
-            }
-          } else if (step === 86) {
-            const current = toolResult(body.messages ?? [], "state")
-            if (current.state !== "answered" || current.expired !== false)
-              throw new Error("Native prompt response was not acknowledged")
-            tool = {
-              name: "browser_dialog",
-              input: { action: "disarm", target: current.target },
-              id: "disarm_native_prompt",
-            }
-          } else if (step === 87) {
-            const current = toolResult(body.messages ?? [], "armed")
-            if (current.armed !== false)
-              throw new Error("Native prompt did not disarm")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: current.target },
-              id: "observe_restored_prompt",
-            }
-          } else if (step === 88) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_download",
-              input: {
-                action: "arm",
-                target: current.target,
-                fromUrl: destinationUrl,
-                url: `${new URL(destinationUrl).origin}/native-download`,
-              },
-              id: "arm_native_download",
-            }
-          } else if (step === 89) {
-            const current = toolResult(body.messages ?? [], "nodes"),
-              link = (
-                current.nodes as { name: string; elementReference?: string }[]
-              ).find((node) => node.name === "Native download")
-            if (!link?.elementReference)
-              throw new Error("Missing native download link")
-            tool = {
-              name: "browser_input",
-              input: {
-                action: "press",
-                key: "Enter",
-                target: current.target,
-                reference: link.elementReference,
-              },
-              id: "trigger_native_download",
-            }
-          } else if (step === 90) {
-            const current = toolResult(body.messages ?? [], "downloadId")
-            tool = {
-              name: "browser_download",
-              input: {
-                action: "wait",
-                target: current.target,
-                downloadId: current.downloadId,
-              },
-              id: "await_native_download",
-            }
-          } else if (step === 91) {
-            const current = toolResult(body.messages ?? [], "downloadId")
-            if (current.state !== "completed")
-              throw new Error("Native download did not finish")
-            tool = {
-              name: "browser_download",
-              input: {
-                action: "collect",
-                target: current.target,
-                downloadId: current.downloadId,
-              },
-              id: "collect_native_download",
-            }
-          } else if (step === 92) {
-            downloadArtifact = toolResult(body.messages ?? [], "sha256")
-            if (downloadArtifact.byteLength !== 5)
-              throw new Error("Native download artifact size differs")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: downloadArtifact.target },
-              id: "observe_after_download",
-            }
-          } else if (step === 93) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_view",
-              input: {
-                action: "show",
-                target: current.target,
-                fromUrl: destinationUrl,
-              },
-              id: "show_native_drag_view",
-            }
-          } else if (step === 94) {
-            const current = toolResult(body.messages ?? [], "nodes")
-            tool = {
-              name: "browser_drag",
-              input: {
-                ...pointerRequest(current, "Native drag source"),
-                action: "prepare",
-              },
-              id: "prepare_native_drag",
-            }
-          } else if (step === 95) {
-            const current = toolResult(body.messages ?? [], "dragId")
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: current.target },
-              id: "observe_drag_destination",
-            }
-          } else if (step === 96) {
-            const current = toolResult(body.messages ?? [], "nodes"),
-              prepared = toolResult(body.messages ?? [], "dragId")
-            tool = {
-              name: "browser_drag",
-              input: {
-                ...pointerRequest(current, "Native drag destination"),
-                action: "drop",
-                dragId: prepared.dragId,
-              },
-              id: "deliver_native_drag",
-            }
-          } else if (step === 97) {
-            const current = toolResult(body.messages ?? [], "native")
-            if (current.delivered !== true || current.native !== true) {
-              const probe = await application.evaluate(
-                ({ webContents }, url) =>
-                  webContents
-                    .getAllWebContents()
-                    .find((contents) => contents.getURL() === url)
-                    ?.executeJavaScript("window.dragProbe"),
-                destinationUrl,
+                tabId,
+                url: formUrl,
+              })
+              call("observe", "browser_inspect", {
+                action: "snapshot",
+                tabId,
+                interactiveOnly: true,
+              })
+              break
+            case 3:
+              expect(result("navigate")).toMatchObject({
+                tabId,
+                loaded: true,
+                url: formUrl,
+              })
+              expect(result("observe")).toMatchObject({
+                tabId,
+                consoleErrors: 0,
+              })
+              call("batch", "browser_act", {
+                action: "batch",
+                tabId,
+                steps: [
+                  { action: "fill", ref: ref("Name"), text: "Ada" },
+                  { action: "fill", ref: ref("City"), text: "Shanghai" },
+                  {
+                    action: "select",
+                    ref: ref("Size"),
+                    options: [{ label: "Large" }],
+                  },
+                  { action: "click", ref: ref("Send form") },
+                ],
+              })
+              call("wait", "browser_wait", {
+                tabId,
+                until: "text",
+                value: "Form submitted",
+              })
+              call("upload", "browser_act", {
+                action: "upload",
+                tabId,
+                ref: ref("Choose local file"),
+                paths: [filePath],
+              })
+              call("drag", "browser_act", {
+                action: "drag",
+                tabId,
+                fromRef: ref("Drag item"),
+                toRef: ref("Drop here"),
+              })
+              call("download", "browser_act", {
+                action: "download",
+                operation: "arm",
+                tabId,
+                ref: ref("Download report"),
+              })
+              break
+            case 4:
+              expect(result("batch"), resultText("batch")).toMatchObject({
+                completedSteps: 4,
+              })
+              expect(result("wait")).toMatchObject({ matched: true })
+              expect(result("upload")).toMatchObject({ filesVerified: true })
+              expect(result("drag")).toMatchObject({ native: true })
+              call("screenshot", "browser_inspect", {
+                action: "screenshot",
+                mode: "ref",
+                tabId,
+                ref: ref("Name"),
+              })
+              call("console", "browser_inspect", { action: "console", tabId })
+              call("network", "browser_inspect", { action: "network", tabId })
+              call("download_wait", "browser_wait", {
+                until: "download",
+                tabId,
+                downloadId: result("download").downloadId,
+              })
+              break
+            case 5: {
+              expect(result("screenshot")).toMatchObject({
+                capture: { mode: "ref" },
+                mediaType: "image/jpeg",
+              })
+              expect(result("console").entries).toContainEqual(
+                expect.objectContaining({
+                  level: "error",
+                  message: "fixture console error",
+                }),
               )
-              throw new Error(
-                "Native drag was not acknowledged: " +
-                  JSON.stringify({ current, probe }),
-              )
+              const entry = (
+                result("network").entries as {
+                  id: string
+                  url: string
+                  status?: number
+                  method: string
+                }[]
+              ).find((row) => row.url.endsWith("/api"))
+              expect(entry).toMatchObject({ method: "POST", status: 200 })
+              expect(result("download_wait")).toMatchObject({
+                state: "completed",
+              })
+              call("request", "browser_inspect", {
+                action: "network",
+                tabId,
+                requestId: entry?.id,
+              })
+              call("collect", "browser_act", {
+                action: "download",
+                operation: "collect",
+                tabId,
+                downloadId: result("download").downloadId,
+              })
+              break
             }
-            tool = {
-              name: "browser",
-              input: { action: "observe", target: current.target },
-              id: "observe_after_drag",
-            }
-          } else {
-            navigatedObservation = toolResult(body.messages ?? [], "nodes")
-            observed.resolve()
-            await releaseCompletion.promise
-            text = "Observed and navigated the owned browser."
+            default:
+              expect(result("request")).toMatchObject({
+                bodyAvailable: true,
+                body: '{"status":"ok"}',
+              })
+              expect(result("collect")).toMatchObject({
+                filename: "fixture.txt",
+              })
           }
-        }
-        const delta = tool
+        const delta = calls.length
           ? {
               role: "assistant",
-              tool_calls: [
-                {
-                  index: 0,
-                  id: tool.id,
-                  type: "function",
-                  function: {
-                    name: tool.name,
-                    arguments: JSON.stringify(tool.input),
-                  },
-                },
-              ],
+              tool_calls: calls.map(({ id, name, input }, index) => ({
+                index,
+                id,
+                type: "function",
+                function: { name, arguments: JSON.stringify(input) },
+              })),
             }
-          : { role: "assistant", content: text }
+          : { role: "assistant", content: "Browser workflow verified." }
         response.writeHead(200, { "content-type": "text/event-stream" })
         response.end(
-          `data: ${JSON.stringify({ id: `browser_${modelCalls}`, object: "chat.completion.chunk", created: 1, model: "browser-model", choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`,
+          `data: ${JSON.stringify({ id: `browser_${modelCalls}`, object: "chat.completion.chunk", created: 1, model: "browser-model", choices: [{ index: 0, delta, finish_reason: calls.length ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`,
         )
       } catch (cause) {
-        errors.push(String(cause))
-        failed.resolve(
-          cause instanceof Error ? cause : new Error(String(cause)),
-        )
-        response.writeHead(500)
-        response.end("Owned browser fixture failed")
+        failed.resolve(cause)
+        response.writeHead(500).end("Browser fixture failed")
       }
     })
   })
@@ -1945,31 +945,13 @@ test("agent browser observations and actions use the exact owned tab through rea
   await once(source, "listening")
   const address = source.address()
   if (!address || typeof address === "string")
-    throw new Error("Missing owned browser source")
+    throw new Error("Missing fixture address")
   const origin = `http://127.0.0.1:${address.port}`
-  wantedUrl = `${origin}/second#owned`
-  navigationUrl = `${origin}/jump`
-  destinationUrl = `${origin}/third#arrived`
+  formUrl = `${origin}/form`
+  const fixtureFailure = failed.promise.then((cause) => {
+    throw cause
+  })
   try {
-    await writeFile(uploadPath, uploadText)
-    await mkdir(join(uploadDirectory, "nested/empty"), { recursive: true })
-    await writeFile(join(uploadDirectory, ".hidden"), "Hidden 你好 🌍")
-    await writeFile(join(uploadDirectory, "nested/a.txt"), "Nested bytes")
-    const helper = join(userData, "computer.cjs")
-    await writeFile(
-      helper,
-      `const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
-    )
-    await client.request("config/write", {
-      keyPath: ["mcp_servers", "computer"],
-      value: {
-        command: process.execPath,
-        args: [helper],
-        enabled: true,
-        required: true,
-        enabled_tools: ["control"],
-      },
-    })
     await client.request("provider/configuration/write", {
       id: "browser-fixture",
       configuration: {
@@ -1992,550 +974,35 @@ test("agent browser observations and actions use the exact owned tab through rea
       model: "browser-model",
     })
     await page.getByRole("button", { name: "New session", exact: true }).click()
-    await expect(
-      page.getByRole("combobox", { name: "New session project", exact: true }),
-    ).toBeEnabled()
-    await page
-      .getByRole("button", { name: "Select model and effort", exact: true })
-      .click()
+    await page.getByRole("button", { name: "Select model and effort" }).click()
     await page
       .getByRole("button", { name: "Browser Model", exact: true })
       .click()
     await page
-      .getByRole("button", { name: "Show workspace", exact: true })
-      .click()
-    for (const [url, title] of [
-      [`${origin}/first`, "First owned source"],
-      [wantedUrl, "Second owned source"],
-    ]) {
-      if (!url || !title) throw new Error("Invalid owned page fixture")
-      await page
-        .getByRole("button", { name: "Add workspace tab", exact: true })
-        .click()
-      await page.getByRole("menuitem", { name: /^Browser/ }).click()
-      await page.getByRole("textbox", { name: "Browser address" }).fill(url)
-      await page
-        .getByRole("textbox", { name: "Browser address" })
-        .press("Enter")
-      await expect(
-        page.getByRole("tab", { name: title, exact: true }),
-      ).toBeVisible()
-    }
-    await page
-      .getByRole("button", { name: "Hide workspace", exact: true })
-      .click()
-    await page
       .getByRole("textbox", { name: "Message the Mate" })
-      .fill("Inspect the owned browser tabs and read the second page.")
-    await application.evaluate(({ webContents, session }) => {
-      const entries: Record<string, unknown>[] = []
-      Reflect.set(globalThis, "yakitoriBrowserProtocolTrace", entries)
-      const profile = session.fromPartition(
-        "persist:yakitori-workspace-browser",
-      )
-      const append = (entry: Record<string, unknown>) => {
-        entries.push(entry)
-        if (entries.length > 200) entries.shift()
-      }
-      for (const contents of webContents.getAllWebContents()) {
-        if (contents.session !== profile) continue
-        const debug = contents.debugger
-        const send = debug.sendCommand.bind(debug)
-        debug.sendCommand = async (method, params, sessionId) => {
-          const entry = {
-            method,
-            sessionId,
-            type: params?.type,
-            key: params?.key,
-            x: params?.x,
-            y: params?.y,
-            state: "pending",
-            error: "",
-            geometry: undefined as unknown,
-            fileState: undefined as unknown,
-            files: params?.files,
-            completion: undefined as unknown,
-          }
-          append(entry)
-          try {
-            const result = await send(method, params, sessionId)
-            if (method === "DOM.getBoxModel")
-              entry.geometry = result.model?.content
-            if (
-              method === "Runtime.callFunctionOn" &&
-              String(params?.functionDeclaration).startsWith(
-                "function(scroll, point)",
-              )
-            )
-              entry.geometry = result.result?.value
-            if (
-              method === "Runtime.callFunctionOn" &&
-              Array.isArray(result.result?.value?.files)
-            )
-              entry.fileState = result.result.value
-            if (params?.awaitPromise) entry.completion = result.result?.value
-            entry.state = "done"
-            return result
-          } catch (cause) {
-            entry.state = "failed"
-            entry.error = String(cause)
-            throw cause
-          }
-        }
-        debug.on("message", (_event, method, params, parentSessionId) => {
-          if (
-            method === "Target.attachedToTarget" ||
-            method === "Target.detachedFromTarget" ||
-            method === "Page.fileChooserOpened"
-          )
-            append({ method, sessionId: params.sessionId, parentSessionId })
-        })
-      }
-    })
+      .fill("Open the site and submit the form.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
-    // Cover real pointer hit testing once. The remaining decisions use the
-    // same renderer/RPC handler, driven by keyed DOM requests rather than 96
-    // compositor waits and repeated protocol round trips from the test runner.
-    const firstApproval = await Promise.race([
-      page.getByRole("button", { name: "Allow", exact: true }).elementHandle(),
-      failed.promise.then((cause) => {
-        throw cause
-      }),
-    ])
-    if (!firstApproval) throw new Error("Missing initial permission button")
-    await firstApproval.click()
-    const approvalDriver = await page.evaluateHandle(
-      ({ first, remaining }) => {
-        const seen = new WeakSet<Element>([first])
-        let accepted = 0,
-          finish = () => {}
-        const done = new Promise<void>((resolve) => {
-          finish = resolve
-        })
-        const scan = () => {
-          for (const button of document.querySelectorAll("button")) {
-            if (
-              button.textContent?.trim() !== "Allow" ||
-              button.disabled ||
-              !button.getClientRects().length ||
-              seen.has(button)
-            )
-              continue
-            seen.add(button)
-            accepted++
-            button.click()
-            if (accepted === remaining) {
-              observer.disconnect()
-              finish()
-            }
-            break
-          }
-        }
-        const observer = new MutationObserver(scan)
-        observer.observe(document.body, {
-          subtree: true,
-          childList: true,
-          attributes: true,
-          attributeFilter: ["disabled"],
-        })
-        scan()
-        return {
-          done,
-          stop() {
-            observer.disconnect()
-            finish()
-          },
-        }
-      },
-      { first: firstApproval, remaining: 96 },
-    )
-    try {
+    for (let index = 0; index < 7; index++)
       await Promise.race([
-        approvalDriver.evaluate((driver) => driver.done),
-        failed.promise.then((cause) => {
-          throw cause
-        }),
+        page
+          .getByRole("button", { name: "Allow", exact: true })
+          .first()
+          .click(),
+        fixtureFailure,
       ])
-    } finally {
-      await approvalDriver.evaluate((driver) => driver.stop())
-      await approvalDriver.dispose()
-      await firstApproval.dispose()
-    }
     await Promise.race([
-      observed.promise,
-      failed.promise.then((cause) => {
-        throw cause
-      }),
+      expect(
+        page.getByText("Browser workflow verified.", { exact: true }).first(),
+      ).toBeVisible(),
+      fixtureFailure,
     ])
-    const attached = () =>
-      application.evaluate(({ webContents }, url) => {
-        const target = webContents
-          .getAllWebContents()
-          .find((contents) => contents.getURL() === url)
-        if (!target) throw new Error("Owned browser target disappeared")
-        return target.debugger.isAttached()
-      }, destinationUrl)
-    expect(
-      await application.evaluate(async ({ webContents }, url) => {
-        const target = webContents
-          .getAllWebContents()
-          .find((contents) => contents.getURL() === url)
-        if (!target) throw new Error("Missing native prompt target")
-        return target.executeJavaScript(
-          "({restored:window.prompt===window.originalPrompt,frames:document.querySelectorAll('iframe').length})",
-        )
-      }, destinationUrl),
-    ).toEqual({ restored: true, frames: 0 })
-    expect(await attached()).toBe(true)
+    expect(submitted).toEqual(["Ada/Shanghai/l"])
+    expect(uploads).toEqual(["yakitori upload"])
     await expect(
-      page.getByRole("button", { name: "Hide workspace", exact: true }),
-    ).toBeVisible()
-    await page.getByRole("button", { name: "Reload page", exact: true }).click()
-    await expect.poll(() => thirdRequests).toBe(2)
-    await expect(
-      page.getByRole("button", { name: "Reload page", exact: true }),
-    ).toBeVisible()
-    await expect(
-      page.getByRole("textbox", { name: "Browser address", exact: true }),
-    ).toHaveValue(destinationUrl)
-    releaseCompletion.resolve()
-    await expect(
-      page
-        .getByRole("main")
-        .getByText("Observed and navigated the owned browser.", {
-          exact: true,
-        }),
-    ).toBeVisible()
-    await expect.poll(attached).toBe(false)
-    expect(errors).toEqual([])
-    expect(receipt).toMatchObject({ delivered: true, textVerified: true })
-    expect(filledObservation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          role: "textbox",
-          name: "Target field",
-          value: "filled 内容",
-        }),
-      ]),
-    )
-    // Chromium omits AX.value for an empty field. The input receipt verifies
-    // its exact DOM value; the subsequent AX read independently locates it.
-    expect(clearReceipt).toMatchObject({
-      textVerified: true,
-      bytes: 0,
-      valueLength: 0,
-    })
-    expect(clearedObservation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: "textbox", name: "Target field" }),
-      ]),
-    )
-    await expect.poll(() => clearKeyUps).toBe(1)
-    expect(pointerReceipt).toMatchObject({
-      delivered: true,
-      documentChanged: false,
-      point: { x: expect.any(Number), y: expect.any(Number) },
-    })
-    expect(clickedObservation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: "button", name: "Clicked action" }),
-      ]),
-    )
-    expect(JSON.stringify(clickedObservation?.nodes)).not.toContain(
-      "Wrongly clicked",
-    )
-    expect(shadowObservation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: "button", name: "Shadow clicked" }),
-      ]),
-    )
-    await expect
-      .poll(() =>
-        pointerEvents.some(
-          (event) => event.type === "scroll" && event.scrollTop > 0,
-        ),
-      )
-      .toBe(true)
-    expect(pointerEvents).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "mouseenter", trusted: true }),
-        expect.objectContaining({
-          type: "wheel",
-          trusted: true,
-          deltaX: 70,
-          deltaY: 280,
-        }),
-        expect.objectContaining({
-          type: "contextmenu",
-          trusted: true,
-          button: 2,
-        }),
-        expect.objectContaining({
-          type: "dblclick",
-          trusted: true,
-          button: 0,
-          detail: 2,
-        }),
-        expect.objectContaining({ type: "auxclick", trusted: true, button: 1 }),
-      ]),
-    )
-    await expect
-      .poll(() =>
-        keyboardEvents.some(
-          (event) => event.type === "submit" && event.value === "R",
-        ),
-      )
-      .toBe(true)
-    expect(keyboardEvents).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "keydown",
-          key: "a",
-          trusted: true,
-          meta: true,
-        }),
-        expect.objectContaining({
-          type: "keydown",
-          key: "R",
-          trusted: true,
-          shift: true,
-        }),
-        expect.objectContaining({ type: "keydown", key: "Tab", trusted: true }),
-        expect.objectContaining({ type: "keyup", key: "Tab", trusted: true }),
-        expect.objectContaining({
-          type: "keydown",
-          key: "Enter",
-          trusted: true,
-        }),
-        expect.objectContaining({
-          type: "keydown",
-          key: "t",
-          trusted: true,
-          meta: true,
-        }),
-        expect.objectContaining({
-          type: "keyup",
-          key: "Meta",
-          trusted: true,
-          meta: false,
-        }),
-      ]),
-    )
-    expect(
-      await application.evaluate(({ webContents, session }) => {
-        const profile = session.fromPartition(
-          "persist:yakitori-workspace-browser",
-        )
-        return webContents
-          .getAllWebContents()
-          .filter((contents) => contents.session === profile).length
-      }),
-    ).toBe(2)
-    expect(frameObservations).toHaveLength(3)
-    for (const [index, kind] of ["Local", "Remote", "Nested"].entries()) {
-      const observedFrame = frameObservations[index]
-      expect(observedFrame?.nodes).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            role: "textbox",
-            name: `${kind} frame field`,
-            value: `${kind === "Nested" ? "typed" : "filled"}_${kind}你好`,
-          }),
-        ]),
-      )
-      expect(observedFrame?.mainDocument).toMatchObject({ url: wantedUrl })
-      expect(observedFrame?.nodes).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            role: "textbox",
-            inputReference: expect.any(String),
-            elementReference: expect.any(String),
-          }),
-        ]),
-      )
-    }
-    await expect.poll(() => framePointerEvents.length).toBe(3)
-    expect(framePointerEvents).toEqual(
-      ["Local", "Remote", "Nested"].map((kind) => ({ kind, trusted: true })),
-    )
-    await expect.poll(() => frameSelectEvents.length).toBe(2)
-    expect(frameSelectEvents).toEqual([
-      { type: "input", trusted: false, values: ["g", "b"] },
-      { type: "change", trusted: false, values: ["g", "b"] },
-    ])
-    expect(uploadedFiles).toEqual([
-      [{ name: "upload-你好.txt", text: uploadText }],
-    ])
-    expect(dialogReplies).toEqual([{ value: false, trusted: true }])
-    expect(promptReplies).toEqual([{ value: "你好 猫 🌍", trusted: true }])
-    expect(dragReplies).toEqual([{ text: "你好 猫 🌍", trusted: true }])
-    if (typeof downloadArtifact?.path !== "string")
-      throw new Error("Missing durable download artifact")
-    expect(await readFile(downloadArtifact.path)).toEqual(downloadBytes)
-    expect(downloadArtifact.sha256).toBe(
-      "4be72cf29a33b5f223067ab9d5dd9567e0c14978e6ed54e2d556ddc9e2cc6038",
-    )
-    expect(downloadArtifact.filename).toBe("download-你好.bin")
-    expect(chooserFiles).toEqual([
-      [{ name: "upload-你好.txt", text: uploadText }],
-    ])
-    expect(uploadedDirectoryFiles).toEqual([
-      expect.arrayContaining([
-        { path: "folder-你好/.hidden", text: "Hidden 你好 🌍" },
-        { path: "folder-你好/nested/a.txt", text: "Nested bytes" },
-      ]),
-    ])
-    expect(uploadedDirectoryFiles[0]).toHaveLength(2)
-    await expect.poll(() => fileChoiceEvents.length).toBe(4)
-    expect(fileChoiceEvents).toEqual([
-      { type: "input", trusted: true, count: 1 },
-      { type: "change", trusted: true, count: 1 },
-      { type: "input", trusted: false, count: 0 },
-      { type: "change", trusted: false, count: 0 },
-    ])
-    expect(frameSubmittedValues).toEqual(["filled_Remote你好"])
-    expect(frameAfterObservation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          role: "textbox",
-          name: "After frame field",
-          value: "submitted",
-        }),
-      ]),
-    )
-    const mainFrame = frameCatalog.find((frame) => frame.main)
-    const remoteFrame = frameCatalog.find(
-      (frame) => new URL(frame.url).pathname === "/frame-remote",
-    )
-    const nestedFrame = frameCatalog.find(
-      (frame) => new URL(frame.url).pathname === "/frame-nested",
-    )
-    expect(remoteFrame).toMatchObject({
-      remote: true,
-      parentFrameId: mainFrame?.frameId,
-    })
-    expect(nestedFrame).toMatchObject({
-      remote: true,
-      parentFrameId: remoteFrame?.frameId,
-    })
-    expect(
-      captureReceipts.map(
-        (receipt) => (receipt.capture as { mode: string }).mode,
-      ),
-    ).toEqual(["viewport", "page", "clip"])
-    expect(modelImages.size).toBe(3)
-    const { default: sharp } = await import("sharp")
-    const imageBytes = [...modelImages].map((url) =>
-      Buffer.from(url.slice("data:image/jpeg;base64,".length), "base64"),
-    )
-    const clipped = imageBytes[2]
-    if (!clipped) throw new Error("Missing clipped model image")
-    const decoded = await sharp(clipped)
-      .raw()
-      .toBuffer({ resolveWithObject: true })
-    const offset =
-      (Math.floor(decoded.info.height / 2) * decoded.info.width +
-        Math.floor(decoded.info.width / 2)) *
-      decoded.info.channels
-    expect(Math.abs((decoded.data[offset] ?? 0) - 18)).toBeLessThan(10)
-    expect(Math.abs((decoded.data[offset + 1] ?? 0) - 160)).toBeLessThan(10)
-    expect(Math.abs((decoded.data[offset + 2] ?? 0) - 91)).toBeLessThan(10)
-    expect(captureReceipts[2]?.capture).toMatchObject({
-      source: { x: 400, y: 1000, width: 64, height: 64 },
-    })
-    for (const bytes of imageBytes) {
-      const metadata = await sharp(bytes).metadata()
-      expect(metadata.width).toBeLessThanOrEqual(1600)
-      expect(metadata.height).toBeLessThanOrEqual(1600)
-    }
-    await testInfo.attach("browser-capture-clip", {
-      body: clipped,
-      contentType: "image/jpeg",
-    })
-    expect(navigationReceipt).toMatchObject({
-      loaded: true,
-      url: destinationUrl,
-    })
-    expect(navigatedObservation?.document).toMatchObject({
-      url: destinationUrl,
-    })
-    expect(navigatedObservation?.target).toEqual(observation?.target)
-    expect(navigatedObservation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          role: "textbox",
-          name: "Navigated field",
-          value: "third",
-        }),
-      ]),
-    )
-    expect(observation?.document).toMatchObject({
-      url: wantedUrl,
-      documentId: expect.any(String),
-    })
-    expect(observation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          nodeId: expect.any(String),
-          backendNodeId: expect.any(Number),
-          role: "textbox",
-          name: "Target field",
-          value: "second你好 🌍",
-          properties: expect.any(Object),
-        }),
-      ]),
-    )
-    expect(JSON.stringify(observation?.nodes)).not.toContain("First field")
-    expect(observation?.nodes).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          role: "checkbox",
-          name: "Approved option",
-          properties: expect.objectContaining({ checked: "true" }),
-        }),
-      ]),
-    )
-    await testInfo.attach("owned-browser-observation", {
-      body: JSON.stringify(observation, null, 2),
-      contentType: "application/json",
-    })
+      page.getByRole("tab", { name: "Agent browser form", exact: true }),
+    ).toHaveAttribute("aria-selected", "true")
     expect(rendererErrors).toEqual([])
-  } catch (cause) {
-    const protocol = await application.evaluate(() =>
-      Reflect.get(globalThis, "yakitoriBrowserProtocolTrace"),
-    )
-    await testInfo.attach("browser-model-diagnostics", {
-      body: JSON.stringify({
-        modelCalls,
-        errors,
-        observation,
-        navigationReceipt,
-        navigatedObservation,
-        frameSubmittedValues,
-        frameAfterReady,
-        framePointerEvents,
-        frameSelectEvents,
-        uploadedFiles,
-        uploadedDirectoryFiles,
-        fileChoiceEvents,
-        dialogReplies,
-        promptReplies,
-        downloadArtifact,
-        dragReplies,
-        protocol,
-      }),
-      contentType: "application/json",
-    })
-    throw cause
   } finally {
-    application.context().off("page", bindDialogs)
-    application
-      .context()
-      .pages()
-      .forEach((page) => {
-        page.off("dialog", ignoreDialog)
-      })
-    releaseCompletion.resolve()
     client.close()
     source.closeAllConnections()
     await new Promise<void>((resolve) => source.close(() => resolve()))
@@ -2599,16 +1066,16 @@ test("packaged scripts compose approved MCP and browser calls through real deskt
           finish = "stop"
         if (body.tools?.length) {
           if (modelCalls++ === 0) {
-            const code = `const control = await tools.call('computer__control',{action:'fixture_effect'}); if(!control.ok) throw control;
-const listed = await tools.call('browser',{action:'list'}); if(!listed.ok) throw listed;
+            const code = `const control = await tools.call('computer__input',{action:'fixture_effect'}); if(!control.ok) throw control;
+const listed = await tools.call('browser_inspect',{action:'tabs'}); if(!listed.ok) throw listed;
 const tab = listed.output.tabs.find(tab=>tab.url===args.url); if(!tab) throw 'Missing script tab';
-let observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
-const button = observed.output.nodes.find(node=>node.name==='Cold script click'&&node.elementReference); if(!button) throw 'Missing cold button';
-const clicked = await tools.call('browser_input',{action:'click',target:tab.target,reference:button.elementReference}); if(!clicked.ok) throw clicked;
-observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
-const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.inputReference); if(!node) throw 'Missing script input';
-const result = await tools.call('browser_input',{action:'fill',target:tab.target,reference:node.inputReference,text:'Script 你好 🌍'}); if(!result.ok) throw result;
-const image = await tools.call('browser_capture',{action:'capture',mode:'viewport',target:tab.target}); if(!image.ok) throw image; show(image); return result.output;`
+let observed = await tools.call('browser_inspect',{action:'snapshot',tabId:tab.tabId}); if(!observed.ok) throw observed;
+const button = observed.output.nodes.find(node=>node.name==='Cold script click'&&node.ref); if(!button) throw 'Missing cold button';
+const clicked = await tools.call('browser_act',{action:'click',tabId:tab.tabId,ref:button.ref}); if(!clicked.ok) throw clicked;
+observed = await tools.call('browser_inspect',{action:'snapshot',tabId:tab.tabId}); if(!observed.ok) throw observed;
+const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.ref); if(!node) throw 'Missing script input';
+const result = await tools.call('browser_act',{action:'fill',tabId:tab.tabId,ref:node.ref,text:'Script 你好 🌍'}); if(!result.ok) throw result;
+const image = await tools.call('browser_inspect',{action:'screenshot',mode:'viewport',tabId:tab.tabId}); if(!image.ok) throw image; show(image); return result.output;`
             delta = {
               role: "assistant",
               tool_calls: [
@@ -2676,7 +1143,7 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
   try {
     await writeFile(
       helper,
-      `const fs=require('node:fs'); const rl=require('node:readline').createInterface({input:process.stdin}); rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return; if(m.method==='tools/call')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m.params)+'\\n'); const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'script-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[{type:'text',text:'Owned helper acknowledged'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
+      `const fs=require('node:fs'); const rl=require('node:readline').createInterface({input:process.stdin}); rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return; if(m.method==='tools/call')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m.params)+'\\n'); const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'script-computer',version:'1'}}:m.method==='tools/list'?{tools:['observe','input','app','internal'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[{type:'text',text:'Owned helper acknowledged'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
     )
     await client.request("config/write", {
       keyPath: ["mcp_servers", "computer"],
@@ -2685,7 +1152,7 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
         args: [helper],
         enabled: true,
         required: true,
-        enabled_tools: ["control"],
+        enabled_tools: ["observe", "input", "app"],
       },
     })
     await client.request("provider/configuration/write", {
@@ -2732,7 +1199,7 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
       .getByRole("textbox", { name: "Message the Mate" })
       .fill("Run the owned script.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
-    for (let index = 0; index < 7; index++)
+    for (let index = 0; index < 3; index++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((error) => {
@@ -2778,11 +1245,15 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
     expect(
       calls.filter(
         (call) =>
-          call.name === "control" &&
-          call.arguments?.action === "fixture_effect",
+          call.name === "input" && call.arguments?.action === "fixture_effect",
       ),
     ).toHaveLength(1)
-    expect(calls.filter((call) => call.name === "turn_ended")).toHaveLength(1)
+    expect(
+      calls.filter(
+        (call) =>
+          call.name === "internal" && call.arguments?.action === "turn_ended",
+      ),
+    ).toHaveLength(1)
     expect(
       (await client.request("computer/status", {})).inputOwner,
     ).toBeUndefined()
@@ -2991,7 +1462,7 @@ test("packaged preview recording decodes and saves WebM through Electron's downl
           connected: true,
           backend: "yakitori-native",
           serverName: "computer",
-          tools: ["control"],
+          tools: ["observe", "input", "app"],
           permissions: { accessibility: true, screenRecording: true },
         }
       else if (request.method === "computer/preview/catalog")

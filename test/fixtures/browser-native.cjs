@@ -83,10 +83,10 @@ app
         const reference = async (name) => {
           const observed = await connection.observe(signal())
           const node = observed.nodes.find(
-            (node) => node.name === name && node.elementReference,
+            (node) => node.name === name && node.ref,
           )
           assert(node, `Missing ${name}`)
-          return node.elementReference
+          return node.ref
         }
         try {
           assert.equal(window.isVisible(), false)

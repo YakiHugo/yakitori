@@ -55,6 +55,8 @@ import Foundation
         rejects(code: "invalid_element") { _ = try owned.target(["element": "0"]) }
         rejects(code: "invalid_element") { _ = try owned.target(["element": 1]) }
         try appSnapshot.validate(id: appSnapshot.id, windows: [window, other], displays: [])
+        let tooltip = WindowIdentity(pid: 42, launched: window.launched, windowID: 21, frame: window.frame, layer: 4)
+        try appSnapshot.validate(id: appSnapshot.id, windows: [tooltip, window, other], displays: [])
         let closingAppWindow = try appSnapshot.validatePreview(windows: [window], displays: [])
         precondition(!closingAppWindow)
         rejects { try appSnapshot.validate(id: appSnapshot.id, windows: [window], displays: []) }
@@ -67,6 +69,7 @@ import Foundation
         let desktopTarget = try screen.target(["x": 0.0, "y": 0.0])
         precondition(desktopTarget.window == nil && desktopTarget.point == CGPoint(x: -1000, y: 0))
         try screen.validate(id: screen.id, windows: [window, other], displays: [display])
+        try screen.validate(id: screen.id, windows: [tooltip, moved], displays: [display])
         let changingScreenContent = try screen.validatePreview(windows: [], displays: [display])
         precondition(changingScreenContent)
         rejects(code: "display_not_found") { _ = try screen.validatePreview(windows: [], displays: []) }
@@ -81,6 +84,9 @@ import Foundation
         rejects { _ = try menuPath(Array(repeating: "Item", count: 17)) }
         let zoomBox = try zoomRegion(["x1": 100, "y1": 100, "x2": 300, "y2": 300], snapshot: snapshot)
         precondition(zoomBox == CGRect(x: -250, y: 100, width: 100, height: 100))
+        let normalizedZoom = try zoomRegion(["coordinate_space": "normalized", "x1": 125, "y1": 250, "x2": 375, "y2": 750], snapshot: snapshot)
+        let screenZoom = try zoomRegion(["coordinate_space": "screen", "x1": -250, "y1": 100, "x2": -150, "y2": 200], snapshot: snapshot)
+        precondition(normalizedZoom == zoomBox && screenZoom == zoomBox)
         rejects { _ = try zoomRegion(["x1": true, "y1": 0, "x2": 10, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 801, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 1, "y1": 1, "x2": 1, "y2": 10], snapshot: snapshot) }
@@ -89,8 +95,14 @@ import Foundation
         try observationContracts()
         try applicationContracts()
         try await advancedContracts()
+        try await accessibilityCancellationContract()
+        try nativeResourceCleanupContract()
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
+        let grave = try keyChord("`"), backslash = try keyChord("\\")
+        let plus = try keyChord("CMD++"), numpadPlus = try keyChord("NUMPADPLUS")
+        precondition(grave.0 == 50 && grave.1.isEmpty && backslash.0 == 42 && backslash.1.isEmpty)
+        precondition(plus.0 == 24 && plus.1 == [.maskCommand, .maskShift] && numpadPlus.0 == 69 && numpadPlus.1.isEmpty)
         rejects { _ = try keyChord("TYPO+A") }
         // Exercise Apple's event bridge without posting input or requesting TCC.
         // Window hit-test fields alone still produce NSEvent.windowNumber == 0.
@@ -178,7 +190,7 @@ import Foundation
         precondition((diff["updated"] as! [[String: Any]]).count == 1 && (diff["added"] as! [[String: Any]]).isEmpty)
         let absent = try AXExpectation(["title": "missing", "exists": false])
         precondition(absent.satisfied(by: before))
-        var partial = before; partial.truncated = true
+        var partial = before; partial.incompleteRoots = true
         precondition(!absent.satisfied(by: partial))
         let computer = Computer()
         computer.lastObservation = after

@@ -63,9 +63,12 @@ struct Snapshot {
     let imageHeight: Int?
     let elements: [ObservedElement]
     var rows: [[String: Any]] = []
-    var truncated = false
+    var incompleteRoots = false
     var mode: ObservationMode = .both
     var revisions: [Int32: UInt64] = [:]
+    var isSubtree = false
+
+    var truncated: Bool { incompleteRoots || rows.contains(where: isIncompleteAXRow) }
 
     func target(_ args: [String: Any]) throws -> InputTarget {
         let hasElement = args["element"] != nil || args["selector"] != nil
@@ -77,10 +80,12 @@ struct Snapshot {
             let index: Int?
             if args["selector"] != nil {
                 guard args["element"] == nil else { throw ComputerFailure("invalid_arguments", "Choose selector or element, not both.") }
-                guard !truncated else { throw ComputerFailure("tree_truncated", "A partial AX tree cannot prove selector uniqueness; observe a subtree or address an observed element explicitly.") }
                 let selector = try AXExpectation(args["selector"])
                 guard selector.exists else { throw ComputerFailure("invalid_arguments", "An input selector must identify an existing element.") }
                 let matches = rows.filter(selector.matches)
+                guard matches.count > 1 || !selector.coverageIncomplete(in: self) else {
+                    throw ComputerFailure("tree_truncated", "A partial AX tree cannot prove selector uniqueness; observe a subtree or address an observed element explicitly.")
+                }
                 guard matches.count == 1 else { throw ComputerFailure("ambiguous_element", "The exact selector must match one observed element; found \(matches.count).") }
                 index = matches.first?["element"] as? Int
             } else { index = args["element"] as? Int }
@@ -105,13 +110,16 @@ struct Snapshot {
     }
 
     func validate(id: String?, windows current: [WindowIdentity], displays: [DisplayIdentity]) throws {
-        let selected: [WindowIdentity]
+        let sameWindows: Bool
         switch scope {
-        case .window: selected = current.filter { $0.windowID == windows.first?.windowID }
-        case .app: selected = current.filter { $0.pid == windows.first?.pid }
-        case .screen: selected = current.filter { $0.layer == 0 && $0.frame.intersects(frame) }
+        case .window: sameWindows = current.filter { $0.windowID == windows.first?.windowID } == windows
+        case .app:
+            let selected = current.filter { $0.pid == windows.first?.pid && $0.layer == 0 }
+            sameWindows = selected == windows.filter { $0.layer == 0 } &&
+                current.contains { $0.pid == windows.first?.pid && $0.launched == windows.first?.launched }
+        case .screen: sameWindows = true
         }
-        guard id == self.id, selected == windows, display.map({ displays.contains($0) }) ?? true else {
+        guard id == self.id, sameWindows, display.map({ displays.contains($0) }) ?? true else {
             throw ComputerFailure("stale_snapshot", "Observe again; the target windows or display changed, or the snapshot was already used.")
         }
         for (pid, revision) in revisions where try NativeResources.revision(pid) != revision {
@@ -208,78 +216,147 @@ func windowElement(_ window: WindowIdentity, deadline: Date = Date().addingTimeI
     return matches.count == 1 ? matches[0] : nil
 }
 
+func isIncompleteAXRow(_ row: [String: Any]) -> Bool {
+    row["children_incomplete"] != nil || row["unreadable_attributes"] != nil || row["truncated_attributes"] != nil
+}
+
+enum AXChildrenIncomplete: String {
+    case nodeBudget = "node_budget", deadline, axError = "ax_error"
+}
+
+func boundedAXChildren(_ element: AXUIElement, limit: Int) -> (children: [AXUIElement], incomplete: AXChildrenIncomplete?) {
+    var count: CFIndex = 0
+    switch AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count) {
+    case .noValue, .attributeUnsupported: return ([], nil)
+    case .success: break
+    default: return ([], .axError)
+    }
+    if count == 0 { return ([], nil) }
+    var value: CFArray?
+    guard AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, min(count, limit), &value) == .success else {
+        return ([], .axError)
+    }
+    return decodedAXChildren(value, expected: count, limit: limit)
+}
+
+func decodedAXChildren(_ value: CFTypeRef?, expected: Int? = nil, limit: Int) -> (children: [AXUIElement], incomplete: AXChildrenIncomplete?) {
+    guard let items = value as? [AnyObject] else { return ([], .axError) }
+    let children = items.prefix(limit).compactMap { item -> AXUIElement? in
+        guard CFGetTypeID(item) == AXUIElementGetTypeID() else { return nil }
+        return (item as! AXUIElement)
+    }
+    let count = expected ?? items.count
+    if children.count != min(count, limit) { return (children, .axError) }
+    return (children, count > limit ? .nodeBudget : nil)
+}
+
 func accessibilityTree(
     _ roots: [(WindowIdentity, AXUIElement)],
     applicationRoots: [(WindowIdentity, AXUIElement)] = [],
     deadline: Date = Date().addingTimeInterval(1),
+    cancellation: AccessibilityCancellation? = nil,
+    copyChildren: (AXUIElement, Int) -> (children: [AXUIElement], incomplete: AXChildrenIncomplete?) = boundedAXChildren,
     copyAttribute: (AXUIElement, CFString, UnsafeMutablePointer<CFTypeRef?>) -> AXError = AXUIElementCopyAttributeValue
-) -> (rows: [[String: Any]], elements: [ObservedElement], truncated: Bool) {
+) throws -> (rows: [[String: Any]], elements: [ObservedElement], incompleteRoots: Bool) {
     var queue = roots.map { ($0.0, $0.1, Optional<Int>.none, false) } + applicationRoots.map { ($0.0, $0.1, Optional<Int>.none, true) }
     var elements: [ObservedElement] = []
     var rows: [[String: Any]] = []
     var visited = Set<AXUIElement>()
-    // A hostile or broken AX provider must not grow the reply indefinitely.
-    // This is a per-observation memory boundary, not an application quota.
-    let nodeBudget = 500
+    let visibleNodeSafetyLimit = 500
+    let visitedNodeSafetyLimit = 2_000
     var index = 0
     var bytes = 0
-    var truncated = false
-    // Missing optional attributes/leaf children are not read failures. Other AX
-    // errors (or a success without a value) leave unknown matches/descendants,
-    // so the retained rows cannot prove uniqueness, absence or a complete diff.
-    func read(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
-        var value: CFTypeRef?
-        switch copyAttribute(element, name as CFString, &value) {
-        case .success:
-            if value == nil { truncated = true }
-            return value
-        case .attributeUnsupported, .noValue: return nil
-        default: truncated = true; return nil
-        }
+    var incompleteRoots = false
+    if queue.count > visitedNodeSafetyLimit {
+        queue = Array(queue.prefix(visitedNodeSafetyLimit))
+        incompleteRoots = true
     }
-    while index < queue.count, elements.count < nodeBudget {
+    func markIncomplete(_ parent: Int?, _ reason: AXChildrenIncomplete) {
+        if let parent { rows[parent]["children_incomplete"] = rows[parent]["children_incomplete"] ?? reason.rawValue }
+        else { incompleteRoots = true }
+    }
+    while index < queue.count {
+        try cancellation?.check()
         let (window, element, parent, applicationUI) = queue[index]
         index += 1
         guard visited.insert(element).inserted else { continue }
-        if Date() >= deadline { truncated = true; break }
+        if Date() >= deadline { markIncomplete(parent, .deadline); continue }
+        if elements.count >= visibleNodeSafetyLimit { markIncomplete(parent, .nodeBudget); continue }
         AXUIElementSetMessagingTimeout(element, 0.2)
         var row: [String: Any] = ["element": elements.count, "pid": window.pid]
+        var unreadable: [String] = []
+        var clipped: [String] = []
+        func read(_ key: String, _ name: String) throws -> CFTypeRef? {
+            try cancellation?.check()
+            guard Date() < deadline else { unreadable.append(key); return nil }
+            var value: CFTypeRef?
+            let status = copyAttribute(element, name as CFString, &value)
+            if status == .success, let value { return value }
+            if status != .attributeUnsupported && status != .noValue { unreadable.append(key) }
+            return nil
+        }
+        func storeText(_ value: String, as key: String) {
+            let sample = value.unicodeScalars.prefix(1001)
+            if sample.count > 1000 { clipped.append(key) }
+            row[key] = String(sample.prefix(1000))
+        }
         row[applicationUI ? "anchor_window_id" : "window_id"] = window.windowID
         if let parent { row["parent"] = parent }
-        if let frame = elementFrame(element) { row["frame"] = frameData(frame) }
-        for (key, name) in [("enabled", kAXEnabledAttribute), ("focused", kAXFocusedAttribute)] {
-            if let value = attribute(element, name) as? Bool { row[key] = value }
-        }
-        for (key, name) in [("role", kAXRoleAttribute), ("title", kAXTitleAttribute), ("description", kAXDescriptionAttribute)] {
-            if let raw = read(element, name) {
-                guard let value = raw as? String else { truncated = true; continue }
-                row[key] = String(value.prefix(1000))
-                if value.count > 1000 { row["truncated_attributes"] = (row["truncated_attributes"] as? [String] ?? []) + [key] }
+        for (key, name) in [("role", kAXRoleAttribute), ("title", kAXTitleAttribute), ("description", kAXDescriptionAttribute),
+                             ("identifier", kAXIdentifierAttribute), ("subrole", kAXSubroleAttribute), ("role_description", kAXRoleDescriptionAttribute),
+                             ("placeholder", kAXPlaceholderValueAttribute), ("help", kAXHelpAttribute)] {
+            if let raw = try read(key, name) {
+                if let value = raw as? String { storeText(value, as: key) }
+                else { unreadable.append(key) }
             }
         }
-        // Secure fields must never be included in the text observation.
-        let secure = attribute(element, kAXSubroleAttribute) as? String == kAXSecureTextFieldSubrole
-        if !secure, let value = read(element, kAXValueAttribute) {
-            if let string = value as? String {
-                row["value"] = String(string.prefix(1000))
-                if string.count > 1000 { row["truncated_attributes"] = (row["truncated_attributes"] as? [String] ?? []) + ["value"] }
+        for (key, name) in [("enabled", kAXEnabledAttribute), ("focused", kAXFocusedAttribute), ("selected", kAXSelectedAttribute), ("expanded", kAXExpandedAttribute)] {
+            if let value = try read(key, name) as? Bool { row[key] = value }
+        }
+        if row["subrole"] as? String != kAXSecureTextFieldSubrole && !unreadable.contains("subrole") {
+            if let value = try read("value", kAXValueAttribute) {
+                if let string = value as? String { storeText(string, as: "value") }
+                else if let number = value as? NSNumber { row["value"] = number }
             }
-            else if let number = value as? NSNumber { row["value"] = number }
+        } else { unreadable.append("value") }
+        if let url = try read("url", kAXURLAttribute) {
+            if let value = url as? URL { storeText(value.absoluteString, as: "url") }
+            else if let value = url as? String { storeText(value, as: "url") }
         }
-        var actions: CFArray?
-        if AXUIElementCopyActionNames(element, &actions) == .success { row["actions"] = actions as? [String] ?? [] }
-        let rowBytes = (try? JSONSerialization.data(withJSONObject: row).count) ?? 0
-        if bytes + rowBytes > 256 * 1024 { truncated = true; break }
-        bytes += rowBytes
-        rows.append(row)
-        elements.append(ObservedElement(value: element, window: window, applicationUI: applicationUI))
-        guard let value = read(element, kAXChildrenAttribute) else { continue }
-        guard CFGetTypeID(value) == CFArrayGetTypeID(), let children = value as? [AnyObject],
-              children.allSatisfy({ CFGetTypeID($0) == AXUIElementGetTypeID() }) else {
-            truncated = true; continue
+        try cancellation?.check()
+        let actions = Date() < deadline ? accessibilityActions(element) : []
+        if !actions.isEmpty { row["actions"] = actions.prefix(32).map { String($0.unicodeScalars.prefix(128)) } }
+        let remaining = visitedNodeSafetyLimit - queue.count
+        let branch: (children: [AXUIElement], incomplete: AXChildrenIncomplete?)
+        if Date() >= deadline { branch = ([], .deadline) }
+        else if remaining == 0 { branch = ([], .nodeBudget) }
+        else { branch = copyChildren(element, min(visibleNodeSafetyLimit, remaining)) }
+        if let incomplete = branch.incomplete { row["children_incomplete"] = incomplete.rawValue }
+        var layoutOnly = parent != nil && branch.incomplete == nil && unreadable.isEmpty && clipped.isEmpty && actions.isEmpty &&
+            [kAXGroupRole, kAXSplitGroupRole].contains(row["role"] as? String ?? "") && row["focused"] as? Bool != true &&
+            row["selected"] == nil && row["expanded"] == nil &&
+            ["title", "description", "value", "identifier", "help", "placeholder", "subrole", "url"].allSatisfy { row[$0] == nil || row[$0] as? String == "" }
+        if layoutOnly {
+            let horizontal = try read("horizontal_scroll_bar", kAXHorizontalScrollBarAttribute)
+            let vertical = try read("vertical_scroll_bar", kAXVerticalScrollBarAttribute)
+            layoutOnly = horizontal == nil && vertical == nil && unreadable.isEmpty
         }
-        let parentIndex = elements.count - 1
-        queue.append(contentsOf: children.prefix(max(0, nodeBudget - queue.count)).map { (window, $0 as! AXUIElement, Optional(parentIndex), applicationUI) })
+        if !unreadable.isEmpty { row["unreadable_attributes"] = unreadable }
+        if !clipped.isEmpty { row["truncated_attributes"] = clipped }
+        let childParent: Int?
+        if layoutOnly { childParent = parent }
+        else {
+            try cancellation?.check()
+            if Date() < deadline, let frame = elementFrame(element) { row["frame"] = frameData(frame) }
+            let rowBytes = try JSONSerialization.data(withJSONObject: row).count
+            if bytes + rowBytes > 256 * 1024 { markIncomplete(parent, .nodeBudget); continue }
+            bytes += rowBytes
+            childParent = elements.count
+            rows.append(row)
+            elements.append(ObservedElement(value: element, window: window, applicationUI: applicationUI))
+        }
+        queue.append(contentsOf: branch.children.map { (window, $0, childParent, applicationUI) })
     }
-    return (rows, elements, truncated || index < queue.count || queue.count >= nodeBudget)
+    try cancellation?.check()
+    return (rows, elements, incompleteRoots)
 }
