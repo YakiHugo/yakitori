@@ -92,6 +92,7 @@ import Foundation
         rejects { _ = try zoomRegion(["x1": 1, "y1": 1, "x2": 1, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 10, "y2": 10], snapshot: textOnly) }
         try snapshotCompletenessContracts()
+        inputChangeContracts()
         try observationContracts()
         try applicationContracts()
         try await advancedContracts()

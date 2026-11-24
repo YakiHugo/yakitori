@@ -67,8 +67,14 @@ struct Snapshot {
     var mode: ObservationMode = .both
     var revisions: [Int32: UInt64] = [:]
     var isSubtree = false
+    var visualFingerprint: Data?
 
     var truncated: Bool { incompleteRoots || rows.contains(where: isIncompleteAXRow) }
+    var isFullWindow: Bool {
+        scope == .window && !isSubtree && windows.count == 1 &&
+            windows.first?.launched != nil && windows.first?.frame == frame
+    }
+    var hasWindowAX: Bool { isFullWindow && mode != .vision && !rows.isEmpty }
 
     func target(_ args: [String: Any]) throws -> InputTarget {
         let hasElement = args["element"] != nil || args["selector"] != nil

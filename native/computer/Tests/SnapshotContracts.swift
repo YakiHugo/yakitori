@@ -134,6 +134,49 @@ func snapshotCompletenessContracts() throws {
     catch is CancellationError {}
 }
 
+func inputChangeContracts() {
+    let pid: pid_t = 100000001
+    let frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+    let window = WindowIdentity(pid: pid, launched: Date(timeIntervalSince1970: 10), windowID: 7, frame: frame, layer: 0)
+    let element = ObservedElement(value: AXUIElementCreateApplication(pid), window: window)
+    func fingerprint(red: CGFloat) -> Data {
+        let image = CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 256,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        image.setFillColor(red: red, green: 0, blue: 0, alpha: 1)
+        image.fill(frame)
+        return screenshotFingerprint(image.makeImage()!)!
+    }
+    let baseline = Snapshot(scope: .window, frame: frame, windows: [window], display: nil,
+        imageWidth: 64, imageHeight: 64, elements: [element],
+        rows: [["element": 0, "role": "AXTextField", "value": "before"]], visualFingerprint: fingerprint(red: 0))
+    var current = baseline
+    current.visualFingerprint = fingerprint(red: 0)
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] ==
+        ["ax_changed": false, "visual_changed": false, "no_effect": true])
+    current.visualFingerprint = fingerprint(red: 1)
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] ==
+        ["ax_changed": false, "visual_changed": true])
+    current.visualFingerprint = nil
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] == ["ax_changed": false])
+    current.rows[0]["value"] = "after"
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] == ["ax_changed": true])
+
+    current = baseline
+    current.incompleteRoots = true
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] == ["visual_changed": false])
+    current.rows[0]["value"] = "partial but readable"
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] ==
+        ["ax_changed": true, "visual_changed": false])
+    current.rows[0]["unreadable_attributes"] = ["value"]
+    precondition(current.changesSinceInput(baseline) as? [String: Bool] == ["visual_changed": false])
+    current.isSubtree = true
+    precondition(current.changesSinceInput(baseline).isEmpty)
+    let replacement = WindowIdentity(pid: pid, launched: Date(timeIntervalSince1970: 11), windowID: 7, frame: frame, layer: 0)
+    let differentWindow = Snapshot(scope: .window, frame: frame, windows: [replacement], display: nil,
+        imageWidth: 64, imageHeight: 64, elements: [], visualFingerprint: fingerprint(red: 0))
+    precondition(differentWindow.changesSinceInput(baseline).isEmpty)
+}
+
 func nativeResourceCleanupContract() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("yakitori-resource-contract-\(UUID())")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)

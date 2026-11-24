@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
+import { computerUseServerName } from "../protocol/connections.ts"
 import {
   McpClient,
   McpConnectionError,
@@ -689,7 +690,12 @@ function runtimeTool(
     async execute(input, context) {
       markUsed(context)
       const result = await call(asJsonValue(input), context.signal, context)
-      return mcpResult(asJsonValue(result), context)
+      // Native input supplies a size-bounded, data-only rendering of the diff.
+      const structuredContentInText =
+        serverName === computerUseServerName &&
+        tool.name === "input" &&
+        result._meta?.["yakitori/structuredContentInText"] === true
+      return mcpResult(asJsonValue(result), context, structuredContentInText)
     },
     dispose: () => client.release(),
   }

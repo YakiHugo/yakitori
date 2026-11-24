@@ -39,6 +39,7 @@ extension Computer {
     private func executeSequence(_ steps: [[String: Any]], args: [String: Any], pid: Int32, launch: Double, deadline: TimeInterval) async throws -> [String: Any] {
         var completed: [[String: Any]] = []
         var executing = 0
+        var baseline: Snapshot?
         do {
             for (index, step) in steps.enumerated() {
                 executing = index
@@ -56,9 +57,10 @@ extension Computer {
                     // Fixed caller-supplied native steps only: no planning,
                     // branches, automatic retries, or cross-application control.
                     _ = try await observe(target)
+                    if baseline == nil { baseline = snapshot }
                     var input = step
                     input["snapshot_id"] = snapshot?.id
-                    outcome = try await self.input(step["action"] as! String, input)
+                    outcome = try await self.input(step["action"] as! String, input, compareChanges: false)
                 }
                 let evidence = outcome["structuredContent"] as! [String: Any]
                 // Keep the batch reply within MCP framing even when each step
@@ -74,7 +76,8 @@ extension Computer {
                 }
             }
             guard let lastObservation else { preconditionFailure("A nonempty native batch must have observed its target") }
-            return try await completeInput(["completed_steps": completed, "effect": "unverified"], args: args, ticket: lastObservation)
+            return try await completeInput(["completed_steps": completed, "effect": "unverified"],
+                args: args, ticket: lastObservation, compareTo: baseline)
         } catch {
             snapshot = nil
             let failure = error as? ComputerFailure

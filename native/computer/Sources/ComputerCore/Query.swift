@@ -1,6 +1,10 @@
 import Foundation
 import ApplicationServices
 
+private func unknownAXFields(_ row: [String: Any]) -> Set<String> {
+    Set((row["truncated_attributes"] as? [String] ?? []) + (row["unreadable_attributes"] as? [String] ?? []))
+}
+
 struct AXExpectation {
     let fields: [String: String]
     let exists: Bool
@@ -22,7 +26,7 @@ struct AXExpectation {
     }
 
     func matches(_ row: [String: Any]) -> Bool {
-        let unknown = unknownFields(row)
+        let unknown = unknownAXFields(row)
         return fields.allSatisfy { key, value in
             !unknown.contains(key) && text(row[key]) == value
         }
@@ -32,14 +36,10 @@ struct AXExpectation {
         (value as? String) ?? (value as? NSNumber)?.stringValue
     }
 
-    private func unknownFields(_ row: [String: Any]) -> Set<String> {
-        Set((row["truncated_attributes"] as? [String] ?? []) + (row["unreadable_attributes"] as? [String] ?? []))
-    }
-
     func coverageIncomplete(in snapshot: Snapshot) -> Bool {
         snapshot.incompleteRoots || snapshot.rows.contains { row in
             if row["children_incomplete"] != nil { return true }
-            let unknown = unknownFields(row)
+            let unknown = unknownAXFields(row)
             return fields.keys.contains(where: unknown.contains) && fields.allSatisfy { key, expected in
                 unknown.contains(key) || text(row[key]) == expected
             }
@@ -53,6 +53,26 @@ struct AXExpectation {
 }
 
 extension Snapshot {
+    func changesSinceInput(_ previous: Snapshot, diff: [String: Any]? = nil) -> [String: Any] {
+        guard isFullWindow, previous.isFullWindow, windows == previous.windows else { return [:] }
+        var receipt: [String: Any] = [:]
+        if hasWindowAX, previous.hasWindowAX {
+            let changes = diff ?? difference(from: previous, verifiedChangesOnly: true)
+            if let added = changes["added"] as? [[String: Any]], let updated = changes["updated"] as? [[String: Any]],
+               let removed = changes["removed"] as? [Int] {
+                let changed = !added.isEmpty || !updated.isEmpty || !removed.isEmpty
+                if changed || changes["complete"] as? Bool == true { receipt["ax_changed"] = changed }
+            }
+        }
+        if let visualFingerprint, let before = previous.visualFingerprint {
+            receipt["visual_changed"] = visualFingerprint != before
+        }
+        if receipt["ax_changed"] as? Bool == false, receipt["visual_changed"] as? Bool == false {
+            receipt["no_effect"] = true
+        }
+        return receipt
+    }
+
     func observationArguments(mode: String = "ax") -> [String: Any] {
         var args: [String: Any] = ["action": "observe", "scope": scope.rawValue, "mode": mode]
         if scope == .screen { args["display_id"] = display.map { Int($0.id) } }
@@ -61,12 +81,20 @@ extension Snapshot {
         return args
     }
 
-    func difference(from previous: Snapshot) -> [String: Any] {
+    func difference(from previous: Snapshot, verifiedChangesOnly: Bool = false) -> [String: Any] {
         var added: [[String: Any]] = [], updated: [[String: Any]] = []
         var retained = Set<Int>()
+        let complete = !truncated && !previous.truncated
+        let compareKnownFields = verifiedChangesOnly && !complete
+        // An unreadable attribute need not prevent a known value change, but
+        // a missing branch makes adding/removing a node ambiguous.
+        let compareMembership = !compareKnownFields || (!incompleteRoots && !previous.incompleteRoots &&
+            !rows.contains { $0["children_incomplete"] != nil } &&
+            !previous.rows.contains { $0["children_incomplete"] != nil })
         for (index, element) in elements.enumerated() {
             guard let old = previous.elements.firstIndex(where: { $0.window.windowID == element.window.windowID && CFEqual($0.value, element.value) }) else {
-                added.append(rows[index]); continue
+                if compareMembership { added.append(rows[index]) }
+                continue
             }
             retained.insert(old)
             var before = previous.rows[old], after = rows[index]
@@ -74,11 +102,18 @@ extension Snapshot {
             // attributes by AX identity, never by labels or a shifted position.
             before.removeValue(forKey: "element"); before.removeValue(forKey: "parent")
             after.removeValue(forKey: "element"); after.removeValue(forKey: "parent")
+            if compareKnownFields {
+                let known = Set(before.keys).intersection(after.keys)
+                    .subtracting(unknownAXFields(before)).subtracting(unknownAXFields(after))
+                    .subtracting(["unreadable_attributes", "truncated_attributes", "children_incomplete"])
+                before = before.filter { known.contains($0.key) }
+                after = after.filter { known.contains($0.key) }
+            }
             if !NSDictionary(dictionary: before).isEqual(to: after) { updated.append(rows[index]) }
         }
         return ["base_snapshot_id": previous.id, "added": added, "updated": updated,
-            "removed": previous.elements.indices.filter { !retained.contains($0) },
-            "complete": !truncated && !previous.truncated]
+            "removed": compareMembership ? previous.elements.indices.filter { !retained.contains($0) } : [],
+            "complete": complete]
     }
 }
 
