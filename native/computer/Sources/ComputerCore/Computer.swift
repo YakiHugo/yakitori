@@ -79,12 +79,13 @@ import Darwin
         }
     }
 
-    func result(_ payload: [String: Any], screenshotJPEG: Data? = nil) throws -> [String: Any] {
+    func result(_ payload: [String: Any], screenshotJPEG: Data? = nil, observationBodyLimit: Int? = nil) throws -> [String: Any] {
         var data = payload
         let text: String
         if let observation = try renderObservationText(&data) {
             text = observation
-        } else if var nested = data["observation"] as? [String: Any], let observation = try renderObservationText(&nested) {
+        } else if var nested = data["observation"] as? [String: Any],
+                  let observation = try renderObservationText(&nested, bodyLimit: observationBodyLimit) {
             data.removeValue(forKey: "observation")
             text = observation + "\n" + String(decoding: try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]), as: UTF8.self)
             data["observation"] = nested

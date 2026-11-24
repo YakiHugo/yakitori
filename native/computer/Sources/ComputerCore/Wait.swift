@@ -92,9 +92,12 @@ extension Computer {
         }
     }
 
-    func completeInput(_ evidence: [String: Any], args: [String: Any], ticket: Snapshot) async throws -> [String: Any] {
+    func completeInput(_ evidence: [String: Any], args: [String: Any], ticket: Snapshot,
+                       compareTo baseline: Snapshot? = nil) async throws -> [String: Any] {
         var data = evidence
         var images: [[String: Any]] = []
+        var observed: Snapshot?
+        var automaticDiff = false
         do {
             if args["expect"] != nil {
                 var target = ticket.observationArguments()
@@ -103,18 +106,39 @@ extension Computer {
                 let state = checked["structuredContent"] as! [String: Any]
                 data["verification"] = state["matched"] as? Bool == true ? "matched" : "timed_out"
                 data["observation"] = state
+                observed = lastObservation
             }
             if let after = args["after"] as? String {
-                let observed = try await observe(ticket.observationArguments(mode: after))
-                data["observation"] = observed["structuredContent"]
-                images = (observed["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "image" }
+                let response = try await observe(ticket.observationArguments(mode: after))
+                data["observation"] = response["structuredContent"]
+                images = (response["content"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "image" }
+                observed = lastObservation
             }
         } catch let error as ComputerFailure {
             // The input already happened. Preserve its delivery evidence instead
             // of reporting the observation failure as if nothing had been sent.
             data["after_error"] = ["code": error.code, "message": error.message]
         }
-        var result = try self.result(data)
+        if let baseline, baseline.hasWindowAX, args["expect"] == nil, args["after"] == nil {
+            var target = baseline.observationArguments()
+            target["launch_time"] = baseline.windows.first?.launched?.timeIntervalSince1970
+            target["diff_only"] = true
+            do {
+                let response = try await observe(target, inputBaseline: baseline)
+                data["observation"] = response["structuredContent"]
+                data.merge(response["input_changes"] as? [String: Any] ?? [:]) { _, new in new }
+                automaticDiff = true
+            } catch is ComputerFailure {
+                // A best-effort sample does not change the delivery receipt.
+                // The caller can still request another observation.
+            }
+        }
+        if let baseline, let observed {
+            data.merge(observed.changesSinceInput(baseline)) { _, new in new }
+        }
+        // Bound model-facing AX summaries independently of full observations.
+        var result = try self.result(data, observationBodyLimit: automaticDiff ? 4 * 1024 : nil)
+        if automaticDiff { result["_meta"] = ["yakitori/structuredContentInText": true] }
         result["content"] = (result["content"] as! [[String: Any]]) + images
         return result
     }

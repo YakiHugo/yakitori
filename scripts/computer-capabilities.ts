@@ -36,10 +36,15 @@ export async function verifyComputerCapabilities(context: {
       )
     })
   }
-  const observe = async () => {
+  const observe = async (mode: "ax" | "both" = "both") => {
     let result: Result | undefined
     await waitFor(async () => {
-      const next = await call({ action: "observe", pid, window_id: windowID })
+      const next = await call({
+        action: "observe",
+        pid,
+        window_id: windowID,
+        mode,
+      })
       if (
         next.isError &&
         ["stale_snapshot", "window_not_found"].includes(
@@ -86,6 +91,73 @@ export async function verifyComputerCapabilities(context: {
     })
     await waitFor(async () => (await state()).rich === text)
   }
+  await check(
+    "input changes return AX diffs and optional visual evidence",
+    async () => {
+      const before = await observe("ax")
+      const receipt = await input("set_value", before, {
+        element: element(before, "Rich input"),
+        value: "Fixture AX change",
+      })
+      assert.equal(
+        receipt.structuredContent?.ax_changed,
+        true,
+        JSON.stringify({
+          receipt: receipt.structuredContent,
+          truncated: before.structuredContent?.tree_truncated,
+          partial: (
+            before.structuredContent?.elements as Record<string, unknown>[]
+          ).filter(
+            (row) => row.unreadable_attributes || row.children_incomplete,
+          ),
+        }),
+      )
+      assert.equal(receipt.structuredContent?.visual_changed, undefined)
+      assert.equal(receipt.structuredContent?.no_effect, undefined)
+      assert.equal(receipt._meta?.["yakitori/structuredContentInText"], true)
+      assert(!receipt.content.some((block) => block.type === "image"))
+      const observation = receipt.structuredContent?.observation as {
+        input_available: boolean
+        snapshot_id?: string
+        diff: { updated: { value?: string }[] }
+      }
+      assert.equal(observation.input_available, false)
+      assert.equal(observation.snapshot_id, undefined)
+      assert(
+        observation.diff.updated.some(
+          (row) => row.value === "Fixture AX change",
+        ),
+      )
+      assert(
+        receipt.content.some(
+          (block) =>
+            block.type === "text" &&
+            block.text.includes('<ax-diff data-only="true">'),
+        ),
+      )
+
+      const both = await observe()
+      const checked = await input("set_value", both, {
+        element: element(both, "Rich input"),
+        value: "Fixture visual change",
+        after: "both",
+      })
+      assert.equal(checked.structuredContent?.ax_changed, true)
+      assert.equal(typeof checked.structuredContent?.visual_changed, "boolean")
+      assert.equal(checked.structuredContent?.no_effect, undefined)
+      assert(checked.content.some((block) => block.type === "image"))
+      const fresh = checked.structuredContent?.observation as {
+        snapshot_id: string
+      }
+      assert.notEqual(fresh.snapshot_id, both.structuredContent?.snapshot_id)
+      const page = await call({
+        action: "query",
+        snapshot_id: fresh.snapshot_id,
+        limit: 1,
+      })
+      assert.equal(page.structuredContent?.input_available, true)
+    },
+  )
   await check(
     "cached AX pages and subtrees never renew consumed input",
     async () => {

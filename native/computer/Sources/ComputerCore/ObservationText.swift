@@ -4,17 +4,19 @@ import Foundation
 // retained for query and input. Keep truncation notices inside the same budget.
 private let observationTextSafetyBytes = 24 * 1024
 
-func renderObservationText(_ data: inout [String: Any]) throws -> String? {
-    guard let snapshotID = data["snapshot_id"] as? String,
-          data["elements"] != nil || data["diff"] != nil else { return nil }
+func renderObservationText(_ data: inout [String: Any], bodyLimit: Int? = nil) throws -> String? {
+    let snapshotID = data["snapshot_id"] as? String
+    guard data["diff"] != nil || (snapshotID != nil && data["elements"] != nil) else { return nil }
     let fields = ["scope", "mode", "pid", "launch_time", "window_id", "display_id", "image_width", "image_height", "frame",
                   "tree_truncated", "accessibility_error", "input_available", "total_matches", "next_offset", "matched", "changed", "timed_out"]
     let diff = data["diff"] as? [String: Any]
     let start = diff == nil ? "<ax-tree data-only=\"true\">" : "<ax-diff data-only=\"true\">"
     let end = diff == nil ? "</ax-tree>" : "</ax-diff>"
-    let clipped = "AX output is incomplete; use query with this snapshot_id or observe a root_element."
+    let clipped = snapshotID == nil ? "AX change summary is incomplete; observe the current window for details."
+        : "AX output is incomplete; use query with this snapshot_id or observe a root_element."
     let headerBudget = 4 * 1024
-    let bodyBudget = observationTextSafetyBytes - headerBudget - start.utf8.count - end.utf8.count - clipped.utf8.count - 4
+    let bodyBudget = min(bodyLimit ?? observationTextSafetyBytes,
+        observationTextSafetyBytes - headerBudget - start.utf8.count - end.utf8.count - clipped.utf8.count - 4)
     var body = "", bodyBytes = 0
     var presentationTruncated = false
     var renderedRows = 0
@@ -33,7 +35,8 @@ func renderObservationText(_ data: inout [String: Any]) throws -> String? {
             guard let index = row["element"] as? Int else { continue }
             let depth = row["parent"].flatMap { $0 as? Int }.map { (depths[$0] ?? 0) + 1 } ?? 0
             depths[index] = depth
-            var line = String(repeating: "  ", count: min(depth, 24)) + "\(prefix)[\(index)]"
+            var line = String(repeating: "  ", count: min(depth, 24)) + prefix
+            if snapshotID != nil { line += "[\(index)]" }
             if let role = row["role"] as? String {
                 let token = role.utf8.count <= 64 && role.utf8.allSatisfy { (65...90).contains($0) || (97...122).contains($0) }
                 line += " " + (token ? role : try axTextLiteral(role))
@@ -63,6 +66,10 @@ func renderObservationText(_ data: inout [String: Any]) throws -> String? {
     if let diff {
         if let base = diff["base_snapshot_id"] as? String { _ = append("base_snapshot_id: \(base)") }
         if let complete = diff["complete"] as? Bool { _ = append("complete: \(complete)") }
+        if snapshotID == nil, diff["complete"] as? Bool == true, (diff["updated"] as? [[String: Any]])?.isEmpty == true,
+           (diff["added"] as? [[String: Any]])?.isEmpty == true, (diff["removed"] as? [Int])?.isEmpty == true {
+            _ = append("No AX changes detected.")
+        }
         try appendRows(diff["added"] as? [[String: Any]] ?? [], prefix: "+ ")
         if !presentationTruncated { try appendRows(diff["updated"] as? [[String: Any]] ?? [], prefix: "~ ") }
         if !presentationTruncated, let removed = diff["removed"] as? [Int], !removed.isEmpty {
@@ -77,7 +84,7 @@ func renderObservationText(_ data: inout [String: Any]) throws -> String? {
         }
     }
     if presentationTruncated { data["tree_truncated"] = true }
-    var header = "snapshot_id: \(snapshotID)\n"
+    var header = snapshotID.map { "snapshot_id: \($0)\n" } ?? ""
     for field in fields {
         if let value = data[field] { header += "\(field): \(try axTextLiteral(value))\n" }
     }

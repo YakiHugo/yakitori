@@ -89,6 +89,40 @@ if(m.method==='tools/call')reply({content:[{type:'text',text:m.params.name}]});`
   )
 })
 
+it("projects native input's bounded diff while preserving structured output", async () => {
+  const summary = '<ax-diff data-only="true">\n~ AXButton "Ready"\n</ax-diff>'
+  const structuredContent = { ax_changed: true, observation: { diff: {} } }
+  await withServer(
+    `
+if(m.method==='tools/list')reply({tools:[{name:'input',inputSchema:{type:'object'}}]});
+if(m.method==='tools/call')reply({content:[{type:'text',text:${JSON.stringify(summary)}}],
+  structuredContent:${JSON.stringify(structuredContent)},
+  ...(m.params.arguments.after ? {} : {_meta:{'yakitori/structuredContentInText':true}})});`,
+    async ({ root, manager, config }) => {
+      await manager.update({ ...config, computer: config.demo })
+      const computer = manager
+        .tools()
+        .find((tool) => tool.toolName.namespace === "computer")
+      const demo = manager
+        .tools()
+        .find((tool) => tool.toolName.namespace === "demo")
+      const result = await computer?.execute({}, { workspaceRoot: root })
+      expect(result).toMatchObject({ ok: true, output: { structuredContent } })
+      await expect(
+        result?.presentation?.toModelContent({ maxBytes: 4096, maxLines: 30 }),
+      ).resolves.toMatchObject({ content: [{ type: "text", text: summary }] })
+      for (const fallback of [
+        await computer?.execute({ after: "ax" }, { workspaceRoot: root }),
+        await demo?.execute({}, { workspaceRoot: root }),
+      ]) {
+        expect(fallback?.content).toBe(
+          `${summary}\n${JSON.stringify(structuredContent)}`,
+        )
+      }
+    },
+  )
+})
+
 it("rejects cyclic pagination instead of publishing a partial catalog", async () => {
   await withServer(
     `if(m.method==='tools/list')reply({tools:[],nextCursor:'again'});`,

@@ -12,6 +12,23 @@ func encodeScreenshot(_ image: CGImage) throws -> Data {
     return bytes
 }
 
+// A fixed color sample summarizes an already-captured frame. Match only
+// comparable windows and treat equality as no detected visual change.
+func screenshotFingerprint(_ image: CGImage) -> Data? {
+    let side = 32
+    let stride = side * 4
+    guard let sample = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: stride,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    sample.interpolationQuality = .low
+    sample.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+    guard let bytes = sample.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+    return Data((0..<(side * side)).flatMap { offset in
+        let pixel = bytes + offset * 4
+        return [pixel[0], pixel[1], pixel[2]]
+    })
+}
+
 struct ObservationRequest {
     let mode: ObservationMode
     let scope: ObservationScope
@@ -92,7 +109,7 @@ final class ObservationCanvas {
 }
 
 extension Computer {
-    func observe(_ input: [String: Any], readOnly: Bool = false) async throws -> [String: Any] {
+    func observe(_ input: [String: Any], readOnly: Bool = false, inputBaseline: Snapshot? = nil) async throws -> [String: Any] {
         var args = input
         if readOnly {
             let allowed: Set<String> = ["action", "mode", "scope", "pid", "window_id", "display_id", "launch_time"]
@@ -102,8 +119,8 @@ extension Computer {
             args["mode"] = "vision"
         }
         // A failed replacement observation must not leave an older input ticket usable.
-        let previous = lastObservation
-        if !readOnly { snapshot = nil; lastObservation = nil }
+        let previous = inputBaseline ?? lastObservation
+        if !readOnly, inputBaseline == nil { snapshot = nil; lastObservation = nil }
         let request = try ObservationRequest(args)
         guard args["diff_only"] == nil || args["diff_only"] is Bool else {
             throw ComputerFailure("invalid_arguments", "diff_only must be a boolean.")
@@ -215,8 +232,11 @@ extension Computer {
                 let targets = selected
                 let rootElement = subtree
                 let previousProviders = accessibilityProviders
+                // Bound the opportunistic post-action read more tightly than
+                // a requested observation.
+                let axBudget: TimeInterval = inputBaseline == nil ? 1 : 0.25
                 let projection = try await runAccessibilityWork { cancellation in
-                    let axDeadline = Date().addingTimeInterval(1)
+                    let axDeadline = Date().addingTimeInterval(axBudget)
                     var providers = previousProviders
                     var roots: [(WindowIdentity, AXUIElement)] = []
                     var applicationRoots: [(WindowIdentity, AXUIElement)] = []
@@ -270,9 +290,10 @@ extension Computer {
                 accessibilityError = "Accessibility permission is unavailable; only the visual observation is available."
             }
         }
-        let next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
+        var next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
             imageWidth: image?.width, imageHeight: image?.height, elements: elements,
             rows: rows, incompleteRoots: incompleteRoots, mode: request.mode, revisions: revisions, isSubtree: subtree != nil)
+        if !readOnly, next.isFullWindow, let image { next.visualFingerprint = screenshotFingerprint(image) }
         try Task.checkCancellation()
         let geometryStable: Bool
         if readOnly { geometryStable = try next.validatePreview(windows: windows(), displays: displays()) }
@@ -289,14 +310,25 @@ extension Computer {
         if let windowID = request.windowID { data["window_id"] = windowID }
         if let display { data["display_id"] = display.id }
         if let image { data["image_width"] = image.width; data["image_height"] = image.height }
+        if let inputBaseline, !next.hasWindowAX || next.windows != inputBaseline.windows {
+            throw ComputerFailure("diff_unavailable", "The input window could not be compared against its previous AX snapshot.")
+        }
         if diffOnly, let previous,
            request.mode != .vision, previous.mode != .vision, AXIsProcessTrusted(),
            previous.scope == next.scope, previous.windows == next.windows,
            previous.display == next.display, subtree == nil, !previous.isSubtree {
-            data["diff"] = next.difference(from: previous)
+            data["diff"] = next.difference(from: previous, verifiedChangesOnly: inputBaseline != nil)
             data.removeValue(forKey: "elements")
         } else if diffOnly {
             throw ComputerFailure("diff_unavailable", "An AX diff needs a prior full observation of the same target; observe it without diff_only first.")
+        }
+        if let inputBaseline {
+            // A receipt describes what changed without issuing new input
+            // references or replacing the caller's cached observation.
+            data.removeValue(forKey: "snapshot_id")
+            data["input_available"] = false
+            return ["structuredContent": data,
+                    "input_changes": next.changesSinceInput(inputBaseline, diff: data["diff"] as? [String: Any])]
         }
         if readOnly {
             data.removeValue(forKey: "snapshot_id")

@@ -8,6 +8,7 @@ import type { ToolExecutionContext, ToolExecutionResult } from "./types.ts"
 export async function mcpResult(
   value: JsonValue,
   context: ToolExecutionContext,
+  structuredContentInText = false,
 ): Promise<ToolExecutionResult> {
   const result = record(value)
   const blocks = Array.isArray(result?.content) ? result.content : []
@@ -103,6 +104,7 @@ export async function mcpResult(
   }
   const structuredContent = result?.structuredContent
   if (
+    !structuredContentInText &&
     structuredContent !== undefined &&
     !text.some((part) => carriesStructuredContent(part, structuredContent))
   )

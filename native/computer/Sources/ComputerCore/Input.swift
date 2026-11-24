@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 
 extension Computer {
-    func input(_ action: String, _ args: [String: Any]) async throws -> [String: Any] {
+    func input(_ action: String, _ args: [String: Any], compareChanges: Bool = true) async throws -> [String: Any] {
         try validateInput(action, args)
         guard AXIsProcessTrusted() else {
             throw ComputerFailure("permission_required", "Enable Accessibility for Yakitori Computer in System Settings.")
@@ -408,8 +408,8 @@ extension Computer {
         // Delivery/AX readback is not proof that the application committed a
         // business operation. Return that uncertainty rather than a fake success.
         evidence.merge(["effect": "unverified", "delivery": axAction || alternateHover ? "accessibility" : foreground ? "foreground" : "background",
-            "message": "Observe the application result before continuing or retrying."]) { _, value in value }
-        return try await completeInput(evidence, args: args, ticket: ticket)
+            "message": "Verify the application result before continuing or retrying."]) { _, value in value }
+        return try await completeInput(evidence, args: args, ticket: ticket, compareTo: compareChanges ? ticket : nil)
     }
 }
 
