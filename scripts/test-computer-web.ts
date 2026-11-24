@@ -746,25 +746,22 @@ try {
               replace: true,
             })
             lastAction = typed.structuredContent
-            if (typed.isError) {
+            assert(!typed.isError, JSON.stringify(typed.structuredContent))
+            assert.equal(typed.structuredContent?.delivered, true)
+            const matched = typed.structuredContent?.readback_matched === true
+            if (!matched) {
               assert.equal(
                 values.delivery,
                 "background",
                 "Foreground text input must retain the complete text",
               )
-              assert.equal(
-                typed.structuredContent?.code,
-                "text_unconfirmed",
-                JSON.stringify(typed.structuredContent),
-              )
-              assert.equal(typed.structuredContent?.value_matches, false)
+              assert.equal(typed.structuredContent?.readback_matched, false)
             } else {
-              assert.equal(typed.structuredContent?.value_matches, true)
               await waitFor(async () => (await state())?.first === text)
             }
             samples.push({
               text,
-              confirmed: !typed.isError,
+              confirmed: matched,
               actual: (await state())?.first,
             })
             assert.equal((await state())?.pastes, initialPastes)
@@ -790,9 +787,10 @@ try {
             text: "ABCD",
           })
           lastAction = typed.structuredContent
-          assert(typed.isError, JSON.stringify(typed.structuredContent))
-          assert.equal(typed.structuredContent?.code, "text_unconfirmed")
-          assert.equal(typed.structuredContent?.value_matches, false)
+          assert(!typed.isError, JSON.stringify(typed.structuredContent))
+          assert.equal(typed.structuredContent?.delivered, true)
+          assert.equal(typed.structuredContent?.readback_matched, false)
+          assert.equal(typed.structuredContent?.observed_value, "ABC")
           await waitFor(async () => (await state())?.bounded === "ABC")
         },
       )

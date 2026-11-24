@@ -79,8 +79,18 @@ import Darwin
         }
     }
 
-    func result(_ data: [String: Any], image: Data? = nil) throws -> [String: Any] {
-        let text = String(decoding: try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]), as: UTF8.self)
+    func result(_ payload: [String: Any], image: Data? = nil) throws -> [String: Any] {
+        var data = payload
+        let text: String
+        if let observation = try renderObservationText(&data) {
+            text = observation
+        } else if var nested = data["observation"] as? [String: Any], let observation = try renderObservationText(&nested) {
+            data.removeValue(forKey: "observation")
+            text = observation + "\n" + String(decoding: try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]), as: UTF8.self)
+            data["observation"] = nested
+        } else {
+            text = String(decoding: try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]), as: UTF8.self)
+        }
         var content: [[String: Any]] = [["type": "text", "text": text]]
         if let image { content.append(["type": "image", "mimeType": "image/png", "data": image.base64EncodedString()]) }
         return ["content": content, "structuredContent": data]

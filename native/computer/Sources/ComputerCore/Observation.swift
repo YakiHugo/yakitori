@@ -95,6 +95,13 @@ extension Computer {
         let previous = lastObservation
         if !readOnly { snapshot = nil; lastObservation = nil }
         let request = try ObservationRequest(args)
+        guard args["diff_only"] == nil || args["diff_only"] is Bool else {
+            throw ComputerFailure("invalid_arguments", "diff_only must be a boolean.")
+        }
+        let diffOnly = args["diff_only"] as? Bool == true
+        if diffOnly, request.mode == .vision || args["root_element"] != nil {
+            throw ComputerFailure("invalid_arguments", "diff_only requires a complete target observation in ax or both mode.")
+        }
         let expectedLaunch = args["launch_time"] as? Double
         if args["launch_time"] != nil || (readOnly && request.scope != .screen) {
             guard request.scope != .screen, !(args["launch_time"] is Bool), let expectedLaunch, expectedLaunch.isFinite, expectedLaunch > 0 else {
@@ -191,34 +198,73 @@ extension Computer {
         try Task.checkCancellation()
         // Share the existing one-second AX observation budget across root
         // resolution and traversal, rather than multiplying it per window.
-        let axDeadline = Date().addingTimeInterval(1)
-        var roots: [(WindowIdentity, AXUIElement)] = []
-        var applicationRoots: [(WindowIdentity, AXUIElement)] = []
-        var rootsTruncated = false
-        if request.mode != .vision && AXIsProcessTrusted() {
-            if let subtree {
-                guard selected.contains(subtree.window) else { throw ComputerFailure("invalid_arguments", "The subtree must belong to the observation target.") }
-                if subtree.applicationUI { applicationRoots = [(subtree.window, subtree.value)] }
-                else { roots = [(subtree.window, subtree.value)] }
-            } else {
-                for window in selected {
-                    if Date() >= axDeadline { rootsTruncated = true; break }
-                    try prepareAccessibility(window)
-                    if let root = windowElement(window, deadline: axDeadline) { roots.append((window, root)) }
-                    else { rootsTruncated = true }
+        var rows: [[String: Any]] = []
+        var elements: [ObservedElement] = []
+        var incompleteRoots = false
+        var accessibilityError: String?
+        if request.mode != .vision {
+            if AXIsProcessTrusted() {
+                let targets = selected
+                let rootElement = subtree
+                let previousProviders = accessibilityProviders
+                let projection = try await runAccessibilityWork { cancellation in
+                    let axDeadline = Date().addingTimeInterval(1)
+                    var providers = previousProviders
+                    var roots: [(WindowIdentity, AXUIElement)] = []
+                    var applicationRoots: [(WindowIdentity, AXUIElement)] = []
+                    var rootFailure: ComputerFailure?
+                    var incomplete = false
+                    if let rootElement {
+                        guard targets.contains(rootElement.window) else { throw ComputerFailure("invalid_arguments", "The subtree must belong to the observation target.") }
+                        if rootElement.applicationUI { applicationRoots = [(rootElement.window, rootElement.value)] }
+                        else { roots = [(rootElement.window, rootElement.value)] }
+                    } else {
+                        for window in targets {
+                            try cancellation.check()
+                            if Date() >= axDeadline { incomplete = true; break }
+                            let newlyEnabled: Bool
+                            do { newlyEnabled = try prepareAccessibility(window, providers: &providers) }
+                            catch let failure as ComputerFailure where (request.mode == .both || request.scope == .screen) && failure.evidence["ax_error"] as? Int32 == AXError.cannotComplete.rawValue {
+                                incomplete = true
+                                rootFailure = failure
+                                continue
+                            }
+                            if let root = windowElement(window, deadline: axDeadline) {
+                                if newlyEnabled {
+                                    let warmupDeadline = min(axDeadline, Date().addingTimeInterval(0.2))
+                                    while Date() < warmupDeadline {
+                                        try cancellation.check()
+                                        var childCount: CFIndex = 0
+                                        let status = AXUIElementGetAttributeValueCount(root, kAXChildrenAttribute as CFString, &childCount)
+                                        guard status == .noValue || (status == .success && childCount == 0) else { break }
+                                        Thread.sleep(forTimeInterval: min(0.02, max(0, warmupDeadline.timeIntervalSinceNow)))
+                                    }
+                                }
+                                roots.append((window, root))
+                            } else { incomplete = true }
+                        }
+                        if request.scope == .app, let anchor = targets.first(where: { $0.layer == 0 }) ?? targets.first {
+                            let app = AXUIElementCreateApplication(anchor.pid)
+                            for name in [kAXMenuBarAttribute, kAXExtrasMenuBarAttribute] {
+                                try cancellation.check()
+                                if Date() >= axDeadline { incomplete = true; break }
+                                if let root = elementAttribute(app, name) { applicationRoots.append((anchor, root)) }
+                            }
+                        }
+                    }
+                    if request.mode == .ax, roots.isEmpty, applicationRoots.isEmpty, let rootFailure { throw rootFailure }
+                    let tree = try accessibilityTree(roots, applicationRoots: applicationRoots, deadline: axDeadline, cancellation: cancellation)
+                    return (tree.rows, tree.elements, incomplete || tree.incompleteRoots, rootFailure?.message, providers)
                 }
+                (rows, elements, incompleteRoots, accessibilityError, accessibilityProviders) = projection
+            } else {
+                incompleteRoots = true
+                accessibilityError = "Accessibility permission is unavailable; only the visual observation is available."
             }
         }
-        if request.scope == .app, request.mode != .vision, subtree == nil, AXIsProcessTrusted(), let anchor = selected.first(where: { $0.layer == 0 }) ?? selected.first {
-            let app = AXUIElementCreateApplication(anchor.pid)
-            for name in [kAXMenuBarAttribute, kAXExtrasMenuBarAttribute] {
-                if let root = attribute(app, name), CFGetTypeID(root) == AXUIElementGetTypeID() { applicationRoots.append((anchor, root as! AXUIElement)) }
-            }
-        }
-        let tree = accessibilityTree(roots, applicationRoots: applicationRoots, deadline: axDeadline)
         let next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
-            imageWidth: image?.width, imageHeight: image?.height, elements: tree.elements,
-            rows: tree.rows, truncated: tree.truncated || rootsTruncated, mode: request.mode, revisions: revisions)
+            imageWidth: image?.width, imageHeight: image?.height, elements: elements,
+            rows: rows, incompleteRoots: incompleteRoots, mode: request.mode, revisions: revisions, isSubtree: subtree != nil)
         try Task.checkCancellation()
         let geometryStable: Bool
         if readOnly { geometryStable = try next.validatePreview(windows: windows(), displays: displays()) }
@@ -232,16 +278,23 @@ extension Computer {
         }
         var data: [String: Any] = ["snapshot_id": next.id, "scope": request.scope.rawValue, "mode": request.mode.rawValue,
             "frame": frameData(frame), "windows": selected.map { ["pid": $0.pid, "window_id": $0.windowID, "launch_time": $0.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "frame": frameData($0.frame)] as [String: Any] },
-            "elements": tree.rows, "tree_truncated": tree.truncated || rootsTruncated, "accessibility": AXIsProcessTrusted()]
-        if let pid = request.pid { data["pid"] = pid }
+            "elements": rows, "tree_truncated": next.truncated, "accessibility": AXIsProcessTrusted()]
+        if let accessibilityError { data["accessibility_error"] = accessibilityError }
+        if let pid = request.pid {
+            data["pid"] = pid
+            data["launch_time"] = selected.first?.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull()
+        }
         if let windowID = request.windowID { data["window_id"] = windowID }
         if let display { data["display_id"] = display.id }
         if let image { data["image_width"] = image.width; data["image_height"] = image.height }
-        if args["disable_diff"] as? Bool != true, let previous,
+        if diffOnly, let previous,
            request.mode != .vision, previous.mode != .vision, AXIsProcessTrusted(),
-           previous.scope == next.scope, previous.windows.map(\.windowID) == next.windows.map(\.windowID),
-           previous.display == next.display {
+           previous.scope == next.scope, previous.windows == next.windows,
+           previous.display == next.display, subtree == nil, !previous.isSubtree {
             data["diff"] = next.difference(from: previous)
+            data.removeValue(forKey: "elements")
+        } else if diffOnly {
+            throw ComputerFailure("diff_unavailable", "An AX diff needs a prior full observation of the same target; observe it without diff_only first.")
         }
         if readOnly {
             data.removeValue(forKey: "snapshot_id")

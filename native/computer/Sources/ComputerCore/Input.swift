@@ -216,6 +216,11 @@ extension Computer {
             let source = CGEventSource(stateID: .privateState)
             source?.localEventsSuppressionInterval = 0
             let pointerFrame = window.flatMap { windowElement($0).flatMap(elementFrame) }
+            func checkKeyboardFocus() throws {
+                if keyboard, let element, let window, !keyboardFocusMatches(element, window: window, windowBound: !foreground) {
+                    throw ComputerFailure("focus_changed", "Keyboard input stopped because the addressed element lost focus.")
+                }
+            }
             func checkpoint() throws {
                 try Task.checkCancellation()
                 let currentWindows = try windows()
@@ -243,9 +248,7 @@ extension Computer {
                         }
                     }
                 }
-                if keyboard, let element, let window, !keyboardFocusMatches(element, window: window, windowBound: !foreground) {
-                    throw ComputerFailure("focus_changed", "Keyboard input stopped because the addressed element lost focus.")
-                }
+                try checkKeyboardFocus()
             }
             func post(_ event: CGEvent) throws {
                 try checkpoint()
@@ -272,11 +275,13 @@ extension Computer {
                     release: { deliver($0, window: window, foreground: foreground) }, checkpoint: checkpoint) {}
             }
             func pasteContent(_ content: NSPasteboardItem) async throws {
-                try await withPasteContent(content) {
+                let pasteItem: AXUIElement?
+                if !foreground, modifiers.isEmpty, duration == 0, let window {
+                    pasteItem = try await runAccessibilityWork { cancellation in try pasteMenuItem(window, cancellation: cancellation) }
+                } else { pasteItem = nil }
+                try await withPasteContent(content, onSkippedFormats: { evidence["clipboard_warnings"] = $0 }) {
                     try checkpoint()
-                    if !foreground, modifiers.isEmpty, duration == 0, let window,
-                       let item = try pasteMenuItem(window) {
-                        try checkpoint()
+                    if let item = pasteItem {
                         guard (attribute(item, kAXMenuItemCmdCharAttribute) as? String)?.lowercased() == "v",
                               (attribute(item, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.doubleValue == 0,
                               attribute(item, kAXEnabledAttribute) as? Bool == true else {
@@ -351,7 +356,6 @@ extension Computer {
                         }
                         try await confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element)
                     }
-                    evidence["text_route"] = "unicode_events"
                     var expected: String?
                     // Verification depends on the control's readable state, not
                     // the language or Unicode plane of the inserted text.
@@ -364,8 +368,10 @@ extension Computer {
                         }
                         expected = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
                     }
-                    for scalar in text.unicodeScalars {
+                    for (index, scalar) in text.unicodeScalars.enumerated() {
                         try Task.checkCancellation()
+                        if index % 16 == 0 || scalar == "\n" || scalar == "\r" { try checkpoint() }
+                        else { try checkKeyboardFocus() }
                         let units = Array(String(scalar).utf16)
                         guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                               let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
@@ -378,21 +384,11 @@ extension Computer {
                             up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
                         }
                         let routedDown = try keyboardEvent(down), routedUp = try keyboardEvent(up)
-                        try post(routedDown)
+                        deliver(routedDown, window: window, foreground: foreground)
                         deliver(routedUp, window: window, foreground: foreground)
                         try await Task.sleep(nanoseconds: 2_000_000)
                     }
-                    if let expected, let element {
-                        let deadline = ProcessInfo.processInfo.systemUptime + 1
-                        while attribute(element, kAXValueAttribute) as? String != expected {
-                            try checkpoint()
-                            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                                throw ComputerFailure("text_unconfirmed", "The application did not retain the complete text. Input may have partly completed; observe before continuing, and do not replay the write blindly.", evidence: ["text_route": "unicode_events", "value_matches": false])
-                            }
-                            try await Task.sleep(nanoseconds: 20_000_000)
-                        }
-                        evidence["value_matches"] = true
-                    }
+                    evidence = try await textDeliveryReceipt(route: "unicode_events", expected: expected, element: element)
                 }
             }
         }

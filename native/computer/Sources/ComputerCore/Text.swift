@@ -76,21 +76,39 @@ func insertTextValue(_ text: String, element: AXUIElement, replace: Bool, checkp
     guard error == .success else {
         throw ComputerFailure("text_unconfirmed", "Addressed insertion was refused. Observe before continuing; do not replay the write blindly.", evidence: ["text_route": "accessibility_value", "set_error": error.rawValue])
     }
-    let deadline = ProcessInfo.processInfo.systemUptime + 1
-    while attribute(element, kAXValueAttribute) as? String != expected {
-        try checkpoint()
-        guard ProcessInfo.processInfo.systemUptime < deadline else {
-            throw ComputerFailure("text_unconfirmed", "The target did not retain the complete text. Observe before continuing; do not replay the write blindly.", evidence: ["text_route": "accessibility_value", "value_matches": false])
-        }
-        try await Task.sleep(nanoseconds: 20_000_000)
-    }
+    let receipt = try await textDeliveryReceipt(route: "accessibility_value", expected: expected, element: element)
+    guard receipt["readback_matched"] as? Bool == true else { return receipt }
     try checkpoint()
     do {
         try await confirmSelection(CFRange(location: range.location + text.utf16.count, length: 0), element: element)
     } catch let error as ComputerFailure where error.code == "selection_unconfirmed" {
-        throw ComputerFailure("text_unconfirmed", "The text was inserted but its final caret could not be confirmed. Observe before continuing; do not replay the write.", evidence: ["text_route": "accessibility_value", "value_matches": true])
+        throw ComputerFailure("text_unconfirmed", "The text was inserted but its final caret could not be confirmed. Observe before continuing; do not replay the write.", evidence: receipt)
     }
-    return ["text_route": "accessibility_value", "value_matches": true]
+    return receipt
+}
+
+func textDeliveryReceipt(route: String, expected: String?, element: AXUIElement?) async throws -> [String: Any] {
+    var evidence: [String: Any] = ["text_route": route, "delivered": true]
+    guard let expected, let element else { return evidence }
+    var subrole: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+    guard status == .attributeUnsupported || status == .noValue ||
+        (status == .success && (subrole as? String).map { $0 != kAXSecureTextFieldSubrole } == true) else { return evidence }
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    while true {
+        try Task.checkCancellation()
+        let actual = attribute(element, kAXValueAttribute) as? String
+        if actual == expected {
+            evidence["readback_matched"] = true
+            return evidence
+        }
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            evidence["readback_matched"] = false
+            evidence["observed_value"] = actual.map { String($0.unicodeScalars.prefix(1000)) as Any } ?? NSNull()
+            return evidence
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
 }
 
 func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement) async throws -> [String: Any] {

@@ -89,8 +89,14 @@ import Foundation
         try observationContracts()
         try applicationContracts()
         try await advancedContracts()
+        try await accessibilityCancellationContract()
+        try nativeResourceCleanupContract()
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
+        let grave = try keyChord("`"), backslash = try keyChord("\\")
+        let plus = try keyChord("CMD++"), numpadPlus = try keyChord("NUMPADPLUS")
+        precondition(grave.0 == 50 && grave.1.isEmpty && backslash.0 == 42 && backslash.1.isEmpty)
+        precondition(plus.0 == 24 && plus.1 == [.maskCommand, .maskShift] && numpadPlus.0 == 69 && numpadPlus.1.isEmpty)
         rejects { _ = try keyChord("TYPO+A") }
         // Exercise Apple's event bridge without posting input or requesting TCC.
         // Window hit-test fields alone still produce NSEvent.windowNumber == 0.
@@ -178,7 +184,7 @@ import Foundation
         precondition((diff["updated"] as! [[String: Any]]).count == 1 && (diff["added"] as! [[String: Any]]).isEmpty)
         let absent = try AXExpectation(["title": "missing", "exists": false])
         precondition(absent.satisfied(by: before))
-        var partial = before; partial.truncated = true
+        var partial = before; partial.incompleteRoots = true
         precondition(!absent.satisfied(by: partial))
         let computer = Computer()
         computer.lastObservation = after

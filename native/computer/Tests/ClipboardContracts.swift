@@ -1,5 +1,9 @@
 import AppKit
 
+private final class MissingClipboardFlavor: NSObject, NSPasteboardItemDataProvider {
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {}
+}
+
 @MainActor func verifyClipboardAccess() async throws {
     let board = NSPasteboard(name: .init("yakitori-clipboard-access-" + UUID().uuidString))
     defer { board.releaseGlobally() }
@@ -53,5 +57,19 @@ import AppKit
     _ = try await call(["clipboard_action": "clear"])
     let cleared = try await call(["clipboard_action": "read"])
     precondition(rows(cleared).isEmpty)
+    let provider = MissingClipboardFlavor()
+    let unavailable = NSPasteboard.PasteboardType("com.yakitori.unavailable")
+    let original = NSPasteboardItem()
+    original.setString("previous text", forType: .string)
+    precondition(original.setDataProvider(provider, forTypes: [unavailable]))
+    board.clearContents()
+    precondition(board.writeObjects([original]))
+    var warnings: [String] = []
+    try await withPasteContent(try pasteboardItem(["text": "transient"]), board: board, onSkippedFormats: { warnings = $0 }) {
+        precondition(board.string(forType: .string) == "transient")
+    }
+    precondition(warnings.contains(unavailable.rawValue))
+    precondition(board.string(forType: .string) == "previous text")
+    withExtendedLifetime(provider) {}
     print("Native clipboard text, rich text, raster pixels, file URLs and refusal preservation passed on an isolated pasteboard.")
 }

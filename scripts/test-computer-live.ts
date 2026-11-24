@@ -375,6 +375,7 @@ try {
             assert(!ax.isError, JSON.stringify(ax.structuredContent))
             assert(!ax.content.some((part) => part.type === "image"))
             assert.equal(ax.structuredContent?.image_width, undefined)
+            assert.equal(ax.structuredContent?.diff, undefined)
             element(ax, "First input")
             const refused = await call({
               action: "click",
@@ -408,6 +409,40 @@ try {
             assert(!vision.isError, JSON.stringify(vision.structuredContent))
             assert(vision.content.some((part) => part.type === "image"))
             assert.deepEqual(vision.structuredContent?.elements, [])
+          },
+        )
+        await check(
+          "AX diff retains a queryable snapshot without a full tree",
+          async () => {
+            const target = {
+              action: "observe",
+              pid,
+              window_id: windowID,
+              mode: "ax",
+            }
+            const before = await call(target)
+            assert(!before.isError, JSON.stringify(before.structuredContent))
+            const diff = await call({ ...target, diff_only: true })
+            assert(!diff.isError, JSON.stringify(diff.structuredContent))
+            assert.equal(diff.structuredContent?.elements, undefined)
+            assert.equal(
+              (diff.structuredContent?.diff as { base_snapshot_id: string })
+                .base_snapshot_id,
+              before.structuredContent?.snapshot_id,
+            )
+            const text = diff.content.find((part) => part.type === "text")
+            assert(
+              text?.text?.startsWith(
+                `snapshot_id: ${diff.structuredContent?.snapshot_id}\n`,
+              ),
+            )
+            const query = await call({
+              action: "query",
+              snapshot_id: diff.structuredContent?.snapshot_id,
+              query: "First input",
+            })
+            assert(!query.isError, JSON.stringify(query.structuredContent))
+            element(query, "First input")
           },
         )
         await check(

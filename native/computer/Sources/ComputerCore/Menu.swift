@@ -15,7 +15,7 @@ func accessibilityActions(_ element: AXUIElement) -> [String] {
     return AXUIElementCopyActionNames(element, &names) == .success ? names as? [String] ?? [] : []
 }
 
-func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
+func pasteMenuItem(_ window: WindowIdentity, cancellation: AccessibilityCancellation) throws -> AXUIElement? {
     guard let root = elementAttribute(AXUIElementCreateApplication(window.pid), kAXMenuBarAttribute) else { return nil }
     // Use the existing AX observation work boundary. An incomplete lookup must
     // not claim uniqueness; choose the keyboard route before issuing any write.
@@ -28,7 +28,7 @@ func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
         return (AXUIElementCopyAttributeValue(node, name as CFString, &value), value)
     }
     while index < queue.count {
-        try Task.checkCancellation()
+        try cancellation.check()
         guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
         let node = queue[index]; index += 1
         guard visited.insert(node).inserted else { continue }
@@ -46,12 +46,9 @@ func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
                 if matches.count > 1 { return nil }
             }
         }
-        let (childrenError, value) = read(node, kAXChildrenAttribute)
-        guard [.success, .attributeUnsupported, .noValue].contains(childrenError) else { return nil }
-        guard childrenError != .success || value is [AXUIElement] else { return nil }
-        let children = value as? [AXUIElement] ?? []
-        guard queue.count + children.count <= 500 else { return nil }
-        queue.append(contentsOf: children)
+        let branch = boundedAXChildren(node, limit: max(1, 500 - queue.count))
+        guard branch.incomplete == nil, queue.count + branch.children.count <= 500 else { return nil }
+        queue.append(contentsOf: branch.children)
     }
     guard let item = matches.first, accessibilityActions(item).contains(kAXPressAction) else { return nil }
     return item
@@ -63,28 +60,44 @@ func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
     var expanded: [String] = []
     var opened: [AXUIElement] = []
 
-    func resolve(_ prefix: [String]) throws -> AXUIElement? {
-        guard var node = elementAttribute(application, kAXMenuBarAttribute) else {
-            throw ComputerFailure("menu_unavailable", "The application does not expose an accessible menu bar.")
-        }
-        for label in prefix {
-            let children = attribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? []
-            let entries = children.flatMap { child -> [AXUIElement] in
-                if attribute(child, kAXRoleAttribute) as? String == kAXMenuRole {
-                    return attribute(child, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    func resolve(_ prefix: [String]) async throws -> AXUIElement? {
+        try await runAccessibilityWork { cancellation in
+            guard var node = elementAttribute(application, kAXMenuBarAttribute) else {
+                throw ComputerFailure("menu_unavailable", "The application does not expose an accessible menu bar.")
+            }
+            func children(_ parent: AXUIElement) throws -> [AXUIElement] {
+                try cancellation.check()
+                guard ProcessInfo.processInfo.systemUptime < deadline else {
+                    throw ComputerFailure("native_timeout", "The native menu lookup reached its time safety boundary.")
                 }
-                return [child]
+                AXUIElementSetMessagingTimeout(parent, 0.2)
+                let branch = boundedAXChildren(parent, limit: 500)
+                guard branch.incomplete == nil else { throw ComputerFailure("menu_unavailable", "The menu branch could not be read completely.") }
+                return branch.children
             }
-            let matches = entries.filter { attribute($0, kAXTitleAttribute) as? String == label }
-            guard matches.count <= 1 else { throw ComputerFailure("menu_ambiguous", "The menu label \(label) matches multiple siblings.") }
-            guard let next = matches.first else { return nil }
-            guard [kAXMenuBarItemRole, kAXMenuItemRole].contains(attribute(next, kAXRoleAttribute) as? String ?? "") else {
-                throw ComputerFailure("menu_structure_changed", "The menu path no longer names native menu items.")
+            for label in prefix {
+                var matches: [AXUIElement] = []
+                for child in try children(node) {
+                    try cancellation.check()
+                    let entries = attribute(child, kAXRoleAttribute) as? String == kAXMenuRole ? try children(child) : [child]
+                    for entry in entries {
+                        try cancellation.check()
+                        guard ProcessInfo.processInfo.systemUptime < deadline else {
+                            throw ComputerFailure("native_timeout", "The native menu lookup reached its time safety boundary.")
+                        }
+                        if attribute(entry, kAXTitleAttribute) as? String == label { matches.append(entry) }
+                        if matches.count > 1 { throw ComputerFailure("menu_ambiguous", "The menu label \(label) matches multiple siblings.") }
+                    }
+                }
+                guard let next = matches.first else { return nil }
+                guard [kAXMenuBarItemRole, kAXMenuItemRole].contains(attribute(next, kAXRoleAttribute) as? String ?? "") else {
+                    throw ComputerFailure("menu_structure_changed", "The menu path no longer names native menu items.")
+                }
+                guard attribute(next, kAXEnabledAttribute) as? Bool != false else { throw ComputerFailure("menu_disabled", "The menu item \(label) is disabled.") }
+                node = next
             }
-            guard attribute(next, kAXEnabledAttribute) as? Bool != false else { throw ComputerFailure("menu_disabled", "The menu item \(label) is disabled.") }
-            node = next
+            return node
         }
-        return node
     }
 
     func closeMenus() -> [Int32] {
@@ -102,13 +115,18 @@ func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
                 throw ComputerFailure("stale_snapshot", "The menu target process exited or restarted.")
             }
             let prefix = Array(path.prefix(index + 1))
-            var item = try resolve(prefix)
+            var item = try await resolve(prefix)
             // Expand each parent once; only re-read while its children publish.
             while item == nil && !expanded.isEmpty && ProcessInfo.processInfo.systemUptime < deadline {
                 try await Task.sleep(nanoseconds: 20_000_000)
-                item = try resolve(prefix)
+                guard ProcessInfo.processInfo.systemUptime < deadline else { break }
+                do { item = try await resolve(prefix) }
+                catch let error as ComputerFailure where error.code == "native_timeout" { break }
             }
             guard let item else { throw ComputerFailure("menu_not_found", "The exact menu path is not currently exposed.") }
+            guard processLaunchDate(window.pid) == window.launched else {
+                throw ComputerFailure("stale_snapshot", "The menu target process exited or restarted.")
+            }
             let actions = accessibilityActions(item)
             let action = index < path.count - 1 && actions.contains(kAXShowMenuAction) ? kAXShowMenuAction : kAXPressAction
             guard actions.contains(action) else { throw ComputerFailure("action_refused", "The menu item does not expose the requested native action.") }
