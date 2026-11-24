@@ -9,33 +9,12 @@ import type {
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
-import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
-import {
-  requireChatGPTPlanNamespace,
-  toChatGPTPlanRequest,
-} from "./chatgpt-plan-request.ts"
-import {
-  CODEX_IMAGE_REQUEST_SAFETY_BYTES,
-  CodexImageRequestSizeError,
-  prepareCodexImage,
-  validateCodexImageRequest,
-} from "./codex-image-policy.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
-import {
-  GROK_IMAGE_REQUEST_SAFETY_BYTES,
-  GrokImageRequestSizeError,
-  prepareGrokImage,
-} from "./grok-image-policy.ts"
-import {
-  JsonRequestBudgetError,
-  jsonRequestByteLength,
-} from "./json-request-budget.ts"
-import { prepareKimiImageBytes } from "./kimi-image-policy.ts"
+import { JsonRequestBudgetError } from "./json-request-budget.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
-  type ModelImageBlock,
   type ModelMessage,
   type ModelRequest,
   type ModelResponse,
@@ -72,35 +51,16 @@ import {
 } from "./model-request-controls.ts"
 import { createContainerImageReader } from "./openai-container-images.ts"
 import {
-  OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
-  OpenAIImageRequestSizeError,
-  prepareOpenAIImage,
-  validateOpenAIImageRequest,
-} from "./openai-image-policy.ts"
+  type OpenAIResponsesProfile,
+  openAIResponsesProfile,
+} from "./openai-responses-profiles.ts"
 import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
-import {
-  hasOpenAIImagePreparation,
-  openAIVisionPolicy,
-} from "./openai-vision-models.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
-// Local resource guard, not Moonshot's documented 100M request allowance.
-const KIMI_IMAGE_REQUEST_SAFETY_BYTES = 20_000_000
-class KimiImageRequestSizeError extends AssetMediaError {
-  constructor() {
-    super(
-      "Image request was not sent: exceeds Yakitori's conservative 20 MB local request budget. Send fewer images, crop or export a smaller copy, or reduce other request content; originals have not been changed.",
-    )
-  }
-}
-
-type OpenAIResponseProfile = "openai" | "grok" | "kimi"
-
 export type OpenAIProviderOptions = Readonly<{
   warmup?: boolean
-  requestProfile?: "chatgpt-plan" | "codex"
-  responseProfile?: OpenAIResponseProfile
+  profile?: OpenAIResponsesProfile
   apiKey: string
   model: string
   client?: OpenAI
@@ -124,9 +84,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
       options.onResponseHeaders,
       undefined,
       false,
-      options.requestProfile,
-      undefined,
-      options.responseProfile,
+      options.profile,
     )
 }
 
@@ -134,9 +92,10 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
 // expose no warmup capability; never probe subscription or compatible backends.
 export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
   const client = openAIClient(options)
+  const profile = options.profile ?? openAIResponsesProfile
   const upload =
     URL.parse(client.baseURL)?.origin === "https://api.openai.com" &&
-    options.requestProfile === undefined
+    profile.supportsFileUploads
       ? createFileUploadCache(
           async (document, bytes, signal) =>
             (
@@ -155,8 +114,7 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
       : undefined
   const transport =
     options.warmup !== false &&
-    options.requestProfile === undefined &&
-    supportsOpenAIRequestWarmup(options.baseURL ?? client.baseURL)
+    profile.supportsWarmup?.(options.baseURL ?? client.baseURL)
       ? createOpenAIResponsesTransport(client)
       : undefined
   const stream: StreamFn = (request) =>
@@ -167,9 +125,8 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
       options.onResponseHeaders,
       transport,
       false,
-      options.requestProfile,
+      profile,
       upload,
-      options.responseProfile,
     )
   return {
     stream,
@@ -184,9 +141,8 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
               options.onResponseHeaders,
               transport,
               true,
-              options.requestProfile,
+              profile,
               upload,
-              options.responseProfile,
             )) as StreamFn,
         }),
     async close() {
@@ -234,9 +190,8 @@ async function* streamOpenAIWire(
   onResponseHeaders?: (headers: Headers) => void,
   transport?: ReturnType<typeof createOpenAIResponsesTransport>,
   warmup = false,
-  requestProfile?: "chatgpt-plan" | "codex",
+  profile: OpenAIResponsesProfile = openAIResponsesProfile,
   upload?: ReturnType<typeof createFileUploadCache>,
-  responseProfile: OpenAIResponseProfile = "openai",
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -247,9 +202,7 @@ async function* streamOpenAIWire(
   let failureStage: "connect" | "response_body" = "connect"
   let terminalUsage: ModelResponse["usage"]
   const containerImages =
-    responseProfile === "openai" &&
-    requestProfile === undefined &&
-    request.compaction === undefined
+    profile.useContainerImages && request.compaction === undefined
       ? createContainerImageReader(client, request.signal)
       : undefined
   let terminalEvent:
@@ -258,40 +211,18 @@ async function* streamOpenAIWire(
   try {
     validateModelHistoryScope(request, "openai_responses")
     validateModelRequestControls(request, "openai_responses")
-    if (responseProfile === "kimi") {
-      // Exact public Responses IDs, not Kimi Code subscription aliases.
-      // https://platform.kimi.ai/docs/api/responses
-      if (
-        !["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"].includes(
-          request.target.model || defaultModel,
-        )
-      )
-        throw new ModelRequestControlsError(
-          "The Kimi Responses profile supports kimi-k3, kimi-k3.1-pro and kimi-k3.1-pro-highspeed only; use an exact public API model ID.",
-        )
-      if (request.compaction === "provider")
-        throw new ModelRequestControlsError(
-          "Kimi Responses does not support remote compaction.",
-        )
-      if (
-        request.messages.some(
-          (message) =>
-            (message.role === "user" || message.role === "tool") &&
-            message.content.some((block) => block.type === "document"),
-        )
-      )
-        throw new ModelRequestControlsError(
-          "Kimi Responses supports text and image inputs, not PDF inputs.",
-        )
-    }
-    const reasoningSummary =
-      responseProfile !== "kimi" &&
-      (requestProfile === "codex" ||
-        (requestProfile === undefined &&
-          URL.parse(client.baseURL ?? "https://api.openai.com")?.origin ===
-            "https://api.openai.com"))
+    const model = request.target.model || defaultModel
+    profile.validateRequest?.(request, model)
+    const reasoningSummary = profile.includeReasoningSummary?.(
+      client.baseURL ?? "https://api.openai.com",
+    )
+    const mediaPolicy = profile.prepareMedia?.({
+      request,
+      model,
+      baseURL: client.baseURL,
+    })
     const nativeDeferredLoading =
-      requestProfile !== "chatgpt-plan" &&
+      profile.supportsNativeDeferredLoading &&
       nativeDeferredToolProtocol(request) === "openai"
     const customFallbackKeys = customFallbackKeysForRequest(
       request,
@@ -316,12 +247,13 @@ async function* streamOpenAIWire(
             uploadedFiles,
             request.target.model || defaultModel,
           ),
-          ...(request.compaction === "provider" && requestProfile === "codex"
+          ...(request.compaction === "provider" &&
+          profile.supportsRemoteCompaction === "stream"
             ? [{ type: "compaction_trigger" as const }]
             : []),
         ],
         tools: toOpenAITools(request.tools, nativeDeferredLoading),
-        ...(responseProfile === "kimi"
+        ...(profile.omitParallelToolCalls
           ? {}
           : { parallel_tool_calls: request.parallelToolCalls ?? true }),
         ...(request.toolChoice === undefined
@@ -345,10 +277,10 @@ async function* streamOpenAIWire(
             }),
         // The Codex subscription endpoint rejects max_output_tokens. Its
         // ResponsesApiRequest omits this API-only output control.
-        ...(requestProfile === "codex" || request.maxOutputTokens === undefined
+        ...(profile.omitMaxOutputTokens || request.maxOutputTokens === undefined
           ? {}
           : { max_output_tokens: request.maxOutputTokens }),
-        ...(responseProfile === "kimi" ? {} : { store: false }),
+        ...(profile.omitStore ? {} : { store: false }),
         stream: true,
         ...(reasoningSummary
           ? { include: ["reasoning.encrypted_content" as const] }
@@ -373,208 +305,10 @@ async function* streamOpenAIWire(
           : {}),
       }
       body = applyModelRequestControls(request, "openai_responses", body)
-      if (responseProfile === "kimi") {
-        validateKimiResponsesRequest(request, body)
-        // The Kimi output schema includes a null placeholder absent from its
-        // reasoning input schema. Preserve it in native history, not on replay.
-        if (Array.isArray(body.input))
-          body.input = body.input.map((item) => {
-            if (item.type !== "reasoning" || item.encrypted_content !== null)
-              return item
-            const { encrypted_content: _encrypted, ...reasoning } = item
-            return reasoning
-          })
-      }
-      if (nativeOpenAIImages)
-        validateOpenAIImageRequest(
-          body,
-          openAIVisionPolicy(request.target.model || defaultModel) !==
-            undefined,
-        )
-      return body
-    }
-    // Native compaction can retain images outside portable content. Gate by
-    // endpoint/model, not portable image presence, and bound the final wire body.
-    const nativeOpenAIImages =
-      responseProfile === "openai" &&
-      requestProfile === undefined &&
-      hasOpenAIImagePreparation(request.target.model || defaultModel) &&
-      URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
-        "https://api.openai.com/v1"
-    const nativeKimiImages =
-      responseProfile === "kimi" &&
-      requestProfile === undefined &&
-      URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
-        "https://api.moonshot.ai/v1" &&
-      request.messages.some(
-        (message) =>
-          (message.role === "user" || message.role === "tool") &&
-          message.content.some((block) => block.type === "image"),
-      )
-    const nativeGrokImages =
-      responseProfile === "grok" &&
-      requestProfile === undefined &&
-      (request.target.model || defaultModel) === "grok-4.7" &&
-      URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
-        "https://api.x.ai/v1"
-    const codexImages =
-      requestProfile === "codex" &&
-      request.messages.some(
-        (message) =>
-          (message.role === "user" || message.role === "tool") &&
-          message.content.some((block) => block.type === "image"),
-      )
-    // First-party Codex rejects remote image URLs. Do not turn a previously
-    // provider-owned URL into an arbitrary local network fetch. Owned rollout
-    // paths are resolved below even when deployment exposes a public asset URL.
-    if (
-      codexImages &&
-      request.messages.some(
-        (message) =>
-          (message.role === "user" || message.role === "tool") &&
-          message.content.some(
-            (block) =>
-              block.type === "image" &&
-              block.data === undefined &&
-              "url" in block.file,
-          ),
-      )
-    )
-      throw new AssetMediaError(
-        "Codex image URLs are not supported. Import the image as an attachment before sending; no remote image was fetched.",
-      )
-    let openAIImageBytes = 0
-    let grokImageBytes = 0
-    let preparedImageBytes = 0
-    if (nativeKimiImages || nativeOpenAIImages || codexImages) {
-      const placeholders = request.messages.map(
-        (message): ModelMessage =>
-          message.role === "user" || message.role === "tool"
-            ? {
-                ...message,
-                content: message.content.map((block) =>
-                  block.type === "image"
-                    ? {
-                        type: "image",
-                        mediaType: "image/png",
-                        data: "",
-                        detail: block.detail ?? "high",
-                      }
-                    : nativeOpenAIImages &&
-                        block.type === "document" &&
-                        block.data === undefined &&
-                        !("url" in block.file)
-                      ? { ...block, data: "" }
-                      : block,
-                ),
-              }
-            : message,
-      )
-      const size = jsonRequestByteLength(
-        buildBody(placeholders, new Map()),
-        nativeOpenAIImages
-          ? OPENAI_IMAGE_REQUEST_SAFETY_BYTES
-          : codexImages
-            ? CODEX_IMAGE_REQUEST_SAFETY_BYTES
-            : KIMI_IMAGE_REQUEST_SAFETY_BYTES,
-      )
-      if (size === undefined) {
-        if (nativeOpenAIImages) throw new OpenAIImageRequestSizeError()
-        if (codexImages) throw new CodexImageRequestSizeError()
-        throw new KimiImageRequestSizeError()
-      }
-      if (nativeOpenAIImages) {
-        openAIImageBytes = size
-        // Reject existing inline payloads before Buffer.from allocates decoded
-        // copies. Resolved assets are charged incrementally before re-encoding.
-        let inlineBytes = size
-        for (const message of request.messages) {
-          if (message.role !== "user" && message.role !== "tool") continue
-          for (const block of message.content) {
-            if (block.type === "image" && block.data !== undefined)
-              inlineBytes += block.data.length + 1
-            if (inlineBytes > OPENAI_IMAGE_REQUEST_SAFETY_BYTES)
-              throw new OpenAIImageRequestSizeError()
-          }
-        }
-      } else preparedImageBytes = size
+      return profile.buildRequestBody?.(body, request) ?? body
     }
     const media = await prepareProviderMedia(request, {
-      ...(requestProfile === "codex"
-        ? {
-            inlineImageUrls: true,
-            prepareImage: async (bytes: Buffer, image: ModelImageBlock) => {
-              const prepared = await prepareCodexImage(
-                bytes,
-                image,
-                request.signal,
-              )
-              preparedImageBytes +=
-                (prepared.data?.length ?? 0) +
-                prepared.mediaType.length -
-                "image/png".length
-              if (preparedImageBytes > CODEX_IMAGE_REQUEST_SAFETY_BYTES)
-                throw new CodexImageRequestSizeError()
-              return prepared
-            },
-          }
-        : {}),
-
-      ...(nativeOpenAIImages
-        ? {
-            prepareImage: async (
-              bytes: Buffer,
-              image: ModelImageBlock,
-            ): Promise<ModelImageBlock> => {
-              openAIImageBytes += 4 * Math.ceil(bytes.length / 3) + 1
-              if (openAIImageBytes > OPENAI_IMAGE_REQUEST_SAFETY_BYTES)
-                throw new OpenAIImageRequestSizeError()
-              return prepareOpenAIImage(
-                bytes,
-                image,
-                request.target.model || defaultModel,
-                request.signal,
-              )
-            },
-          }
-        : {}),
-      ...(nativeGrokImages
-        ? {
-            prepareImage: async (bytes: Buffer): Promise<ModelImageBlock> => {
-              grokImageBytes += 4 * Math.ceil(bytes.length / 3)
-              if (grokImageBytes > GROK_IMAGE_REQUEST_SAFETY_BYTES)
-                throw new GrokImageRequestSizeError()
-              return prepareGrokImage(bytes, request.signal)
-            },
-          }
-        : {}),
-      ...(nativeKimiImages
-        ? {
-            prepareImage: async (
-              bytes: Buffer,
-              image: ModelImageBlock,
-            ): Promise<ModelImageBlock> => {
-              const prepared = await prepareKimiImageBytes(
-                bytes,
-                request.signal,
-              )
-              preparedImageBytes +=
-                4 * Math.ceil(prepared.bytes.length / 3) +
-                prepared.mediaType.length -
-                "image/png".length
-              if (preparedImageBytes > KIMI_IMAGE_REQUEST_SAFETY_BYTES)
-                throw new KimiImageRequestSizeError()
-              return {
-                type: "image",
-                mediaType: prepared.mediaType,
-                detail: image.detail ?? "high",
-                data: prepared.bytes.toString("base64"),
-              }
-            },
-          }
-        : {}),
-      // Kimi accepts data URLs for both user and tool images, not HTTP URLs.
-      ...(responseProfile === "kimi" ? { inlineImageUrls: true } : {}),
+      ...mediaPolicy?.prepare?.(buildBody),
       ...(upload === undefined
         ? {}
         : {
@@ -582,8 +316,11 @@ async function* streamOpenAIWire(
               upload(document, bytes, request.signal),
           }),
     })
-    if (request.compaction === "provider" && requestProfile !== "codex") {
-      if (requestProfile !== undefined)
+    if (
+      request.compaction === "provider" &&
+      profile.supportsRemoteCompaction !== "stream"
+    ) {
+      if (profile.supportsRemoteCompaction !== "api")
         throw new ModelRequestControlsError(
           "Public Responses compaction requires an API-key endpoint.",
         )
@@ -606,12 +343,7 @@ async function* streamOpenAIWire(
             : { prompt_cache_key: request.cacheKey }),
         },
       )
-      if (nativeOpenAIImages)
-        validateOpenAIImageRequest(
-          compactBody,
-          openAIVisionPolicy(request.target.model || defaultModel) !==
-            undefined,
-        )
+      mediaPolicy?.validateBody?.(compactBody)
       const { data: compacted, response: compactResponse } =
         await client.responses
           .compact(
@@ -640,7 +372,7 @@ async function* streamOpenAIWire(
             compacted as unknown as Response,
             ModelStopReason.EndTurn,
             [],
-            responseProfile,
+            profile,
           ),
           checkpoint,
           nativeMetadata: modelNativeResponseMetadata(
@@ -653,38 +385,9 @@ async function* streamOpenAIWire(
       }
       return
     }
-    let body = buildBody(media.messages, media.uploadedFiles)
-    if (codexImages) validateCodexImageRequest(body)
-    if (
-      nativeKimiImages &&
-      jsonRequestByteLength(body, KIMI_IMAGE_REQUEST_SAFETY_BYTES) === undefined
-    )
-      throw new KimiImageRequestSizeError()
-    if (
-      nativeGrokImages &&
-      jsonRequestByteLength(body, GROK_IMAGE_REQUEST_SAFETY_BYTES) === undefined
-    )
-      throw new GrokImageRequestSizeError()
-    if (requestProfile === "chatgpt-plan") {
-      const allowed = new Set([
-        "reasoning",
-        "prompt_cache_key",
-        "service_tier",
-        "include",
-        "parallel_tool_calls",
-        "tool_choice",
-      ])
-      if (
-        request.outputFormat !== undefined ||
-        Object.keys(request.providerOptions?.body ?? {}).some(
-          (key) => !allowed.has(key),
-        )
-      )
-        throw new ModelRequestControlsError(
-          "The ChatGPT plan request profile does not support these API-key-only request controls.",
-        )
-      body = toChatGPTPlanRequest(body)
-    }
+    const preparedBody = buildBody(media.messages, media.uploadedFiles)
+    mediaPolicy?.validateBody?.(preparedBody)
+    const body = profile.finalizeBody?.(preparedBody, request) ?? preparedBody
     const warmed = warmup
       ? transport?.warmup(body, request.signal, request.continuationScope)
       : transport?.take(body, request.signal, request.continuationScope)
@@ -727,19 +430,7 @@ async function* streamOpenAIWire(
     >()
     let nextOutputIndex = 0
     for await (const event of stream) {
-      if (requestProfile === "chatgpt-plan") {
-        if (
-          event.type === "response.output_item.added" ||
-          event.type === "response.output_item.done"
-        )
-          requireChatGPTPlanNamespace(event.item)
-        if (
-          event.type === "response.completed" ||
-          event.type === "response.incomplete" ||
-          event.type === "response.failed"
-        )
-          event.response.output?.forEach(requireChatGPTPlanNamespace)
-      }
+      profile.validateStreamEvent?.(event)
       // Cancellation suppresses content, not accounting already delivered by
       // the provider. Tool completion may abort a queued warmup terminal event.
       // Never replace the first terminal sample with contradictory tail data.
@@ -753,7 +444,7 @@ async function* streamOpenAIWire(
           event.response,
           ModelStopReason.EndTurn,
           [],
-          responseProfile,
+          profile,
         ).usage
         if (terminalUsage !== undefined)
           request.onUsageSnapshot?.(terminalUsage)
@@ -1116,7 +807,7 @@ async function* streamOpenAIWire(
         const failure = responseFailure(
           response,
           request.target.provider,
-          responseProfile,
+          profile,
         )
         if (failure !== undefined) {
           terminalEvent = failure
@@ -1132,7 +823,7 @@ async function* streamOpenAIWire(
               request.continuationScope,
               request.target.model,
               completedIds,
-              responseProfile,
+              profile,
               rawReasoning,
               containerImages?.byItem,
             ),
@@ -1164,7 +855,7 @@ async function* streamOpenAIWire(
       yield abortedResponse(terminalUsage)
       return
     }
-    if (requestProfile === "chatgpt-plan" && terminalEvent === undefined) {
+    if (profile.requireTerminalEvent && terminalEvent === undefined) {
       yield {
         type: "failure",
         failure: modelFailureFromUnknown(undefined, {
@@ -1233,70 +924,9 @@ async function* streamOpenAIWire(
         terminalEvent?.type === "response"
           ? terminalEvent.response.providerResponseId
           : terminalEvent?.failure.providerResponseId,
-        responseProfile,
+        profile,
       ),
       ...(terminalUsage === undefined ? {} : { usage: terminalUsage }),
-    }
-  }
-}
-
-function validateKimiResponsesRequest(
-  request: ModelRequest,
-  body: ResponseCreateParamsStreaming,
-): void {
-  // The documented Kimi contract is narrower than the Responses wire shape.
-  // Reject unsupported constraints rather than letting a server ignore them.
-  if (body.tool_choice !== undefined && body.tool_choice !== "auto")
-    throw new ModelRequestControlsError(
-      "Kimi Responses supports tool_choice auto only.",
-    )
-  if (
-    request.parallelToolCalls === false ||
-    body.parallel_tool_calls !== undefined
-  )
-    throw new ModelRequestControlsError(
-      "Kimi Responses does not support parallel_tool_calls controls.",
-    )
-  if (body.service_tier !== undefined)
-    throw new ModelRequestControlsError(
-      "Kimi Responses does not support service_tier controls.",
-    )
-  if (
-    body.reasoning?.effort != null &&
-    !["low", "high", "max"].includes(body.reasoning.effort)
-  )
-    throw new ModelRequestControlsError(
-      "Kimi Responses reasoning effort must be low, high or max.",
-    )
-  if (body.reasoning?.summary != null)
-    throw new ModelRequestControlsError(
-      "Kimi Responses does not support reasoning summary controls.",
-    )
-  if (
-    body.include?.some(
-      (field) =>
-        field !== "web_search_call.results" &&
-        field !== "web_search_call.action.sources",
-    )
-  )
-    throw new ModelRequestControlsError(
-      "Kimi Responses include supports web search results and sources only.",
-    )
-  for (const definition of body.tools ?? []) {
-    const tools =
-      definition.type === "namespace" ? definition.tools : [definition]
-    for (const tool of tools) {
-      if (tool.type === "function" || tool.type === "web_search") continue
-      if (
-        tool.type === "custom" &&
-        tool.name === "apply_patch" &&
-        tool.format?.type === "grammar" &&
-        tool.format.syntax === "lark"
-      )
-        continue
-      throw new ModelRequestControlsError(
-        "Kimi Responses supports function, web_search and custom apply_patch tools with a Lark grammar only.",
-      )
     }
   }
 }
@@ -1662,7 +1292,7 @@ export function fromOpenAIResponse(
   continuationScope?: string,
   model = response.model,
   completedItemIds: ReadonlySet<string> = new Set(),
-  responseProfile: OpenAIResponseProfile = "openai",
+  profile: OpenAIResponsesProfile = openAIResponsesProfile,
   rawReasoning?: ReadonlyMap<string, { parts: ReadonlyMap<number, string> }>,
   containerImages?: ReturnType<typeof createContainerImageReader>["byItem"],
 ): ModelResponse {
@@ -1682,23 +1312,13 @@ export function fromOpenAIResponse(
   let stopReason: ModelStopReason | undefined
   let lengthReason: ModelResponse["lengthReason"]
   if (response.status === "incomplete") {
-    if (rawStopReason === "max_output_tokens") {
+    const limit =
+      rawStopReason === undefined
+        ? undefined
+        : profile.lengthReason?.(rawStopReason)
+    if (limit !== undefined || rawStopReason === "max_output_tokens") {
       stopReason = ModelStopReason.Length
-      // Kimi documents this as returned-token exhaustion; xAI distinguishes
-      // max_prompt_tokens. OpenAI also uses it for context exhaustion.
-      lengthReason = responseProfile === "openai" ? "unknown" : "output"
-    } else if (
-      responseProfile === "grok" &&
-      rawStopReason === "max_prompt_tokens"
-    ) {
-      stopReason = ModelStopReason.Length
-      lengthReason = "context"
-    } else if (
-      responseProfile === "grok" &&
-      rawStopReason === "max_time_limit"
-    ) {
-      stopReason = ModelStopReason.Length
-      lengthReason = "unknown"
+      lengthReason = limit ?? "unknown"
     } else if (rawStopReason === "content_filter") {
       stopReason = ModelStopReason.ContentFilter
     } else {
@@ -1750,7 +1370,7 @@ export function fromOpenAIResponse(
     response.output,
   )
   return {
-    ...responseResult(response, stopReason, result.content, responseProfile),
+    ...responseResult(response, stopReason, result.content, profile),
     ...(checkpoint === undefined ? {} : { checkpoint }),
     nativeMetadata: modelNativeResponseMetadata(
       {
@@ -2202,7 +1822,7 @@ function responseResult(
   response: Response,
   stopReason: ModelResponse["stopReason"],
   content: readonly ModelContentBlock[],
-  responseProfile: OpenAIResponseProfile = "openai",
+  profile: OpenAIResponsesProfile = openAIResponsesProfile,
 ): ModelResponse {
   return {
     stopReason,
@@ -2220,10 +1840,7 @@ function responseResult(
                 }
               : {}),
             inputTokens: response.usage.input_tokens,
-            activeContextTokens: activeContextTokens(
-              response.usage,
-              responseProfile,
-            ),
+            activeContextTokens: activeContextTokens(response.usage, profile),
             outputTokens: response.usage.output_tokens,
             ...((response.usage.input_tokens_details?.cached_tokens ?? 0) === 0
               ? {}
@@ -2247,7 +1864,7 @@ function responseResult(
 function responseFailure(
   response: Response,
   provider: string,
-  responseProfile: OpenAIResponseProfile,
+  profile: OpenAIResponsesProfile,
 ): ModelStreamFailureEvent | undefined {
   if (
     response.status !== "cancelled" &&
@@ -2276,32 +1893,17 @@ function responseFailure(
     ...(response.usage == null
       ? {}
       : {
-          usage: responseResult(
-            response,
-            ModelStopReason.EndTurn,
-            [],
-            responseProfile,
-          ).usage,
+          usage: responseResult(response, ModelStopReason.EndTurn, [], profile)
+            .usage,
         }),
   }
 }
 
 function activeContextTokens(
   usage: NonNullable<Response["usage"]>,
-  responseProfile: OpenAIResponseProfile,
+  profile: OpenAIResponsesProfile,
 ): number {
-  if (responseProfile === "grok") {
-    const contextDetails = (usage as unknown as Record<string, unknown>)
-      .context_details
-    if (isJsonObject(contextDetails)) {
-      const inputTokens = contextDetails.input_tokens
-      const outputTokens = contextDetails.output_tokens
-      if (typeof inputTokens === "number" && typeof outputTokens === "number") {
-        return inputTokens + outputTokens
-      }
-    }
-  }
-  return usage.total_tokens
+  return profile.activeContextTokens?.(usage) ?? usage.total_tokens
 }
 
 class OpenAIProtocolError extends Error {}
@@ -2312,7 +1914,7 @@ function terminalFailure(
   stage: "connect" | "response_body",
   requestId?: string,
   responseId?: string,
-  responseProfile: OpenAIResponseProfile = "openai",
+  profile: OpenAIResponsesProfile = openAIResponsesProfile,
 ): ModelStreamFailureEvent {
   const status =
     error instanceof OpenAI.APIError && typeof error.status === "number"
@@ -2341,9 +1943,7 @@ function terminalFailure(
   const serverShouldRetry =
     error instanceof OpenAI.APIError
       ? (parseShouldRetry(error.headers) ??
-        (responseProfile === "grok" && (status === 525 || status === 526)
-          ? false
-          : undefined))
+        (profile.neverRetryStatus?.(status) ? false : undefined))
       : undefined
   const providerRequestId =
     error instanceof OpenAI.APIError && typeof error.requestID === "string"

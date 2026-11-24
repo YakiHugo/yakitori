@@ -1,5 +1,6 @@
 import { createBedrockConverseProvider } from "../runtime/bedrock-converse-provider.ts"
 import { configuredModelWithDefaults } from "../runtime/configured-model-defaults.ts"
+import { prepareGrokRequest } from "../runtime/grok-request.ts"
 import {
   createAnthropicTurnTransport,
   createChatCompletionsProvider,
@@ -14,8 +15,8 @@ import {
 } from "../runtime/index.ts"
 import type { ModelClientSession } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
+import { grokResponsesProfile } from "../runtime/openai-responses-profiles.ts"
 import { resolveProviderBackend } from "../runtime/provider-backend.ts"
-import { prepareGrokRequest } from "../runtime/grok-request.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
@@ -115,7 +116,7 @@ export function createConfiguredProvider(
           ? createOpenAITurnTransport({
               ...options,
               warmup: configuration.requestWarmup === true,
-              responseProfile: backend.responseProfile,
+              profile: backend.responseProfile,
             })
           : configuration.wireApi === "anthropic_messages"
             ? createAnthropicTurnTransport({
@@ -133,7 +134,7 @@ export function createConfiguredProvider(
               ? createGeminiInteractionsProvider(options)
               : createChatCompletionsProvider({
                   ...options,
-                  flavor: backend.chatCompletionsFlavor,
+                  dialect: backend.chatDialect,
                 }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
@@ -155,7 +156,7 @@ export function createConfiguredProvider(
             return
           }
           const providerRequest =
-            backend.responseProfile === "grok"
+            backend.responseProfile === grokResponsesProfile
               ? prepareGrokRequest(request)
               : request
           for await (const event of stream(providerRequest)) {

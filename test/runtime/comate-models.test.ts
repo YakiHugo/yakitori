@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
-import { providerServices } from "../../src/runtime/provider-services.ts"
 import { resolveProviderBackend } from "../../src/runtime/provider-backend.ts"
+import { providerServices } from "../../src/runtime/provider-services.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
@@ -121,7 +121,7 @@ describe("Comate models on original vendors' standard APIs", () => {
         service: "glm",
         wireApi: "openai_chat_completions",
         baseURL,
-      }).chatCompletionsFlavor,
+      }).chatDialect.id,
     ).toBe("generic")
     const provider = createConfiguredProvider(
       "personal",

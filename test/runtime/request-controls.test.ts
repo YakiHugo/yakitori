@@ -2,6 +2,7 @@ import { createServer } from "node:http"
 import Anthropic from "@anthropic-ai/sdk"
 import { expect, it } from "vitest"
 import { isJsonObject, type JsonObject } from "../../src/kernel/index.ts"
+import { anthropicMessagesProfile } from "../../src/runtime/anthropic-messages-profiles.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
 import type {
@@ -51,7 +52,10 @@ it.each(
     api === "openai_responses"
       ? createOpenAIProvider(options)
       : api === "anthropic_messages"
-        ? createAnthropicTestStream({ ...options, profile: "anthropic" })
+        ? createAnthropicTestStream({
+            ...options,
+            profile: anthropicMessagesProfile,
+          })
         : api === "openai_chat_completions"
           ? createChatCompletionsProvider(options)
           : createGeminiProvider(options)

@@ -52,7 +52,7 @@ describe("direct Meta images", () => {
       wireApi: "openai_chat_completions",
       baseURL: "https://api.meta.ai/v1",
     })
-    expect(backend.chatCompletionsFlavor).toBe("meta")
+    expect(backend.chatDialect.id).toBe("meta")
     const configured = createConfiguredProvider(
       "personal",
       {

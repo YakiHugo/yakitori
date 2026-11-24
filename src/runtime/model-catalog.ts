@@ -3,63 +3,77 @@ import instructionManifest from "./prompts/manifest.json" with { type: "json" }
 
 export type InstructionProfileId = keyof typeof instructionManifest
 
-export type ResolvedModel = Readonly<{
+export type ModelFacts = Readonly<{
   // Opt-in execution restriction, not a claim about vendor tool capabilities.
   toolPolicy?: "chat_only"
+  contextWindowTokens?: number
+  maxContextWindowTokens?: number
+  contextWindowScope?: "input" | "total"
+  pricing?: import("../protocol/providers.ts").ConfiguredModel["pricing"]
+  maxOutputTokens?: number
+  inputModalities: readonly ModelInputModality[]
+  imageDetailModes: readonly ModelImageDetailMode[]
+  defaultEffort?: string
+  efforts?: readonly string[]
+  speeds?: readonly string[]
+}>
+
+export type HarnessProfile = Readonly<{
   toolOutputTruncation?: ModelToolOutputTruncation
   instructions?: string
   delegationInstructions?: ModelDelegationInstructions
   autoCompactTokenLimit?: number
   compactionHash?: string
-  defaultEffort?: string
-  efforts?: readonly string[]
-  speeds?: readonly string[]
   multiAgentReasoningEffort?: string
   // Requested budget and API capability are distinct. The curated Claude
   // request default is Yakitori policy, not an Anthropic API default.
   defaultOutputTokens?: number
-  maxOutputTokens?: number
-  provider: string
-  model: string
   instructionProfileId: InstructionProfileId
-  inputModalities: readonly ModelInputModality[]
-  imageDetailModes: readonly ModelImageDetailMode[]
   shellToolType: ModelShellToolType
   applyPatchToolType?: ModelApplyPatchToolType
   fileEditingToolType: ModelFileEditingToolType
   supportsNativeToolSearch: boolean
   supportsCustomTools: boolean
-  usedFallbackModelMetadata: boolean
 }>
 
-export type CatalogModel = Readonly<{
-  readonly toolPolicy?: "chat_only"
-  visible?: boolean
-  contextWindowTokens?: number
-  maxContextWindowTokens?: number
-  contextWindowScope?: "input" | "total"
-  pricing?: import("../protocol/providers.ts").ConfiguredModel["pricing"]
-  toolOutputTruncation?: ModelToolOutputTruncation
-  autoCompactTokenLimit?: number
-  compactionHash?: string
-  defaultOutputTokens?: number
-  maxOutputTokens?: number
-  model: string
-  instructionProfileId: InstructionProfileId
-  shellToolType: ModelShellToolType
-  applyPatchToolType?: ModelApplyPatchToolType
-  fileEditingToolType: ModelFileEditingToolType
-  supportsNativeToolSearch: boolean
-  supportsCustomTools?: boolean
-  displayName?: string
-  effortStyle?: "none" | "levels"
-  efforts?: readonly string[]
-  defaultEffort?: string
-  multiAgentReasoningEffort?: string
-  speeds?: readonly string[]
-  inputModalities: readonly ModelInputModality[]
-  imageDetailModes: readonly ModelImageDetailMode[]
-}>
+type RequestModelFacts = Omit<
+  ModelFacts,
+  | "contextWindowTokens"
+  | "maxContextWindowTokens"
+  | "contextWindowScope"
+  | "pricing"
+>
+
+export type ResolvedModel = RequestModelFacts &
+  HarnessProfile &
+  Readonly<{
+    provider: string
+    model: string
+    usedFallbackModelMetadata: boolean
+  }>
+
+export type CatalogModel = ModelFacts &
+  Omit<
+    HarnessProfile,
+    "instructions" | "delegationInstructions" | "supportsCustomTools"
+  > &
+  Readonly<{
+    model: string
+    visible?: boolean
+    supportsCustomTools?: boolean
+    displayName?: string
+    effortStyle?: "none" | "levels"
+  }>
+
+type CatalogEntry = (typeof catalog.models)[number]
+
+const defaultHarnessProfile: HarnessProfile = {
+  instructionProfileId: "default",
+  shellToolType: "unified_exec",
+  fileEditingToolType: "edit_write",
+  supportsNativeToolSearch: false,
+  supportsCustomTools: false,
+}
 
 export type ModelInputModality = "image" | "text" | "video"
 // Codex mode overrides. Presence, including {}, selects Codex's effort-based
@@ -110,77 +124,28 @@ export function listCatalogModels(provider: string): CatalogModel[] {
   const normalized = provider.toLowerCase()
   return catalog.models
     .filter((entry) => entry.provider.toLowerCase() === normalized)
-    .map((entry) => ({
-      model: entry.model,
-      ...catalogOutputTokens(entry),
-      ...("toolOutputTruncation" in entry
-        ? {
-            toolOutputTruncation: requireToolOutputTruncation(
-              entry.toolOutputTruncation,
-            ),
-          }
-        : {}),
-      ...("autoCompactTokenLimit" in entry &&
-      typeof entry.autoCompactTokenLimit === "number"
-        ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
-        : {}),
-      ...("compactionHash" in entry && typeof entry.compactionHash === "string"
-        ? { compactionHash: entry.compactionHash }
-        : {}),
-      instructionProfileId: requireInstructionProfileId(
-        entry.instructionProfileId,
-      ),
-      shellToolType: requireShellToolType(entry.shellToolType),
-      ...("applyPatchToolType" in entry &&
-      entry.applyPatchToolType !== undefined
-        ? {
-            applyPatchToolType: requireApplyPatchToolType(
-              entry.applyPatchToolType,
-            ),
-          }
-        : {}),
-      fileEditingToolType: requireFileEditingToolType(
-        entry.fileEditingToolType,
-      ),
-      supportsNativeToolSearch: entry.supportsNativeToolSearch,
-      ...(entry.supportsCustomTools === undefined
-        ? {}
-        : { supportsCustomTools: entry.supportsCustomTools }),
-      ...("displayName" in entry && entry.displayName !== undefined
-        ? { displayName: entry.displayName }
-        : {}),
-      ...("effortStyle" in entry &&
-      (entry.effortStyle === "none" || entry.effortStyle === "levels")
-        ? { effortStyle: entry.effortStyle }
-        : {}),
-      ...("efforts" in entry && entry.efforts !== undefined
-        ? { efforts: entry.efforts }
-        : {}),
-      ...("defaultEffort" in entry && entry.defaultEffort !== undefined
-        ? {
-            defaultEffort: requireCatalogEffort(
-              entry,
-              "efforts" in entry ? entry.efforts : undefined,
-              entry.defaultEffort,
-            ),
-          }
-        : {}),
-      ...("multiAgentReasoningEffort" in entry &&
-      entry.multiAgentReasoningEffort !== undefined
-        ? {
-            multiAgentReasoningEffort: requireCatalogEffort(
-              entry,
-              "efforts" in entry ? entry.efforts : undefined,
-              entry.multiAgentReasoningEffort,
-            ),
-          }
-        : {}),
-      ...("speeds" in entry && entry.speeds !== undefined
-        ? { speeds: entry.speeds }
-        : {}),
-      inputModalities: requireInputModalities(entry.inputModalities),
-      imageDetailModes: requireImageDetailModes(entry.imageDetailModes),
-    }))
+    .map((entry) => {
+      const facts = catalogRequestFacts(entry)
+      const { supportsCustomTools, ...profile } = catalogHarnessProfile(
+        entry,
+        facts,
+      )
+      return {
+        model: entry.model,
+        ...facts,
+        ...profile,
+        ...(entry.supportsCustomTools === undefined
+          ? {}
+          : { supportsCustomTools }),
+        ...("displayName" in entry && entry.displayName !== undefined
+          ? { displayName: entry.displayName }
+          : {}),
+        ...("effortStyle" in entry &&
+        (entry.effortStyle === "none" || entry.effortStyle === "levels")
+          ? { effortStyle: entry.effortStyle }
+          : {}),
+      }
+    })
 }
 
 export function catalogModelCapabilities(input: {
@@ -207,49 +172,11 @@ export function resolveModel(input: {
 }): ResolvedModel {
   const entry = findCatalogEntry(input)
   if (entry !== undefined) {
+    const facts = catalogRequestFacts(entry)
     return {
       ...input,
-      ...("efforts" in entry ? { efforts: entry.efforts } : {}),
-      ...("speeds" in entry ? { speeds: entry.speeds } : {}),
-      ...("defaultEffort" in entry
-        ? { defaultEffort: entry.defaultEffort }
-        : {}),
-      ...("multiAgentReasoningEffort" in entry
-        ? { multiAgentReasoningEffort: entry.multiAgentReasoningEffort }
-        : {}),
-      ...catalogOutputTokens(entry),
-      ...("toolOutputTruncation" in entry
-        ? {
-            toolOutputTruncation: requireToolOutputTruncation(
-              entry.toolOutputTruncation,
-            ),
-          }
-        : {}),
-      ...("autoCompactTokenLimit" in entry &&
-      typeof entry.autoCompactTokenLimit === "number"
-        ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
-        : {}),
-      ...("compactionHash" in entry && typeof entry.compactionHash === "string"
-        ? { compactionHash: entry.compactionHash }
-        : {}),
-      instructionProfileId: requireInstructionProfileId(
-        entry.instructionProfileId,
-      ),
-      inputModalities: requireInputModalities(entry.inputModalities),
-      imageDetailModes: requireImageDetailModes(entry.imageDetailModes),
-      shellToolType: requireShellToolType(entry.shellToolType),
-      ...(entry.applyPatchToolType === undefined
-        ? {}
-        : {
-            applyPatchToolType: requireApplyPatchToolType(
-              entry.applyPatchToolType,
-            ),
-          }),
-      fileEditingToolType: requireFileEditingToolType(
-        entry.fileEditingToolType,
-      ),
-      supportsNativeToolSearch: entry.supportsNativeToolSearch,
-      supportsCustomTools: entry.supportsCustomTools ?? false,
+      ...facts,
+      ...catalogHarnessProfile(entry, facts),
       usedFallbackModelMetadata: false,
     }
   }
@@ -288,15 +215,89 @@ export function resolveFallbackModel(
   return {
     provider: input.provider,
     model: input.model,
-    instructionProfileId: "default",
+    ...defaultHarnessProfile,
     inputModalities: ["text"],
     imageDetailModes: [],
-    // These are Yakitori's tools, not a claim about vendor capabilities.
-    shellToolType: "unified_exec",
-    fileEditingToolType: "edit_write",
-    supportsNativeToolSearch: false,
-    supportsCustomTools: false,
     usedFallbackModelMetadata: true,
+  }
+}
+
+function catalogRequestFacts(entry: CatalogEntry): RequestModelFacts {
+  const efforts = "efforts" in entry ? entry.efforts : undefined
+  return {
+    inputModalities: requireInputModalities(entry.inputModalities),
+    imageDetailModes: requireImageDetailModes(entry.imageDetailModes),
+    ...(efforts === undefined ? {} : { efforts }),
+    ...("defaultEffort" in entry && entry.defaultEffort !== undefined
+      ? {
+          defaultEffort: requireCatalogEffort(
+            entry,
+            efforts,
+            entry.defaultEffort,
+          ),
+        }
+      : {}),
+    ...("speeds" in entry && entry.speeds !== undefined
+      ? { speeds: entry.speeds }
+      : {}),
+    ...(entry.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: entry.maxOutputTokens }),
+  }
+}
+
+// Claude limits: https://platform.claude.com/docs/en/models/overview and the
+// linked model specification pages. Yakitori uses 32k for curated Claude
+// requests, following the documented Claude Code fallback request budget:
+// https://code.claude.com/docs/en/env-vars#variables
+function catalogHarnessProfile(
+  entry: CatalogEntry,
+  facts: RequestModelFacts,
+): HarnessProfile {
+  return {
+    ...defaultHarnessProfile,
+    instructionProfileId: requireInstructionProfileId(
+      entry.instructionProfileId,
+    ),
+    shellToolType: requireShellToolType(entry.shellToolType),
+    fileEditingToolType: requireFileEditingToolType(entry.fileEditingToolType),
+    supportsNativeToolSearch: entry.supportsNativeToolSearch,
+    supportsCustomTools:
+      entry.supportsCustomTools ?? defaultHarnessProfile.supportsCustomTools,
+    ...(entry.applyPatchToolType === undefined
+      ? {}
+      : {
+          applyPatchToolType: requireApplyPatchToolType(
+            entry.applyPatchToolType,
+          ),
+        }),
+    ...(entry.defaultOutputTokens === undefined
+      ? {}
+      : { defaultOutputTokens: entry.defaultOutputTokens }),
+    ...("toolOutputTruncation" in entry
+      ? {
+          toolOutputTruncation: requireToolOutputTruncation(
+            entry.toolOutputTruncation,
+          ),
+        }
+      : {}),
+    ...("autoCompactTokenLimit" in entry &&
+    typeof entry.autoCompactTokenLimit === "number"
+      ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
+      : {}),
+    ...("compactionHash" in entry && typeof entry.compactionHash === "string"
+      ? { compactionHash: entry.compactionHash }
+      : {}),
+    ...("multiAgentReasoningEffort" in entry &&
+    entry.multiAgentReasoningEffort !== undefined
+      ? {
+          multiAgentReasoningEffort: requireCatalogEffort(
+            entry,
+            facts.efforts,
+            entry.multiAgentReasoningEffort,
+          ),
+        }
+      : {}),
   }
 }
 
@@ -419,24 +420,6 @@ export function catalogModelCapacity(input: {
         ? entry.effectiveContextWindowPercent
         : 100,
     contextWindowScope: entry.provider === "codex" ? "input" : "total",
-  }
-}
-
-// Claude limits: https://platform.claude.com/docs/en/models/overview and the
-// linked model specification pages. Yakitori uses 32k for curated Claude
-// requests, following the documented Claude Code fallback request budget:
-// https://code.claude.com/docs/en/env-vars#variables
-function catalogOutputTokens(entry: {
-  defaultOutputTokens?: number
-  maxOutputTokens?: number
-}): Pick<ResolvedModel, "defaultOutputTokens" | "maxOutputTokens"> {
-  return {
-    ...(entry.defaultOutputTokens === undefined
-      ? {}
-      : { defaultOutputTokens: entry.defaultOutputTokens }),
-    ...(entry.maxOutputTokens === undefined
-      ? {}
-      : { maxOutputTokens: entry.maxOutputTokens }),
   }
 }
 

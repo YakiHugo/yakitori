@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { providerServices } from "../../src/runtime/provider-services.ts"
 import { resolveProviderBackend } from "../../src/runtime/provider-backend.ts"
+import { providerServices } from "../../src/runtime/provider-services.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 
 const native = {
@@ -60,7 +60,7 @@ describe("TRAE Seed models on standard Ark", () => {
     "https://ark.cn-beijing.volces.com.evil.example/api/v3",
   ])("does not assign native capabilities to another endpoint: %s", async (baseURL) => {
     expect(
-      resolveProviderBackend({ ...native, baseURL }).chatCompletionsFlavor,
+      resolveProviderBackend({ ...native, baseURL }).chatDialect.id,
     ).not.toBe("doubao")
     const provider = createConfiguredProvider(
       "personal",

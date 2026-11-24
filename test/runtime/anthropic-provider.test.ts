@@ -1,6 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
 import {
+  genericMessagesProfile,
+  kimiCodeMessagesProfile,
+} from "../../src/runtime/anthropic-messages-profiles.ts"
+import {
   fromAnthropicMessage,
   toAnthropicMessages,
   toAnthropicTools,
@@ -1321,7 +1325,7 @@ describe("anthropic provider conversion", () => {
     const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "kimi-for-coding",
-      profile: "kimi-code",
+      profile: kimiCodeMessagesProfile,
       client,
     })
 
@@ -1361,7 +1365,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
-      profile: "kimi-code",
+      profile: kimiCodeMessagesProfile,
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1391,7 +1395,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
-      profile: "kimi-code",
+      profile: kimiCodeMessagesProfile,
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1423,7 +1427,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
-      profile: "kimi-code",
+      profile: kimiCodeMessagesProfile,
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1454,7 +1458,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
-      profile: "generic",
+      profile: genericMessagesProfile,
       apiKey: "test",
       model: "other-model",
       client,

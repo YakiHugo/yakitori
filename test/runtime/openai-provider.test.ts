@@ -13,6 +13,10 @@ import {
   toOpenAIInput,
   toOpenAITools,
 } from "../../src/runtime/openai-provider.ts"
+import {
+  codexResponsesProfile,
+  grokResponsesProfile,
+} from "../../src/runtime/openai-responses-profiles.ts"
 import { withSDKResponse } from "../support/sdk-response.ts"
 
 describe("OpenAI Responses provider", () => {
@@ -246,7 +250,7 @@ describe("OpenAI Responses provider", () => {
       },
     })
     const stream = createOpenAIProvider({
-      ...(provider === "codex" ? { requestProfile: "codex" as const } : {}),
+      ...(provider === "codex" ? { profile: codexResponsesProfile } : {}),
       apiKey: "test",
       model,
       client,
@@ -439,7 +443,7 @@ describe("OpenAI Responses provider", () => {
       },
     })
     const stream = createOpenAIProvider({
-      requestProfile: "codex",
+      profile: codexResponsesProfile,
       apiKey: "test",
       model: "gpt-test",
       client,
@@ -978,7 +982,7 @@ describe("OpenAI Responses provider", () => {
         undefined,
         response.model,
         undefined,
-        "grok",
+        grokResponsesProfile,
       ).usage,
     ).toMatchObject({ activeContextTokens: 36 })
   })
@@ -1419,6 +1423,7 @@ describe("OpenAI Responses provider", () => {
         apiKey: "test",
         model: "gpt-default",
         client,
+        profile: codexResponsesProfile,
       })
 
       for await (const _event of stream(
@@ -1664,7 +1669,7 @@ describe("OpenAI provider error classification", () => {
     } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
-      responseProfile: "grok",
+      profile: grokResponsesProfile,
       model: "grok-test",
       client,
     })

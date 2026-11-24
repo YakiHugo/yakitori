@@ -13,6 +13,10 @@ import {
   createOpenAIProvider,
   toOpenAIInput,
 } from "../../src/runtime/openai-provider.ts"
+import {
+  grokResponsesProfile,
+  type OpenAIResponsesProfile,
+} from "../../src/runtime/openai-responses-profiles.ts"
 import { persistModelMessages } from "../support/persist-model-messages.ts"
 import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
@@ -1265,7 +1269,7 @@ describe("provider output completeness", () => {
           },
           openaiFinish(reason),
         ],
-        "grok",
+        grokResponsesProfile,
       ),
       request("grok"),
     )
@@ -1488,7 +1492,7 @@ function openaiFinish(
 
 function openaiStream(
   frames: readonly SseFrame[],
-  responseProfile?: "grok",
+  profile?: OpenAIResponsesProfile,
 ): StreamFn {
   const client = new OpenAI({
     apiKey: "test",
@@ -1502,7 +1506,7 @@ function openaiStream(
     apiKey: "test",
     model: "gpt-test",
     client,
-    ...(responseProfile ? { responseProfile } : {}),
+    ...(profile === undefined ? {} : { profile }),
   })
 }
 

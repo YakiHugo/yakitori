@@ -1,21 +1,22 @@
-import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import type OpenAI from "openai"
 import sharp from "sharp"
 import { expect, it } from "vitest"
 import { inspectImageBytes } from "../../src/kernel/image-metadata.ts"
 import {
+  CODEX_IMAGE_REQUEST_SAFETY_BYTES,
   prepareCodexImage,
   validateCodexImageRequest,
-  CODEX_IMAGE_REQUEST_SAFETY_BYTES,
 } from "../../src/runtime/codex-image-policy.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
-import { discoverCodexModels } from "../../src/runtime/model-discovery.ts"
-import { prepareModelMedia } from "../../src/runtime/model-media.ts"
 import type {
   ModelImageBlock,
   ModelMessage,
   ModelRequest,
 } from "../../src/runtime/model.ts"
+import { discoverCodexModels } from "../../src/runtime/model-discovery.ts"
+import { prepareModelMedia } from "../../src/runtime/model-media.ts"
+import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
+import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import { codexResponsesProfile } from "../../src/runtime/openai-responses-profiles.ts"
 import { withSDKResponse } from "../support/sdk-response.ts"
 
 async function fixture(width: number, height: number) {
@@ -173,7 +174,7 @@ it.each(
   const stream = createOpenAIProvider({
     apiKey: "test",
     model: target.model,
-    requestProfile: "codex",
+    profile: codexResponsesProfile,
     client,
   })
   const request: ModelRequest = {
@@ -265,7 +266,7 @@ it("rejects oversized Codex framing before asset reads or transport", async () =
   const stream = createOpenAIProvider({
     apiKey: "test",
     model: "gpt-6.1-sol",
-    requestProfile: "codex",
+    profile: codexResponsesProfile,
     client,
   })
   const events = await Array.fromAsync(
@@ -332,7 +333,7 @@ it("does not fetch externally hosted image URLs on behalf of Codex", async () =>
   const stream = createOpenAIProvider({
     apiKey: "test",
     model: "gpt-6.1-sol",
-    requestProfile: "codex",
+    profile: codexResponsesProfile,
     client,
   })
   const events = await Array.fromAsync(
