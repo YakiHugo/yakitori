@@ -21,6 +21,7 @@ import {
 } from "../fixtures/computer-preview.ts"
 import {
   createSmokeEnvironment,
+  replaceInlineEditText,
   runBudgetedGoal,
   runConversationHistoryFlow,
   runExternalEngineFlow,
@@ -739,9 +740,7 @@ test("edit and undo replace history in one session across open windows", async (
       .getByRole("main")
       .getByRole("button", { name: "Edit & resubmit", exact: true })
       .click()
-    await page
-      .getByRole("textbox", { name: "Edit message", exact: true })
-      .fill("Edited stable prompt")
+    await replaceInlineEditText(page, "Edited stable prompt")
     await page
       .locator(".conversation-inline-edit")
       .getByRole("button", { name: "Send", exact: true })
