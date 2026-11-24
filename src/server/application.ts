@@ -114,6 +114,11 @@ import {
   createChatGPTModelConnections,
 } from "./chatgpt-model-connections.ts"
 import { ComputerControl, type ComputerUseOwner } from "./computer-control.ts"
+import {
+  computerInternalTool,
+  computerModelTools,
+  computerToolsEnabled,
+} from "./computer-use.ts"
 import { ComputerPreviewService } from "./computer-preview.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import {
@@ -1111,9 +1116,7 @@ export async function createYakitoriApplication(
         if (
           !configured ||
           configured.enabled === false ||
-          configured.disabledTools?.includes("control") ||
-          (configured.enabledTools !== undefined &&
-            !configured.enabledTools.includes("control"))
+          !computerToolsEnabled(configured)
         ) {
           const message =
             "Connect computer use before inspecting desktop browser tabs."
@@ -1200,8 +1203,8 @@ export async function createYakitoriApplication(
                   ),
                 turnEndTools: {
                   [computerUseServerName]: {
-                    name: "turn_ended",
-                    input: () => ({}),
+                    name: computerInternalTool,
+                    input: () => ({ action: "turn_ended" }),
                   },
                 },
                 onBackgroundError: (cause) =>
@@ -1215,14 +1218,19 @@ export async function createYakitoriApplication(
               mapTools: (name, tools) =>
                 name !== computerUseServerName
                   ? tools
-                  : tools.map((tool) => ({
-                      ...tool,
-                      async execute(input, context) {
-                        const refusal = claimComputer(context)
-                        if (refusal) return refusal
-                        return tool.execute(input, context)
-                      },
-                    })),
+                  : tools
+                      .filter((tool) =>
+                        computerModelTools.includes(tool.toolName.name),
+                      )
+                      .map((tool) => ({
+                        ...tool,
+                        supportsParallelToolCalls: false,
+                        async execute(input, context) {
+                          const refusal = claimComputer(context)
+                          if (refusal) return refusal
+                          return tool.execute(input, context)
+                        },
+                      })),
             })
       const mcpManager = mcpExtension?.manager
       mcpManager?.subscribeStatus(() =>

@@ -21,6 +21,13 @@ extension Computer {
            let window, !target.applicationUI, window.frame.contains(frame) {
             point = CGPoint(x: frame.midX, y: frame.midY)
         }
+        func checkScreenTarget(in current: [WindowIdentity]) throws {
+            if ticket.scope == .screen, target.element == nil, let point,
+               current.first(where: { $0.layer == 0 && $0.frame.contains(point) }) != window {
+                throw ComputerFailure("stale_snapshot", "The window under the screen input point changed; observe again.")
+            }
+        }
+        if ticket.scope == .screen { try checkScreenTarget(in: windows()) }
         // WindowServer can briefly retain a closed window while AppKit still
         // accepts AXPress on its retained controls. Confirm it is still exposed
         // by the application's current AX window list before using an element.
@@ -83,7 +90,12 @@ extension Computer {
         let appResources = resourcePIDs.filter { isolation?.owns($0) != true }.map { "app-\($0)" }
         let resources = try await NativeResources.acquire(appResources + (foreground ? ["foreground"] : []))
         defer { withExtendedLifetime(resources) {} }
-        try ticket.validate(id: ticket.id, windows: windows(), displays: displays())
+        let currentWindows = try windows()
+        try ticket.validate(id: ticket.id, windows: currentWindows, displays: displays())
+        try checkScreenTarget(in: currentWindows)
+        if let window, !currentWindows.contains(window) {
+            throw ComputerFailure("stale_snapshot", "The addressed window changed while waiting for input ownership; observe again.")
+        }
         if let screenKeyboardPID, NSWorkspace.shared.frontmostApplication?.processIdentifier != screenKeyboardPID {
             throw ComputerFailure("focus_changed", "The screen keyboard target changed while waiting for input ownership.")
         }
@@ -224,6 +236,7 @@ extension Computer {
             func checkpoint() throws {
                 try Task.checkCancellation()
                 let currentWindows = try windows()
+                try checkScreenTarget(in: currentWindows)
                 if let window, !currentWindows.contains(window) {
                     throw ComputerFailure("stale_snapshot", "The target moved or exited during input; observe again.")
                 }

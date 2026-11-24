@@ -2,6 +2,16 @@ import AppKit
 import ApplicationServices
 import ScreenCaptureKit
 
+public let screenshotDimensionLimit = 1568
+
+func encodeScreenshot(_ image: CGImage) throws -> Data {
+    guard let bytes = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.82]),
+          bytes.count <= 4 * 1024 * 1024 else {
+        throw ComputerFailure("capture_failed", "The screenshot could not be encoded within the native MCP reply safety boundary.")
+    }
+    return bytes
+}
+
 struct ObservationRequest {
     let mode: ObservationMode
     let scope: ObservationScope
@@ -167,9 +177,7 @@ extension Computer {
                 guard let first = selected.first else { throw ComputerFailure("window_not_found", "The preview target is no longer capturable.") }
                 frame = selected.dropFirst().reduce(first.frame) { $0.union($1.frame) }
             }
-            // Bound one complete reply (PNG plus base64 and AX) to the host's
-            // 8 MiB framing boundary. This is an allocation boundary, not a quota.
-            let scale = min(1, 1024 / max(frame.width, frame.height))
+            let scale = min(1, Double(screenshotDimensionLimit) / max(frame.width, frame.height))
             let width = max(1, Int(frame.width * scale)), height = max(1, Int(frame.height * scale))
             if let display {
                 guard let source = shareable.displays.first(where: { $0.displayID == display.id }) else {
@@ -269,13 +277,7 @@ extension Computer {
         let geometryStable: Bool
         if readOnly { geometryStable = try next.validatePreview(windows: windows(), displays: displays()) }
         else { try next.validate(id: next.id, windows: windows(), displays: displays()); geometryStable = true }
-        var png: Data?
-        if let image {
-            guard let encoded = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
-                throw ComputerFailure("capture_failed", "macOS did not encode the screenshot.")
-            }
-            png = encoded
-        }
+        let jpeg = try image.map(encodeScreenshot)
         var data: [String: Any] = ["snapshot_id": next.id, "scope": request.scope.rawValue, "mode": request.mode.rawValue,
             "frame": frameData(frame), "windows": selected.map { ["pid": $0.pid, "window_id": $0.windowID, "launch_time": $0.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "frame": frameData($0.frame)] as [String: Any] },
             "elements": rows, "tree_truncated": next.truncated, "accessibility": AXIsProcessTrusted()]
@@ -301,16 +303,20 @@ extension Computer {
             data["preview_id"] = "preview_" + UUID().uuidString
             data["input_available"] = false
             data["geometry_stable"] = geometryStable
+            if geometryStable, let pointer = CGEvent(source: nil)?.location {
+                data["pointer"] = ["x": pointer.x, "y": pointer.y]
+            }
         } else { snapshot = next; lastObservation = next }
-        return try result(data, image: png)
+        return try result(data, screenshotJPEG: jpeg)
     }
 
-    func capture(_ filter: SCContentFilter, width: Int, height: Int) async throws -> CGImage {
+    func capture(_ filter: SCContentFilter, width: Int, height: Int, sourceRect: CGRect? = nil) async throws -> CGImage {
         let configuration = SCStreamConfiguration()
         configuration.width = width
         configuration.height = height
         configuration.showsCursor = false
         configuration.ignoreShadowsSingleWindow = true
+        if let sourceRect { configuration.sourceRect = sourceRect }
         return try await nativeRequest { done in
             SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
                 if let error { done(.failure(error)) }

@@ -379,7 +379,7 @@ test("live computer preview renders decoded frames and pointer positions and sen
           connected: true,
           backend: "yakitori-native",
           serverName: "computer",
-          tools: ["control"],
+          tools: ["observe", "input", "app"],
           permissions: { accessibility: true, screenRecording: true },
         }
       else if (sent.method === "computer/preview/catalog")

@@ -3269,7 +3269,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "own_native",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -3442,7 +3442,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "try_native",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -3650,7 +3650,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "late_input",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -3712,7 +3712,7 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "owned_input",
-              name: "computer__control",
+              name: "computer__input",
               input: { action: "test" },
             },
           ],
@@ -5580,10 +5580,10 @@ import {createInterface} from 'node:readline';
 createInterface({input:process.stdin}).on('line', async line => {
   const m=JSON.parse(line); if(m.id === undefined) return;
   const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}
-    : m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}
+    : m.method==='tools/list'?{tools:['observe','input','app','internal'].map(name=>({name,inputSchema:{type:'object'}}))}
     : {content:[{type:'text',text:'done'}]};
-  if(m.params?.name==='control') writeFileSync(${JSON.stringify(called)}, 'called');
-  if(m.params?.name==='turn_ended') {
+  if(m.params?.name==='input') writeFileSync(${JSON.stringify(called)}, 'called');
+  if(m.params?.name==='internal'&&m.params?.arguments?.action==='turn_ended') {
     writeFileSync(${JSON.stringify(marker)}, 'waiting');
     while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve=>setTimeout(resolve,5));
   }

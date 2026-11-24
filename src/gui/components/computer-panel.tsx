@@ -77,8 +77,12 @@ export function ComputerPanel({
     [apiBase],
   )
   useEffect(() => {
+    if (!active) return
+    const unsubscribe =
+      getAppRpcClient(apiBase).subscribeToComputerStatusChanges(setStatus)
     void run("computer/status")
-  }, [run])
+    return unsubscribe
+  }, [active, apiBase, run])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">

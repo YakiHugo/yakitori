@@ -1958,7 +1958,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     const helper = join(userData, "computer.cjs")
     await writeFile(
       helper,
-      `const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
+      `const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}:m.method==='tools/list'?{tools:['observe','input','app','internal'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
     )
     await client.request("config/write", {
       keyPath: ["mcp_servers", "computer"],
@@ -1967,7 +1967,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         args: [helper],
         enabled: true,
         required: true,
-        enabled_tools: ["control"],
+        enabled_tools: ["observe", "input", "app"],
       },
     })
     await client.request("provider/configuration/write", {
@@ -2599,7 +2599,7 @@ test("packaged scripts compose approved MCP and browser calls through real deskt
           finish = "stop"
         if (body.tools?.length) {
           if (modelCalls++ === 0) {
-            const code = `const control = await tools.call('computer__control',{action:'fixture_effect'}); if(!control.ok) throw control;
+            const code = `const control = await tools.call('computer__input',{action:'fixture_effect'}); if(!control.ok) throw control;
 const listed = await tools.call('browser',{action:'list'}); if(!listed.ok) throw listed;
 const tab = listed.output.tabs.find(tab=>tab.url===args.url); if(!tab) throw 'Missing script tab';
 let observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
@@ -2676,7 +2676,7 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
   try {
     await writeFile(
       helper,
-      `const fs=require('node:fs'); const rl=require('node:readline').createInterface({input:process.stdin}); rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return; if(m.method==='tools/call')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m.params)+'\\n'); const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'script-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[{type:'text',text:'Owned helper acknowledged'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
+      `const fs=require('node:fs'); const rl=require('node:readline').createInterface({input:process.stdin}); rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return; if(m.method==='tools/call')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m.params)+'\\n'); const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'script-computer',version:'1'}}:m.method==='tools/list'?{tools:['observe','input','app','internal'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[{type:'text',text:'Owned helper acknowledged'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
     )
     await client.request("config/write", {
       keyPath: ["mcp_servers", "computer"],
@@ -2685,7 +2685,7 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
         args: [helper],
         enabled: true,
         required: true,
-        enabled_tools: ["control"],
+        enabled_tools: ["observe", "input", "app"],
       },
     })
     await client.request("provider/configuration/write", {
@@ -2778,11 +2778,15 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
     expect(
       calls.filter(
         (call) =>
-          call.name === "control" &&
-          call.arguments?.action === "fixture_effect",
+          call.name === "input" && call.arguments?.action === "fixture_effect",
       ),
     ).toHaveLength(1)
-    expect(calls.filter((call) => call.name === "turn_ended")).toHaveLength(1)
+    expect(
+      calls.filter(
+        (call) =>
+          call.name === "internal" && call.arguments?.action === "turn_ended",
+      ),
+    ).toHaveLength(1)
     expect(
       (await client.request("computer/status", {})).inputOwner,
     ).toBeUndefined()
@@ -2991,7 +2995,7 @@ test("packaged preview recording decodes and saves WebM through Electron's downl
           connected: true,
           backend: "yakitori-native",
           serverName: "computer",
-          tools: ["control"],
+          tools: ["observe", "input", "app"],
           permissions: { accessibility: true, screenRecording: true },
         }
       else if (request.method === "computer/preview/catalog")

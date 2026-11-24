@@ -37,13 +37,13 @@ export async function verifyComputerZoom(context: {
       })
       assert(!result.isError, JSON.stringify(result.structuredContent))
       assert.notEqual(result.structuredContent?.snapshot_id, snapshot)
-      assert.equal(result.structuredContent?.image_width, 256)
-      assert.equal(result.structuredContent?.image_height, 256)
+      assert.equal(result.structuredContent?.image_width, 80)
+      assert.equal(result.structuredContent?.image_height, 80)
       const part = result.content.find((part) => part.type === "image")
       assert(part?.type === "image")
       const { createCanvas, loadImage } = await import("@napi-rs/canvas")
       const image = await loadImage(Buffer.from(part.data, "base64"))
-      const canvas = createCanvas(256, 256)
+      const canvas = createCanvas(80, 80)
       const drawing = canvas.getContext("2d")
       drawing.drawImage(image, 0, 0)
       const at = (x: number, y: number) => {
@@ -51,10 +51,10 @@ export async function verifyComputerZoom(context: {
         assert(r !== undefined && g !== undefined && b !== undefined)
         return { r, g, b }
       }
-      const red = at(64, 64),
-        blue = at(192, 64),
-        green = at(64, 192),
-        yellow = at(192, 192)
+      const red = at(20, 20),
+        blue = at(60, 20),
+        green = at(20, 60),
+        yellow = at(60, 60)
       assert(
         red.r > 180 && red.g < 80 && red.b < 80,
         `top-left: ${JSON.stringify(red)}`,
@@ -109,8 +109,9 @@ export async function verifyComputerZoom(context: {
       const clicked = await call({
         action: "click",
         snapshot_id: zoomed.structuredContent?.snapshot_id,
-        x: 350,
-        y: 70,
+        coordinate_space: "normalized",
+        x: 500,
+        y: 500,
       })
       assert(!clicked.isError, JSON.stringify(clicked.structuredContent))
       await waitFor(async () => (await state()).count === before + 1)

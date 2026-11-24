@@ -41,15 +41,15 @@ async function fixture(waitForFirstAbort = false) {
       "import {appendFileSync,existsSync} from 'node:fs';",
       "import readline from 'node:readline';",
       `const calls=${JSON.stringify(calls)},cleanupInputs=${JSON.stringify(cleanupInputs)},release=${JSON.stringify(release)},fail=${JSON.stringify(fail)};`,
-      "const cleanupKeys=[];",
+      "const cleanupKeys=['action'];",
       "const cleanupSchema={type:'object',properties:Object.fromEntries(cleanupKeys.map(key=>[key,{type:'string',minLength:1}])),required:cleanupKeys,additionalProperties:false};",
       "readline.createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;",
       "const reply=result=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');",
-      "if(m.method==='tools/list')return reply({tools:['control','turn_ended'].map(name=>({name,description:'computer tool',inputSchema:name==='turn_ended'?cleanupSchema:{type:'object'}}))});",
+      "if(m.method==='tools/list')return reply({tools:['input','internal'].map(name=>({name,description:'computer tool',inputSchema:name==='internal'?cleanupSchema:{type:'object'}}))});",
       "if(m.method!=='tools/call')return reply({protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}});",
-      "const name=m.params.name;appendFileSync(calls,name+':'+(m.params.arguments?.label??'start')+'\\n');",
-      "if(name==='turn_ended'){const args=m.params.arguments;",
-      "if(typeof args!=='object'||args===null||Array.isArray(args)||Object.keys(args).length!==cleanupKeys.length||cleanupKeys.some(key=>typeof args[key]!=='string'||args[key].length===0)){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-32602,message:'turn_ended requires empty arguments'}})+'\\n');return;}",
+      "const name=m.params.name;appendFileSync(calls,(name==='internal'?'turn_ended':name)+':'+(m.params.arguments?.label??'start')+'\\n');",
+      "if(name==='internal'){const args=m.params.arguments;",
+      "if(typeof args!=='object'||args===null||Array.isArray(args)||Object.keys(args).length!==cleanupKeys.length||args.action!=='turn_ended'){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-32602,message:'internal cleanup requires turn_ended action'}})+'\\n');return;}",
       "appendFileSync(cleanupInputs,JSON.stringify(args)+'\\n');",
       "const finish=()=>{appendFileSync(calls,'turn_ended:done\\n');reply({isError:existsSync(fail),content:[{type:'text',text:'released'}]});};",
       "if(existsSync(release))finish();else{const timer=setInterval(()=>{if(existsSync(release)){clearInterval(timer);finish();}},10);}return;}",
@@ -62,7 +62,7 @@ async function fixture(waitForFirstAbort = false) {
       "[mcp_servers.computer]",
       `command = ${JSON.stringify(process.execPath)}`,
       `args = [${JSON.stringify(script)}]`,
-      'enabled_tools = ["control"]',
+      'enabled_tools = ["input"]',
       // The first Turn calls control immediately; required keeps the fixture
       // connected before Session creation returns.
       "required = true",
@@ -134,8 +134,8 @@ async function fixture(waitForFirstAbort = false) {
           {
             type: "tool_call",
             id: `${label}:${searched ? "control" : "search"}`,
-            name: searched ? "computer__control" : "tool_search",
-            input: searched ? { label } : { query: "computer control" },
+            name: searched ? "computer__input" : "tool_search",
+            input: searched ? { label } : { query: "computer input" },
           },
         ],
       },
@@ -237,7 +237,7 @@ describe("computer ownership through application turn lifecycle", () => {
         await input(context.application, second.session.id, "after-release")
         await idle(context.application, second.session.id)
         expect(await readFile(context.calls, "utf8")).toContain(
-          "control:after-release",
+          "input:after-release",
         )
         return
       }
@@ -254,9 +254,12 @@ describe("computer ownership through application turn lifecycle", () => {
       const second = body(await context.application.handlers.createSession())
       await input(context.application, second.session.id, "second")
       await idle(context.application, second.session.id)
-      expect(await context.cleanupInputs()).toEqual([{}, {}])
+      expect(await context.cleanupInputs()).toEqual([
+        { action: "turn_ended" },
+        { action: "turn_ended" },
+      ])
       expect(await readFile(context.calls, "utf8")).toBe(
-        "control:first\nturn_ended:start\nturn_ended:done\ncontrol:second\nturn_ended:start\nturn_ended:done\n",
+        "input:first\nturn_ended:start\nturn_ended:done\ninput:second\nturn_ended:start\nturn_ended:done\n",
       )
     } finally {
       await context.close()
@@ -279,7 +282,7 @@ describe("computer ownership through application turn lifecycle", () => {
       )
       await until(async () => context.toolResults.length === 2)
       expect(context.toolResults[1]).toContain("busy")
-      expect(await readFile(context.calls, "utf8")).toBe("control:first\n")
+      expect(await readFile(context.calls, "utf8")).toBe("input:first\n")
       expect(await context.cleanupInputs()).toEqual([])
     } finally {
       await context.close()
@@ -306,7 +309,7 @@ describe("computer ownership through application turn lifecycle", () => {
         context.application.threadManager.getThread(first.session.id)?.status,
       ).toBe("active")
       await until(async () => (await context.cleanupInputs()).length === 1)
-      expect(await context.cleanupInputs()).toEqual([{}])
+      expect(await context.cleanupInputs()).toEqual([{ action: "turn_ended" }])
       expect(
         await context.application.handlers.admitInput({
           sessionId: first.session.id,
@@ -321,7 +324,7 @@ describe("computer ownership through application turn lifecycle", () => {
         context.toolResults.filter((result) => result.includes("busy")),
       ).toHaveLength(1)
       expect(await readFile(context.calls, "utf8")).toBe(
-        "control:first\nturn_ended:start\n",
+        "input:first\nturn_ended:start\n",
       )
       await writeFile(context.release, "")
       await until(async () =>
@@ -331,7 +334,7 @@ describe("computer ownership through application turn lifecycle", () => {
       await input(context.application, second.session.id, "after-release")
       await idle(context.application, second.session.id)
       expect(await readFile(context.calls, "utf8")).toContain(
-        "control:after-release\n",
+        "input:after-release\n",
       )
     } finally {
       await context.close()

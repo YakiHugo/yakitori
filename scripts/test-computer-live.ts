@@ -16,7 +16,10 @@ import { dirname, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
 import { verifyComputerCapabilities } from "./computer-capabilities.ts"
-import { prepareComputerFixture } from "./computer-fixture.ts"
+import {
+  bindComputerFixture,
+  prepareComputerFixture,
+} from "./computer-fixture.ts"
 import { verifyComputerInteractions } from "./computer-interactions.ts"
 import { verifyComputerIsolation } from "./computer-isolation.ts"
 import { verifyComputerZoom } from "./computer-zoom.ts"
@@ -92,11 +95,7 @@ let fixture: ChildProcess | undefined
 let fixturePid: number | undefined
 let failure: unknown
 try {
-  const tools = await client.start()
-  const tool = tools.find((entry) => entry.name === "control")
-  const cleanup = tools.find((entry) => entry.name === "turn_ended")
-  assert(tool && cleanup, "Native computer tools are unavailable")
-  const call = client.bindTool(tool)
+  const call = bindComputerFixture(client, await client.start())
   const status = await call({ action: "status" })
   report.permissions = status.structuredContent ?? {}
   if (
@@ -345,23 +344,25 @@ try {
         return performance.now() - stableSince >= 250
       })
       if (runGroup === "base") {
-        await check("window screenshot and actual PNG geometry", async () => {
+        await check("window screenshot and actual JPEG geometry", async () => {
           const observed = await observe()
           const image = observed.content.find(
             (content) => content.type === "image",
           )
           assert(image?.type === "image")
-          const png = Buffer.from(image.data, "base64")
+          assert.equal(image.mimeType, "image/jpeg")
+          const { default: sharp } = await import("sharp")
+          const metadata = await sharp(
+            Buffer.from(image.data, "base64"),
+          ).metadata()
+          assert.equal(metadata.format, "jpeg")
+          assert.equal(metadata.width, observed.structuredContent?.image_width)
           assert.equal(
-            png.readUInt32BE(16),
-            observed.structuredContent?.image_width,
-          )
-          assert.equal(
-            png.readUInt32BE(20),
+            metadata.height,
             observed.structuredContent?.image_height,
           )
-          assert.equal(png.readUInt32BE(16), 500)
-          assert.equal(png.readUInt32BE(20), (await state()).height)
+          assert.equal(metadata.width, 500)
+          assert.equal(metadata.height, (await state()).height)
         })
         await check(
           "observation modes separate AX text from screenshot pixels",
@@ -457,10 +458,11 @@ try {
             assert(!app.isError, JSON.stringify(app.structuredContent))
             const image = app.content.find((part) => part.type === "image")
             assert(image?.type === "image")
-            assert.equal(
-              Buffer.from(image.data, "base64").readUInt32BE(16),
-              800,
-            )
+            const { default: sharp } = await import("sharp")
+            const metadata = await sharp(
+              Buffer.from(image.data, "base64"),
+            ).metadata()
+            assert.equal(metadata.width, 800)
             const rows = app.structuredContent?.elements as {
               element: number
               window_id: number
@@ -670,7 +672,7 @@ try {
             await waitFor(async () => (await state()).mouse_down === 1)
             controller.abort()
             assert.equal(await outcome, "cancelled")
-            assert(!(await client.bindTool(cleanup)({})).isError)
+            assert(!(await call({ action: "turn_ended" })).isError)
             await waitFor(
               async () =>
                 !(await state()).dragging && (await state()).mouse_up === 1,
@@ -699,7 +701,7 @@ try {
             await waitFor(async () => (await state()).second.startsWith("xxx"))
             controller.abort()
             assert.equal(await outcome, "cancelled")
-            assert(!(await client.bindTool(cleanup)({})).isError)
+            assert(!(await call({ action: "turn_ended" })).isError)
             const next = await observe()
             assert((await state()).second.length < 100_000)
             await input("press", next, { element: element(next, "Increment") })
@@ -799,7 +801,7 @@ try {
           state,
           waitFor,
           check,
-          cleanup: () => client.bindTool(cleanup)({}),
+          cleanup: () => call({ action: "turn_ended" }),
         })
       if (runGroup === "isolation")
         await verifyComputerIsolation({
@@ -810,7 +812,7 @@ try {
           state,
           waitFor,
           check,
-          cleanup: () => client.bindTool(cleanup)({}),
+          cleanup: () => call({ action: "turn_ended" }),
         })
       if (runGroup === "interactions")
         await verifyComputerInteractions({
@@ -820,7 +822,7 @@ try {
           state,
           waitFor,
           check,
-          cleanup: () => client.bindTool(cleanup)({}),
+          cleanup: () => call({ action: "turn_ended" }),
         })
       if (runGroup === "interactions")
         await verifyComputerZoom({

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { McpClient } from "../src/runtime/mcp-client.ts"
+import { bindComputerFixture } from "./computer-fixture.ts"
 
 type Control = ReturnType<McpClient["bindTool"]>
 type Frame = { x: number; y: number; width: number; height: number }
@@ -50,10 +51,7 @@ export async function verifyComputerIsolation(context: {
       () => {},
       () => {},
     )
-    const tools = await client.start()
-    const control = tools.find((tool) => tool.name === "control")
-    assert(control)
-    const invoke = client.bindTool(control)
+    const invoke = bindComputerFixture(client, await client.start())
     const status = await invoke({ action: "status" })
     return {
       client,

@@ -110,13 +110,16 @@ struct Snapshot {
     }
 
     func validate(id: String?, windows current: [WindowIdentity], displays: [DisplayIdentity]) throws {
-        let selected: [WindowIdentity]
+        let sameWindows: Bool
         switch scope {
-        case .window: selected = current.filter { $0.windowID == windows.first?.windowID }
-        case .app: selected = current.filter { $0.pid == windows.first?.pid }
-        case .screen: selected = current.filter { $0.layer == 0 && $0.frame.intersects(frame) }
+        case .window: sameWindows = current.filter { $0.windowID == windows.first?.windowID } == windows
+        case .app:
+            let selected = current.filter { $0.pid == windows.first?.pid && $0.layer == 0 }
+            sameWindows = selected == windows.filter { $0.layer == 0 } &&
+                current.contains { $0.pid == windows.first?.pid && $0.launched == windows.first?.launched }
+        case .screen: sameWindows = true
         }
-        guard id == self.id, selected == windows, display.map({ displays.contains($0) }) ?? true else {
+        guard id == self.id, sameWindows, display.map({ displays.contains($0) }) ?? true else {
             throw ComputerFailure("stale_snapshot", "Observe again; the target windows or display changed, or the snapshot was already used.")
         }
         for (pid, revision) in revisions where try NativeResources.revision(pid) != revision {

@@ -55,6 +55,8 @@ import Foundation
         rejects(code: "invalid_element") { _ = try owned.target(["element": "0"]) }
         rejects(code: "invalid_element") { _ = try owned.target(["element": 1]) }
         try appSnapshot.validate(id: appSnapshot.id, windows: [window, other], displays: [])
+        let tooltip = WindowIdentity(pid: 42, launched: window.launched, windowID: 21, frame: window.frame, layer: 4)
+        try appSnapshot.validate(id: appSnapshot.id, windows: [tooltip, window, other], displays: [])
         let closingAppWindow = try appSnapshot.validatePreview(windows: [window], displays: [])
         precondition(!closingAppWindow)
         rejects { try appSnapshot.validate(id: appSnapshot.id, windows: [window], displays: []) }
@@ -67,6 +69,7 @@ import Foundation
         let desktopTarget = try screen.target(["x": 0.0, "y": 0.0])
         precondition(desktopTarget.window == nil && desktopTarget.point == CGPoint(x: -1000, y: 0))
         try screen.validate(id: screen.id, windows: [window, other], displays: [display])
+        try screen.validate(id: screen.id, windows: [tooltip, moved], displays: [display])
         let changingScreenContent = try screen.validatePreview(windows: [], displays: [display])
         precondition(changingScreenContent)
         rejects(code: "display_not_found") { _ = try screen.validatePreview(windows: [], displays: []) }
@@ -81,6 +84,9 @@ import Foundation
         rejects { _ = try menuPath(Array(repeating: "Item", count: 17)) }
         let zoomBox = try zoomRegion(["x1": 100, "y1": 100, "x2": 300, "y2": 300], snapshot: snapshot)
         precondition(zoomBox == CGRect(x: -250, y: 100, width: 100, height: 100))
+        let normalizedZoom = try zoomRegion(["coordinate_space": "normalized", "x1": 125, "y1": 250, "x2": 375, "y2": 750], snapshot: snapshot)
+        let screenZoom = try zoomRegion(["coordinate_space": "screen", "x1": -250, "y1": 100, "x2": -150, "y2": 200], snapshot: snapshot)
+        precondition(normalizedZoom == zoomBox && screenZoom == zoomBox)
         rejects { _ = try zoomRegion(["x1": true, "y1": 0, "x2": 10, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 801, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 1, "y1": 1, "x2": 1, "y2": 10], snapshot: snapshot) }
