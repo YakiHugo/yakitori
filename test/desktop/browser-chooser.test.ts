@@ -69,7 +69,7 @@ it("arms one original child session without selecting files and ignores other re
       code: "browser_chooser_armed",
     })
     f.chooser.selected({
-      kind: "element",
+      editable: false,
       backendNodeId: 17,
       document: f.scope.document,
       frame: f.scope.frame,

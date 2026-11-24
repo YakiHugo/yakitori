@@ -25,7 +25,7 @@ const target = {
 const input = {
   action: "upload",
   target,
-  reference: "browser_element_00000000-0000-4000-8000-000000000001",
+  reference: "e1",
   fromUrl: "https://owned.test/",
   paths: ["file.txt"],
 }

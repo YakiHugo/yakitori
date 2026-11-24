@@ -26,6 +26,7 @@ it.each([
   const started = Promise.withResolvers<void>()
   const reply = Promise.withResolvers<unknown>()
   const pending = frames.list(async (method, _params, sessionId) => {
+    if (method === "Page.enable") return {}
     if (method === "Target.setAutoAttach") {
       if (!sessionId)
         events.emit("message", {}, "Target.attachedToTarget", {
@@ -173,6 +174,7 @@ function fixture(
       sessionId?: string,
     ) {
       calls.push({ method, params, ...(sessionId ? { sessionId } : {}) })
+      if (method === "Page.enable") return {}
       if (method === "Target.setAutoAttach") {
         const key = sessionId ?? ""
         if (!configured.has(key)) {
@@ -424,13 +426,11 @@ function fixture(
       const observed = await connection.observe(signal(), frame.frameReference)
       const control = (
         observed.nodes as {
-          inputReference: string
-          elementReference: string
+          ref: string
           value: string
         }[]
       )[0]
-      if (!control?.inputReference || !control.elementReference)
-        throw new Error("Missing frame input references")
+      if (!control?.ref) throw new Error("Missing frame input references")
       return control
     },
     async catalog(offset = 0) {
@@ -457,6 +457,7 @@ it("finishes cleanup when the original frame session disappears but surfaces err
   } as unknown as WebContents["debugger"])
   const frames = new BrowserFrames(sessions)
   await frames.list(async (method, _params, sessionId) => {
+    if (method === "Page.enable") return {}
     if (method === "Target.setAutoAttach") {
       if (!sessionId)
         events.emit("message", {}, "Target.attachedToTarget", {
@@ -522,7 +523,7 @@ it("refuses frame pointer dispatch when current compositor hit-test data cannot 
     const node = await f.control("local")
     await expect(
       f.connection.inputPointer(
-        { action: "click", target, reference: node.elementReference },
+        { action: "click", target, reference: node.ref },
         signal(),
       ),
     ).rejects.toMatchObject({ code: "browser_input_unavailable" })
@@ -595,8 +596,7 @@ it("routes same-process, cross-process and nested cross-process frame observatio
       ])
       expect(observed.nodes).toEqual([
         expect.objectContaining({
-          inputReference: expect.any(String),
-          elementReference: expect.any(String),
+          ref: expect.any(String),
         }),
       ])
     }
@@ -604,8 +604,7 @@ it("routes same-process, cross-process and nested cross-process frame observatio
     expect(main.nodes).toEqual([
       expect.objectContaining({
         name: "Field main",
-        inputReference: expect.any(String),
-        elementReference: expect.any(String),
+        ref: expect.any(String),
       }),
     ])
     const configurations = f.calls.filter(
@@ -669,6 +668,22 @@ it("invalidates refreshed frame catalogs and never accepts references from anoth
   }
 })
 
+it("lists frames again without invalidating a control in the current snapshot", async () => {
+  const f = fixture()
+  try {
+    const node = await f.control("remote")
+    await f.catalog()
+    await expect(
+      f.connection.inputText(
+        { action: "fill", target, reference: node.ref, text: "retained" },
+        signal(),
+      ),
+    ).resolves.toMatchObject({ delivered: true, textVerified: true })
+  } finally {
+    await f.connection.close()
+  }
+})
+
 it("keeps later frames reachable through catalog pagination", async () => {
   const f = fixture({ manyLocal: 80 })
   try {
@@ -721,7 +736,7 @@ it("focuses exact frame DOM and sends text through the owned root input session"
           {
             action: "fill",
             target,
-            reference: node.inputReference,
+            reference: node.ref,
             text: `changed_${id}你好`,
           },
           signal(),
@@ -756,7 +771,7 @@ it.each([
         {
           action: "press",
           target,
-          reference: node.elementReference,
+          reference: node.ref,
           key: "a",
           modifiers: ["Meta"],
         },
@@ -768,7 +783,7 @@ it.each([
       {
         action: "type",
         target,
-        reference: selected.inputReference,
+        reference: selected.ref,
         text: "replaced你好",
       },
       signal(),
@@ -789,7 +804,7 @@ it("refuses a replaced frame renderer before focusing or sending input", async (
         {
           action: "fill",
           target,
-          reference: node.inputReference,
+          reference: node.ref,
           text: "must not dispatch",
         },
         signal(),
@@ -812,7 +827,7 @@ it("releases root-owned keys after a child renderer disappears without retargeti
         {
           action: "press",
           target,
-          reference: node.elementReference,
+          reference: node.ref,
           key: "Enter",
         },
         signal(),
@@ -853,7 +868,7 @@ it.each([
       {
         action: "press",
         target,
-        reference: node.elementReference,
+        reference: node.ref,
         key: "r",
         modifiers: ["Meta"],
       },
@@ -907,7 +922,7 @@ it.each([
     {
       action: "press",
       target,
-      reference: node.elementReference,
+      reference: node.ref,
       key: "Enter",
     },
     signal(),
@@ -979,7 +994,7 @@ it.each([
     const node = await f.control(id)
     expect(
       await f.connection.inputPointer(
-        { action: "click", target, reference: node.elementReference },
+        { action: "click", target, reference: node.ref },
         signal(),
       ),
     ).toMatchObject({ delivered: true })
@@ -1034,7 +1049,7 @@ it.each([
     const node = await f.control("local")
     await expect(
       f.connection.inputPointer(
-        { action: "click", target, reference: node.elementReference },
+        { action: "click", target, reference: node.ref },
         signal(),
       ),
     ).rejects.toMatchObject({ code: "browser_input_unavailable" })

@@ -10,9 +10,18 @@ export type BrowserObservationRequest =
   | Readonly<{ action: "list"; offset?: number }>
   | Readonly<{ action: "frames"; target: BrowserTarget; offset?: number }>
   | Readonly<{
+      action: "text"
+      target: BrowserTarget
+      frameReference?: string
+      offset?: number
+      limit?: number
+    }>
+  | Readonly<{
       action: "observe"
       target: BrowserTarget
       frameReference?: string
+      interactiveOnly?: boolean
+      scopeRef?: string
     }>
 
 export type BrowserTextInputRequest = Readonly<{
@@ -23,7 +32,7 @@ export type BrowserTextInputRequest = Readonly<{
 }>
 
 export type BrowserPointerRequest = Readonly<
-  { target: BrowserTarget; reference: string } & (
+  { target: BrowserTarget; reference?: string; x?: number; y?: number } & (
     | {
         action: "click"
         button?: "left" | "middle" | "right"
@@ -71,7 +80,7 @@ export function parseBrowserDragRequest(value: unknown): BrowserDragRequest {
     !keys.every((key) => Object.hasOwn(value, key)) ||
     (!cancel &&
       (typeof value.reference !== "string" ||
-        !/^browser_element_[a-f0-9-]{36}$/.test(value.reference))) ||
+        !/^e[1-9][0-9]{0,15}$/.test(value.reference))) ||
     (!prepare &&
       (typeof value.dragId !== "string" ||
         !/^browser_drag_[a-f0-9-]{36}$/.test(value.dragId)))
@@ -147,7 +156,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
       Object.hasOwn(value, key),
     ) &&
     typeof value.reference === "string" &&
-    /^browser_element_[a-f0-9-]{36}$/.test(value.reference) &&
+    /^e[1-9][0-9]{0,15}$/.test(value.reference) &&
     Array.isArray(value.options) &&
     value.options.length <= 256 &&
     Buffer.byteLength(JSON.stringify(value.options)) <= 64 * 1024 &&
@@ -177,9 +186,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   if (
     isJsonObject(value) &&
-    ["action", "target", "reference"].every((key) =>
-      Object.hasOwn(value, key),
-    ) &&
+    ["action", "target"].every((key) => Object.hasOwn(value, key)) &&
     Object.keys(value).every((key) =>
       [
         "action",
@@ -189,10 +196,10 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
         "clickCount",
         "deltaX",
         "deltaY",
+        "x",
+        "y",
       ].includes(key),
-    ) &&
-    typeof value.reference === "string" &&
-    /^browser_element_[a-f0-9-]{36}$/.test(value.reference)
+    )
   ) {
     const observed = parseBrowserObservationRequest({
       action: "observe",
@@ -200,11 +207,41 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
     })
     if (observed.action !== "observe")
       throw new Error("Invalid browser target parser result.")
-    const shared = { target: observed.target, reference: value.reference }
-    if (value.action === "hover" && Object.keys(value).length === 3)
+    const ref =
+      typeof value.reference === "string" &&
+      /^e[1-9][0-9]{0,15}$/.test(value.reference)
+        ? value.reference
+        : undefined
+    const coordinates =
+      typeof value.x === "number" &&
+      Number.isFinite(value.x) &&
+      value.x >= 0 &&
+      typeof value.y === "number" &&
+      Number.isFinite(value.y) &&
+      value.y >= 0
+        ? { x: value.x, y: value.y }
+        : undefined
+    const addressed =
+      (ref !== undefined &&
+        !Object.hasOwn(value, "x") &&
+        !Object.hasOwn(value, "y")) ||
+      (coordinates !== undefined && !Object.hasOwn(value, "reference"))
+    const shared = {
+      target: observed.target,
+      ...(ref ? { reference: ref } : {}),
+      ...coordinates,
+    }
+    if (
+      value.action === "hover" &&
+      addressed &&
+      !["button", "clickCount", "deltaX", "deltaY"].some((key) =>
+        Object.hasOwn(value, key),
+      )
+    )
       return { action: "hover", ...shared }
     if (
       value.action === "click" &&
+      addressed &&
       !Object.hasOwn(value, "deltaX") &&
       !Object.hasOwn(value, "deltaY") &&
       (value.button === undefined ||
@@ -225,7 +262,10 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
       }
     if (
       value.action === "scroll" &&
-      Object.keys(value).length === 5 &&
+      (!Object.hasOwn(value, "reference") || ref !== undefined) &&
+      !["button", "clickCount", "x", "y"].some((key) =>
+        Object.hasOwn(value, key),
+      ) &&
       typeof value.deltaX === "number" &&
       Number.isFinite(value.deltaX) &&
       Math.abs(value.deltaX) <= 10000 &&
@@ -251,7 +291,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
       ["action", "target", "reference", "key", "modifiers"].includes(key),
     ) &&
     typeof value.reference === "string" &&
-    /^browser_element_[a-f0-9-]{36}$/.test(value.reference) &&
+    /^e[1-9][0-9]{0,15}$/.test(value.reference) &&
     typeof value.key === "string" &&
     (/^[!-~]$/.test(value.key) ||
       /^F([1-9]|1[0-9]|2[0-4])$/.test(value.key) ||
@@ -294,7 +334,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
     ) &&
     (value.action === "type" || value.action === "fill") &&
     typeof value.reference === "string" &&
-    /^browser_node_[a-f0-9-]{36}$/.test(value.reference) &&
+    /^e[1-9][0-9]{0,15}$/.test(value.reference) &&
     typeof value.text === "string" &&
     (value.text.length > 0 || value.action === "fill") &&
     Buffer.byteLength(value.text) <= 64 * 1024
@@ -314,7 +354,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type/fill with an inputReference and text, or click/hover/scroll/press/select with an elementReference and exact target. Select requires options, each with exactly one value, label or nonnegative index; an empty array clears selection (256-descriptor and 64KiB per-action safety bounds). Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
+    "Use type/fill with a short reference and text, or click/hover/scroll/press/select with a short reference and exact target. Select requires options, each with exactly one value, label or nonnegative index; an empty array clears selection (256-descriptor and 64KiB per-action safety bounds). Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
   )
 }
 
@@ -465,7 +505,7 @@ export function parseBrowserUploadRequest(
       Object.hasOwn(value, key),
     ) &&
     typeof value.reference === "string" &&
-    /^browser_element_[a-f0-9-]{36}$/.test(value.reference) &&
+    /^e[1-9][0-9]{0,15}$/.test(value.reference) &&
     typeof value.fromUrl === "string" &&
     value.fromUrl.length > 0 &&
     value.fromUrl.length <= 8192 &&
@@ -906,6 +946,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   list: false,
   observe: false,
   frames: false,
+  text: false,
   capture: false,
   type: true,
   fill: true,
@@ -1015,6 +1056,38 @@ export function parseBrowserObservationRequest(
       "Browser action must be an own field.",
     )
   if (
+    input.action === "text" &&
+    Object.keys(input).every((key) =>
+      ["action", "target", "offset", "limit", "frameReference"].includes(key),
+    ) &&
+    (input.offset === undefined ||
+      (typeof input.offset === "number" &&
+        Number.isSafeInteger(input.offset) &&
+        input.offset >= 0)) &&
+    (input.limit === undefined ||
+      (typeof input.limit === "number" &&
+        Number.isInteger(input.limit) &&
+        input.limit >= 1 &&
+        input.limit <= 200))
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: input.target,
+      frameReference: input.frameReference,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "text",
+      target: observed.target,
+      ...(observed.frameReference
+        ? { frameReference: observed.frameReference }
+        : {}),
+      ...(input.offset === undefined ? {} : { offset: input.offset }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    }
+  }
+  if (
     input.action === "list" &&
     Object.keys(input).every((key) => key === "action" || key === "offset") &&
     (input.offset === undefined ||
@@ -1053,11 +1126,22 @@ export function parseBrowserObservationRequest(
     input.action === "observe" &&
     ["action", "target"].every((key) => Object.hasOwn(input, key)) &&
     Object.keys(input).every((key) =>
-      ["action", "target", "frameReference"].includes(key),
+      [
+        "action",
+        "target",
+        "frameReference",
+        "interactiveOnly",
+        "scopeRef",
+      ].includes(key),
     ) &&
     (input.frameReference === undefined ||
       (typeof input.frameReference === "string" &&
         /^browser_frame_[a-f0-9-]{36}$/.test(input.frameReference))) &&
+    (input.interactiveOnly === undefined ||
+      typeof input.interactiveOnly === "boolean") &&
+    (input.scopeRef === undefined ||
+      (typeof input.scopeRef === "string" &&
+        /^e[1-9][0-9]{0,15}$/.test(input.scopeRef))) &&
     typeof input.target === "object" &&
     input.target !== null &&
     !Array.isArray(input.target)
@@ -1085,6 +1169,12 @@ export function parseBrowserObservationRequest(
         },
         ...(typeof input.frameReference === "string"
           ? { frameReference: input.frameReference }
+          : {}),
+        ...(typeof input.interactiveOnly === "boolean"
+          ? { interactiveOnly: input.interactiveOnly }
+          : {}),
+        ...(typeof input.scopeRef === "string"
+          ? { scopeRef: input.scopeRef }
           : {}),
       }
   }

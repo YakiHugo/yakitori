@@ -932,8 +932,7 @@ it.each([
   const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
   if (!target) throw new Error("Missing owned target")
   const observed = await browser.request({ action: "observe", target })
-  const reference = (observed.nodes as { elementReference: string }[])[0]
-    ?.elementReference
+  const reference = (observed.nodes as { ref: string }[])[0]?.ref
   if (!reference) throw new Error("Missing directory reference")
   if (completion === "timeout") vi.useFakeTimers({ toFake: ["performance"] })
   const pending = browser.request(

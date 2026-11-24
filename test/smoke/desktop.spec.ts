@@ -789,15 +789,14 @@ test("agent browser observations and actions use the exact owned tab through rea
       observed.nodes as {
         name: string
         role: string
-        inputReference?: string
+        ref?: string
       }[]
     ).find((node) => node.name === name && node.role === "textbox")
-    if (!field?.inputReference)
-      throw new Error("Missing exact text control reference")
+    if (!field?.ref) throw new Error("Missing exact text control reference")
     return {
       action,
       target: observed.target,
-      reference: field.inputReference,
+      reference: field.ref,
       text,
     }
   }
@@ -806,15 +805,14 @@ test("agent browser observations and actions use the exact owned tab through rea
       observed.nodes as {
         role: string
         name: string
-        elementReference?: string
+        ref?: string
       }[]
     ).find((node) => node.role === "button" && node.name === name)
-    if (!button?.elementReference)
-      throw new Error(`Missing captured browser button ${name}`)
+    if (!button?.ref) throw new Error(`Missing captured browser button ${name}`)
     return {
       action: "click",
       target: observed.target,
-      reference: button.elementReference,
+      reference: button.ref,
     }
   }
   const framePress = (
@@ -827,17 +825,16 @@ test("agent browser observations and actions use the exact owned tab through rea
       observed.nodes as {
         role: string
         name: string
-        elementReference?: string
+        ref?: string
       }[]
     ).find(
       (node) => node.role === "textbox" && node.name === `${kind} frame field`,
     )
-    if (!field?.elementReference)
-      throw new Error("Missing exact frame keyboard reference")
+    if (!field?.ref) throw new Error("Missing exact frame keyboard reference")
     return {
       action: "press",
       target: observed.target,
-      reference: field.elementReference,
+      reference: field.ref,
       key,
       ...(modifiers ? { modifiers } : {}),
     }
@@ -1228,21 +1225,21 @@ test("agent browser observations and actions use the exact owned tab through rea
                 previous.nodes as {
                   name: string
                   role: string
-                  elementReference?: string
+                  ref?: string
                 }[]
               ).find(
                 (node) =>
                   node.name === plan?.name &&
                   ["textbox", "button"].includes(node.role),
               )
-              if (!plan || !node?.elementReference)
+              if (!plan || !node?.ref)
                 throw new Error("Missing exact keyboard control")
               tool = {
                 name: "browser_input",
                 input: {
                   action: "press",
                   target: previous.target,
-                  reference: node.elementReference,
+                  reference: node.ref,
                   key: plan.key,
                   ...(plan.modifiers ? { modifiers: plan.modifiers } : {}),
                 },
@@ -1398,20 +1395,20 @@ test("agent browser observations and actions use the exact owned tab through rea
               current.nodes as {
                 role: string
                 name: string
-                elementReference?: string
+                ref?: string
               }[]
             ).find(
               (node) =>
                 node.role === "listbox" && node.name === "Remote choices",
             )
-            if (!control?.elementReference)
+            if (!control?.ref)
               throw new Error("Missing remote select reference")
             tool = {
               name: "browser_input",
               input: {
                 action: "select",
                 target: current.target,
-                reference: control.elementReference,
+                reference: control.ref,
                 options: [{ label: "Green" }, { index: 2 }],
               },
               id: "select_remote_options",
@@ -1441,19 +1438,18 @@ test("agent browser observations and actions use the exact owned tab through rea
               current.nodes as {
                 role: string
                 name: string
-                elementReference?: string
+                ref?: string
               }[]
             ).find(
               (node) => node.role === "button" && node.name === "Remote files",
             )
-            if (!control?.elementReference)
-              throw new Error("Missing remote file input")
+            if (!control?.ref) throw new Error("Missing remote file input")
             tool = {
               name: "browser_upload",
               input: {
                 action: "upload",
                 target: current.target,
-                reference: control.elementReference,
+                reference: control.ref,
                 fromUrl: (current.document as { url: string }).url,
                 paths: step === 61 ? [uploadPath] : [],
               },
@@ -1509,17 +1505,14 @@ test("agent browser observations and actions use the exact owned tab through rea
             }
           } else if (step === 68) {
             const opened = toolResult(body.messages ?? [], "opened")
-            if (
-              opened.opened !== true ||
-              typeof opened.elementReference !== "string"
-            )
+            if (opened.opened !== true || typeof opened.ref !== "string")
               throw new Error("No exact hidden file input was captured")
             tool = {
               name: "browser_upload",
               input: {
                 action: "upload",
                 target: opened.target,
-                reference: opened.elementReference,
+                reference: opened.ref,
                 fromUrl: opened.fromUrl,
                 paths: [uploadPath],
               },
@@ -1577,19 +1570,18 @@ test("agent browser observations and actions use the exact owned tab through rea
               current.nodes as {
                 role: string
                 name: string
-                elementReference?: string
+                ref?: string
               }[]
             ).find(
               (node) => node.role === "button" && node.name === "Remote folder",
             )
-            if (!control?.elementReference)
-              throw new Error("Missing remote directory input")
+            if (!control?.ref) throw new Error("Missing remote directory input")
             tool = {
               name: "browser_upload",
               input: {
                 action: "upload_directory",
                 target: current.target,
-                reference: control.elementReference,
+                reference: control.ref,
                 fromUrl: (current.document as { url: string }).url,
                 paths: [uploadDirectory],
               },
@@ -1669,10 +1661,10 @@ test("agent browser observations and actions use the exact owned tab through rea
             }
           } else if (step === 78) {
             const current = toolResult(body.messages ?? [], "nodes"),
-              button = (
-                current.nodes as { name: string; elementReference?: string }[]
-              ).find((node) => node.name === "Native confirmation")
-            if (!button?.elementReference)
+              button = (current.nodes as { name: string; ref?: string }[]).find(
+                (node) => node.name === "Native confirmation",
+              )
+            if (!button?.ref)
               throw new Error("Missing native confirmation button")
             tool = {
               name: "browser_input",
@@ -1680,7 +1672,7 @@ test("agent browser observations and actions use the exact owned tab through rea
                 action: "press",
                 key: "Enter",
                 target: current.target,
-                reference: button.elementReference,
+                reference: button.ref,
               },
               id: "trigger_native_dialog",
             }
@@ -1740,18 +1732,17 @@ test("agent browser observations and actions use the exact owned tab through rea
             }
           } else if (step === 84) {
             const current = toolResult(body.messages ?? [], "nodes"),
-              button = (
-                current.nodes as { name: string; elementReference?: string }[]
-              ).find((node) => node.name === "Native prompt")
-            if (!button?.elementReference)
-              throw new Error("Missing native prompt button")
+              button = (current.nodes as { name: string; ref?: string }[]).find(
+                (node) => node.name === "Native prompt",
+              )
+            if (!button?.ref) throw new Error("Missing native prompt button")
             tool = {
               name: "browser_input",
               input: {
                 action: "press",
                 key: "Enter",
                 target: current.target,
-                reference: button.elementReference,
+                reference: button.ref,
               },
               id: "trigger_native_prompt",
             }
@@ -1795,18 +1786,17 @@ test("agent browser observations and actions use the exact owned tab through rea
             }
           } else if (step === 89) {
             const current = toolResult(body.messages ?? [], "nodes"),
-              link = (
-                current.nodes as { name: string; elementReference?: string }[]
-              ).find((node) => node.name === "Native download")
-            if (!link?.elementReference)
-              throw new Error("Missing native download link")
+              link = (current.nodes as { name: string; ref?: string }[]).find(
+                (node) => node.name === "Native download",
+              )
+            if (!link?.ref) throw new Error("Missing native download link")
             tool = {
               name: "browser_input",
               input: {
                 action: "press",
                 key: "Enter",
                 target: current.target,
-                reference: link.elementReference,
+                reference: link.ref,
               },
               id: "trigger_native_download",
             }
@@ -2348,8 +2338,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         expect.arrayContaining([
           expect.objectContaining({
             role: "textbox",
-            inputReference: expect.any(String),
-            elementReference: expect.any(String),
+            ref: expect.any(String),
           }),
         ]),
       )
@@ -2603,11 +2592,11 @@ test("packaged scripts compose approved MCP and browser calls through real deskt
 const listed = await tools.call('browser',{action:'list'}); if(!listed.ok) throw listed;
 const tab = listed.output.tabs.find(tab=>tab.url===args.url); if(!tab) throw 'Missing script tab';
 let observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
-const button = observed.output.nodes.find(node=>node.name==='Cold script click'&&node.elementReference); if(!button) throw 'Missing cold button';
-const clicked = await tools.call('browser_input',{action:'click',target:tab.target,reference:button.elementReference}); if(!clicked.ok) throw clicked;
+const button = observed.output.nodes.find(node=>node.name==='Cold script click'&&node.ref); if(!button) throw 'Missing cold button';
+const clicked = await tools.call('browser_input',{action:'click',target:tab.target,reference:button.ref}); if(!clicked.ok) throw clicked;
 observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
-const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.inputReference); if(!node) throw 'Missing script input';
-const result = await tools.call('browser_input',{action:'fill',target:tab.target,reference:node.inputReference,text:'Script 你好 🌍'}); if(!result.ok) throw result;
+const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.ref); if(!node) throw 'Missing script input';
+const result = await tools.call('browser_input',{action:'fill',target:tab.target,reference:node.ref,text:'Script 你好 🌍'}); if(!result.ok) throw result;
 const image = await tools.call('browser_capture',{action:'capture',mode:'viewport',target:tab.target}); if(!image.ok) throw image; show(image); return result.output;`
             delta = {
               role: "assistant",

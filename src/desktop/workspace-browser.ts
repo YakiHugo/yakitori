@@ -874,6 +874,7 @@ export function registerWorkspaceBrowser(
         !entry &&
         input.action !== "observe" &&
         input.action !== "capture" &&
+        input.action !== "text" &&
         input.action !== "frames"
       )
         throw new BrowserControlError(
@@ -932,6 +933,9 @@ export function registerWorkspaceBrowser(
               signal,
             )
             break
+          case "text":
+            observation = await entry.connection.text(input, signal)
+            break
           case "capture":
             observation = await entry.connection.capture(input, signal)
             break
@@ -939,6 +943,7 @@ export function registerWorkspaceBrowser(
             observation = await entry.connection.observe(
               signal,
               input.frameReference,
+              input,
             )
             break
           case "press":

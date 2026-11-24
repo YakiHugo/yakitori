@@ -91,13 +91,12 @@ test("an explicitly armed document exposes its dynamically created hidden file i
       observed.nodes as {
         name?: string
         role?: string
-        elementReference?: string
+        ref?: string
       }[]
     ).find((node) => node.role === "button" && node.name === "Pick hidden")
-    if (!button?.elementReference)
-      throw new Error("Missing owned picker button")
+    if (!button?.ref) throw new Error("Missing owned picker button")
     await connection.inputPointer(
-      { action: "click", target, reference: button.elementReference },
+      { action: "click", target, reference: button.ref },
       signal(),
     )
     const inspect = () =>
@@ -111,14 +110,14 @@ test("an explicitly armed document exposes its dynamically created hidden file i
       directory: false,
       fromUrl: page.url(),
     })
-    if (typeof opened?.elementReference !== "string")
+    if (typeof opened?.ref !== "string")
       throw new Error("Missing chooser input reference")
     expect(
       await connection.uploadFiles(
         {
           action: "upload",
           target,
-          reference: opened.elementReference,
+          reference: opened.ref,
           fromUrl: page.url(),
           files: [
             {

@@ -98,9 +98,7 @@ test("a prearmed native dialog reply unblocks trusted input and confirms its ACK
           }
         })
       const observed = await connection.observe(signal()),
-        button = (
-          observed.nodes as { name?: string; elementReference?: string }[]
-        ).find(
+        button = (observed.nodes as { name?: string; ref?: string }[]).find(
           (node) =>
             node.name ===
             (type === "prompt"
@@ -111,8 +109,7 @@ test("a prearmed native dialog reply unblocks trusted input and confirms its ACK
                   ? "Confirm"
                   : "Alert"),
         )
-      if (!button?.elementReference)
-        throw new Error("Missing observed dialog trigger")
+      if (!button?.ref) throw new Error("Missing observed dialog trigger")
       await connection.dialog(
         {
           action: "dialog_arm",
@@ -143,7 +140,7 @@ test("a prearmed native dialog reply unblocks trusted input and confirms its ACK
           action: "press",
           key: "Enter",
           target,
-          reference: button.elementReference,
+          reference: button.ref,
         },
         signal(),
       )

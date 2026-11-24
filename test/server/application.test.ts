@@ -3201,7 +3201,7 @@ describe("application composition", () => {
               webContentsId: 17,
               instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
             },
-            reference: "browser_element_00000000-0000-4000-8000-000000000001",
+            reference: "e1",
           }
         : browserTool === "browser"
           ? { action: "list" }
@@ -3214,7 +3214,7 @@ describe("application composition", () => {
                   instanceId:
                     "browser_target_00000000-0000-4000-8000-000000000001",
                 },
-                reference: "browser_node_00000000-0000-4000-8000-000000000001",
+                reference: "e1",
                 text: "Must stay blocked",
               }
             : browserTool === "browser_upload"
@@ -3226,8 +3226,7 @@ describe("application composition", () => {
                     instanceId:
                       "browser_target_00000000-0000-4000-8000-000000000001",
                   },
-                  reference:
-                    "browser_element_00000000-0000-4000-8000-000000000001",
+                  reference: "e1",
                   fromUrl: "https://owned.test/",
                   paths: [],
                 }
@@ -3391,7 +3390,7 @@ describe("application composition", () => {
               action: "drop",
               target,
               dragId: "browser_drag_00000000-0000-4000-8000-000000000001",
-              reference: "browser_element_00000000-0000-4000-8000-000000000001",
+              reference: "e1",
             }
           : browserTool === "browser_download"
             ? {
@@ -3414,8 +3413,7 @@ describe("application composition", () => {
                   : {
                       action: "fill",
                       target,
-                      reference:
-                        "browser_node_00000000-0000-4000-8000-000000000001",
+                      reference: "e1",
                       text: "",
                     }
       const provider = createFauxProvider([

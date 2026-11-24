@@ -10,14 +10,17 @@ export type BrowserProtocolCommand = (
   sessionId?: string,
 ) => Promise<unknown>
 const frameReadMethods = [
+  "Page.enable",
   "Page.getFrameTree",
   "Page.getLayoutMetrics",
   "Page.createIsolatedWorld",
   "DOM.resolveNode",
+  "DOM.describeNode",
   "DOM.getFrameOwner",
   "DOM.getBoxModel",
   "Runtime.evaluate",
   "Runtime.callFunctionOn",
+  "Runtime.getProperties",
   "Accessibility.getFullAXTree",
 ] as const
 export type BrowserFrameReadMethod = (typeof frameReadMethods)[number]

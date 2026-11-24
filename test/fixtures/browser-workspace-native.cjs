@@ -31,7 +31,21 @@ async function main() {
       response.end(
         request.url === "/tab"
           ? "<style>button{display:block;width:120px;height:50px;margin:20px}</style><button onclick=\"window.open('/popup','owned')\">Open child</button><button onclick=\"window.onbeforeunload=event=>{event.preventDefault();event.returnValue=''}\">Arm unload</button>"
-          : `<title>${request.url}</title><p>Owned fixture</p>`,
+          : request.url === "/form"
+            ? `<!doctype html><style>body{min-height:1600px}input,label{display:block}.nested{position:relative}</style>
+              <h1>Owned form</h1><p>One readable paragraph.</p>
+              <label>Email<input id="email" type="email"></label>
+              <label>Amount<input id="number" type="number"></label>
+              <label>Day<input id="date" type="date"></label>
+              <div id="editable" contenteditable="true" aria-label="Notes" role="textbox">Original</div>
+              <div id="custom" style="cursor:pointer" aria-label="Custom control" onclick="this.textContent='Clicked'">Click me</div>
+              <div id="shadow"></div>
+              <script>
+                const host = document.getElementById('shadow'), outer=host.attachShadow({mode:'open'});
+                const nested = outer.appendChild(document.createElement('div'));
+                nested.attachShadow({mode:'open'}).innerHTML='<button onclick="window.shadowClicked=true" style="width:120px;height:40px">Nested shadow</button>';
+              </script>`
+            : `<title>${request.url}</title><p>Owned fixture</p>`,
       )
     }
     if (request.url === "/slow") setTimeout(reply, 13_000)
@@ -74,11 +88,11 @@ async function main() {
         owner,
       )
       const node = observed.nodes.find(
-        (item) => item.name === label && item.elementReference,
+        (item) => item.name === label && item.ref,
       )
       assert(node, `Missing browser control: ${label}`)
       await browser.request(
-        { action: "click", target: first, reference: node.elementReference },
+        { action: "click", target: first, reference: node.ref },
         owner,
       )
     }
@@ -182,6 +196,103 @@ async function main() {
     assert.equal(handled.dialog.type, "beforeunload")
     phase = "release"
     await Promise.all([browser.finishTurn(owner), browser.finishTurn(other)])
+    phase = "browser form"
+    await browser.request(
+      {
+        action: "navigate",
+        target: second,
+        fromUrl: `${origin}/tab`,
+        url: `${origin}/form`,
+      },
+      other,
+    )
+    await window.webContents.executeJavaScript(
+      "yakitoriDesktop.browser.viewport({tabId:'fixture_b',visible:true,x:0,y:0,width:550,height:460})",
+    )
+    const form = await browser.request(
+      { action: "observe", target: second, interactiveOnly: true },
+      other,
+    )
+    assert.match(form.outline, /\[e[0-9]+\].*Email/)
+    const ref = (label, id) => {
+      const control = form.nodes.find(
+        (node) => (node.name === label || node.name === id) && node.ref,
+      )
+      assert(control, `No observed reference for ${label}\n${form.outline}`)
+      return control.ref
+    }
+    const fields = [
+      ["Email", "email", "owned@example.test"],
+      ["Amount", "number", "42"],
+      ["Day", "date", "2026-11-24"],
+      ["Notes", "editable", "First"],
+      ["Notes", "editable", "Second"],
+    ]
+    for (const [label, id, value] of fields) {
+      const edited = await browser.request(
+        {
+          action: "fill",
+          target: second,
+          reference: ref(label, id),
+          text: value,
+        },
+        other,
+      )
+      assert.equal(edited.textVerified, true)
+    }
+    const typed = await browser.request(
+      {
+        action: "type",
+        target: second,
+        reference: ref("Notes", "editable"),
+        text: "!",
+      },
+      other,
+    )
+    assert.equal(typed.textVerified, true)
+    await browser.request(
+      {
+        action: "click",
+        target: second,
+        reference: ref("Custom control", "custom"),
+      },
+      other,
+    )
+    await browser.request(
+      { action: "click", target: second, reference: ref("Nested shadow") },
+      other,
+    )
+    const contents = webContents.fromId(second.webContentsId)
+    assert.deepEqual(
+      await contents.executeJavaScript(`[
+      document.getElementById('email').value, document.getElementById('number').value, document.getElementById('date').value,
+      document.getElementById('editable').textContent, document.getElementById('custom').textContent, window.shadowClicked
+    ]`),
+      ["owned@example.test", "42", "2026-11-24", "Second!", "Clicked", true],
+    )
+    const text = await browser.request(
+      { action: "text", target: second, limit: 1 },
+      other,
+    )
+    assert.equal(text.text, "# Owned form")
+    assert.equal(text.nextOffset, 1)
+    const nextText = await browser.request(
+      { action: "text", target: second, offset: 1, limit: 1 },
+      other,
+    )
+    assert.equal(nextText.text, "One readable paragraph.")
+    await browser.request(
+      { action: "scroll", target: second, deltaX: 0, deltaY: 350 },
+      other,
+    )
+    const deadline = performance.now() + 1200
+    while (
+      (await contents.executeJavaScript("window.scrollY")) === 0 &&
+      performance.now() < deadline
+    )
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    assert((await contents.executeJavaScript("window.scrollY")) > 0)
+    await browser.finishTurn(other)
     console.log("BROWSER_WORKSPACE:passed")
   } finally {
     window.destroy()
