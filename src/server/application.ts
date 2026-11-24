@@ -92,8 +92,8 @@ import { createAccountRuntime } from "./account-runtime.ts"
 import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
 import {
-  createAttachmentUploads,
   type AttachmentUploads,
+  createAttachmentUploads,
 } from "./attachment-uploads.ts"
 import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
 import { createBrowserChooserTool } from "./browser-chooser-tool.ts"
@@ -2079,7 +2079,6 @@ function configureProviders(
         id: "faux",
         wireApi: "faux",
         capabilities: {
-          remoteCompaction: false,
           nativePdf: false,
           tools: { supportsCustomTools: true, eagerTools: true },
         },

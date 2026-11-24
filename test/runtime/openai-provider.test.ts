@@ -447,7 +447,7 @@ describe("OpenAI Responses provider", () => {
     const events = []
     for await (const event of stream(
       requestFixture({
-        compaction: "codex_remote",
+        compaction: "provider",
         target: {
           provider: "codex",
           model: "gpt-request",
@@ -462,25 +462,29 @@ describe("OpenAI Responses provider", () => {
         type: "response",
         response: {
           providerResponseId: "response_1",
-          content: [
-            {
-              type: "compaction",
-              id: "cmp_stream",
+          content: [],
+          checkpoint: {
+            mode: "opaque",
+            owner: {
+              provider: "codex",
+              model: "gpt-request",
+              wireApi: "openai_responses",
               scope: "account_one",
-              encryptedContent: "ciphertext",
-              metadata: { backend: "value" },
             },
-          ],
+          },
         },
       },
     ])
     const terminal = events.at(-1)
-    if (terminal?.type !== "response")
+    if (
+      terminal?.type !== "response" ||
+      terminal.response.checkpoint === undefined
+    )
       throw new Error("missing completed response")
-    const history = [
-      { role: "assistant" as const, content: terminal.response.content },
-    ]
-    expect(toOpenAIInput(history, true, "codex", "account_one")).toEqual([
+    const history = [terminal.response.checkpoint]
+    const replay = (provider: string, scope: string) =>
+      toOpenAIInput(history, true, provider, scope, new Map(), "gpt-request")
+    expect(replay("codex", "account_one")).toEqual([
       {
         type: "compaction",
         id: "cmp_stream",
@@ -488,11 +492,11 @@ describe("OpenAI Responses provider", () => {
         internal_chat_message_metadata_passthrough: { backend: "value" },
       },
     ])
-    expect(() => toOpenAIInput(history, true, "grok", "account_one")).toThrow(
-      "another provider or account",
+    expect(() => replay("grok", "account_one")).toThrow(
+      "another provider, model, API or account",
     )
-    expect(() => toOpenAIInput(history, true, "openai", "account_two")).toThrow(
-      "another provider or account",
+    expect(() => replay("codex", "account_two")).toThrow(
+      "another provider, model, API or account",
     )
   })
   it("preserves authoritative weighted rollout units from the provider", () => {

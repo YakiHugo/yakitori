@@ -128,7 +128,8 @@ import type {
 export type {
   FileObservation,
   ModelAssistantMessage,
-  ModelCompactionBlock,
+  ModelCompactionMessage,
+  ModelCompactionOwner,
   ModelContentBlock,
   ModelDeveloperMessage,
   ModelDocumentBlock,
@@ -136,6 +137,7 @@ export type {
   ModelImageBlock,
   ModelMessage,
   ModelNativeItem,
+  ModelOpaqueCheckpoint,
   ModelReasoningBlock,
   ModelResponseOrigin,
   ModelTextBlock,
@@ -802,6 +804,41 @@ function isModelToolContentBlock(
 
 export function isModelMessage(value: unknown): value is ModelMessage {
   if (!isRecord(value) || !isString(value.role)) return false
+  if (value.role === "compaction") {
+    if (value.mode === "summary")
+      return onlyKeys(value, ["role", "mode", "text"]) && isString(value.text)
+    const owner = value.owner
+    return (
+      value.mode === "opaque" &&
+      onlyKeys(value, [
+        "role",
+        "mode",
+        "owner",
+        "estimatedTokens",
+        "native",
+        "response",
+      ]) &&
+      isRecord(owner) &&
+      onlyKeys(owner, ["provider", "wireApi", "model", "scope"]) &&
+      [owner.provider, owner.model, owner.scope].every(
+        (field) => isString(field) && field.length > 0,
+      ) &&
+      typeof value.estimatedTokens === "number" &&
+      Number.isSafeInteger(value.estimatedTokens) &&
+      value.estimatedTokens >= 0 &&
+      Array.isArray(value.native) &&
+      value.native.length > 0 &&
+      value.native.every(
+        (item) =>
+          isModelNativeItem(item) &&
+          item.provider === owner.provider &&
+          item.wireApi === owner.wireApi &&
+          item.model === owner.model &&
+          item.scope === owner.scope,
+      ) &&
+      (value.response === undefined || isModelResponseOrigin(value.response))
+    )
+  }
   if (value.role === "tool") {
     return (
       onlyKeys(value, [
@@ -833,7 +870,10 @@ export function isModelMessage(value: unknown): value is ModelMessage {
       value.content.every(isModelContentBlock) &&
       (value.native === undefined ||
         (Array.isArray(value.native) &&
-          value.native.every(isModelNativeItem))) &&
+          value.native.every(
+            (item) =>
+              isModelNativeItem(item) && item.value.type !== "compaction",
+          ))) &&
       (value.response === undefined || isModelResponseOrigin(value.response))
     )
   }
@@ -871,7 +911,9 @@ function isModelResponseOrigin(value: unknown): boolean {
   )
 }
 
-function isModelNativeItem(value: unknown): boolean {
+function isModelNativeItem(
+  value: unknown,
+): value is import("../core/conversation.ts").ModelNativeItem {
   return (
     isRecord(value) &&
     onlyKeys(value, ["provider", "scope", "model", "wireApi", "value"]) &&
@@ -880,6 +922,7 @@ function isModelNativeItem(value: unknown): boolean {
     ) &&
     (value.scope === undefined ||
       (typeof value.scope === "string" && value.scope.length > 0)) &&
+    typeof value.wireApi === "string" &&
     [
       "openai_responses",
       "openai_chat_completions",
@@ -887,7 +930,7 @@ function isModelNativeItem(value: unknown): boolean {
       "gemini_generate_content",
       "gemini_interactions",
       "bedrock_converse",
-    ].includes(String(value.wireApi)) &&
+    ].includes(value.wireApi) &&
     isJsonObject(value.value)
   )
 }
@@ -982,24 +1025,6 @@ function isModelContentBlock(value: unknown): boolean {
       isReasoningText(value.text, value.format) &&
       (value.providerMetadata === undefined ||
         isJsonObject(value.providerMetadata))
-    )
-  }
-  if (value.type === "compaction") {
-    return (
-      onlyKeys(value, [
-        "type",
-        "provider",
-        "model",
-        "scope",
-        "encryptedContent",
-        "id",
-        "metadata",
-      ]) &&
-      [value.provider, value.model, value.scope, value.encryptedContent].every(
-        (field) => typeof field === "string" && field.length > 0,
-      ) &&
-      (value.id === undefined || isString(value.id)) &&
-      (value.metadata === undefined || isJsonObject(value.metadata))
     )
   }
   return (
@@ -1150,10 +1175,7 @@ function isModelImageBlock(value: unknown): boolean {
 }
 
 function isModelHistoryContext(value: unknown): boolean {
-  if (
-    isRecord(value) &&
-    (value.type === "compaction" || value.type === "agent_message")
-  )
+  if (isRecord(value) && value.type === "agent_message")
     return onlyKeys(value, ["type"])
   if (isRecord(value) && value.type === "thread_message")
     return (

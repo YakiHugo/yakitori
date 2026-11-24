@@ -1,7 +1,7 @@
 import { expect, it } from "vitest"
 import type { ProviderConfiguration } from "../../src/protocol/providers.ts"
-import type { ModelProviderCapabilities } from "../../src/runtime/model-provider.ts"
 import { createGrokProvider } from "../../src/runtime/grok-provider.ts"
+import type { ModelProviderCapabilities } from "../../src/runtime/model-provider.ts"
 import { resolveProviderBackend } from "../../src/runtime/provider-backend.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { requireProviderConfiguration } from "../../src/server/provider-configuration.ts"
@@ -21,7 +21,7 @@ it.each([
     wireApi: "openai_responses",
     profile: { responseProfile: "openai" },
     capabilities: {
-      remoteCompaction: "responses_compact",
+      compactionStrategy: { replacement: "native_window" },
       nativePdf: true,
       tools: {
         supportsCustomTools: true,
@@ -35,7 +35,6 @@ it.each([
     wireApi: "openai_chat_completions",
     profile: { chatCompletionsFlavor: "generic" },
     capabilities: {
-      remoteCompaction: false,
       nativePdf: true,
       tools: { supportsCustomTools: false },
     },
@@ -46,7 +45,7 @@ it.each([
     wireApi: "openai_responses",
     profile: { responseProfile: "openai" },
     capabilities: {
-      remoteCompaction: "codex_remote",
+      compactionStrategy: { replacement: "checkpoint_only", maxAttempts: 3 },
       nativePdf: false,
       tools: {
         supportsCustomTools: true,
@@ -60,7 +59,6 @@ it.each([
     wireApi: "anthropic_messages",
     profile: { anthropicProfile: "anthropic" },
     capabilities: {
-      remoteCompaction: false,
       nativePdf: true,
       tools: {
         supportsCustomTools: false,
@@ -88,7 +86,6 @@ it.each([
     service: "gemini",
     profile: { chatCompletionsFlavor: "gemini" },
     capabilities: {
-      remoteCompaction: false as const,
       nativePdf: true,
       tools: { supportsCustomTools: false },
     },
@@ -99,7 +96,6 @@ it.each([
     wireApi: "openai_chat_completions",
     profile: { chatCompletionsFlavor: "gemini" },
     capabilities: {
-      remoteCompaction: false,
       nativePdf: false,
       tools: { supportsCustomTools: false },
     },
@@ -110,7 +106,6 @@ it.each([
     wireApi: "anthropic_messages",
     profile: { anthropicProfile: "kimi-code" },
     capabilities: {
-      remoteCompaction: false,
       nativePdf: false,
       tools: { supportsCustomTools: false },
     },
@@ -121,7 +116,6 @@ it.each([
     wireApi: "openai_responses",
     profile: { responseProfile: "kimi" },
     capabilities: {
-      remoteCompaction: false,
       nativePdf: false,
       tools: { supportsCustomTools: false },
     },
@@ -133,7 +127,6 @@ it.each([
       wireApi,
       profile: { responseProfile: "grok" },
       capabilities: {
-        remoteCompaction: false as const,
         nativePdf: false,
         tools: { supportsCustomTools: false },
       },
@@ -181,7 +174,6 @@ it.each([
   expect(backend.serviceId).toBeUndefined()
   expect(backend.catalogProvider).toBeUndefined()
   expect(backend.capabilities).toEqual({
-    remoteCompaction: false,
     nativePdf: false,
     tools: { supportsCustomTools: false },
   })
@@ -227,7 +219,6 @@ it.each([
   const backend = resolveProviderBackend(configuration)
   expect(backend.serviceId).toBeUndefined()
   expect(backend.capabilities).toEqual({
-    remoteCompaction: false,
     nativePdf: false,
     tools: { supportsCustomTools: false },
   })
@@ -254,7 +245,6 @@ it("shares the Grok backend contract across API keys and CLI credentials", () =>
     ownerIdentity: "fixture-owner",
   })
   expect(api.info.capabilities).toEqual({
-    remoteCompaction: false,
     nativePdf: false,
     tools: { supportsCustomTools: false },
   })

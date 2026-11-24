@@ -151,7 +151,6 @@ export function createChatGPTModelConnections(input: {
           serviceId: "chatgpt-plan",
           wireApi: "openai_responses",
           capabilities: {
-            remoteCompaction: false,
             nativePdf: false,
             tools: { supportsCustomTools: true },
           },

@@ -275,7 +275,7 @@ describe("Mistral structured Chat Completions", () => {
             info: {
               id: "mistral",
               wireApi: "openai_chat_completions",
-              capabilities: { remoteCompaction: false },
+              capabilities: {},
             },
             models: createConfiguredModelsManager({
               provider: "mistral",

@@ -16,11 +16,9 @@ export function canCompactPrefix(
   const pending = new Set<string>()
   let hasCompletedTools = false
   for (const { item } of prefix) {
+    if (item.role === "compaction" && item.mode === "opaque") return false
     if (item.role === "assistant") {
       for (const block of item.content) {
-        // Opaque checkpoints belong to a provider/account and never enter a
-        // local speculative summary, including after a provider switch.
-        if (block.type === "compaction") return false
         if (block.type === "tool_call") {
           if (pending.has(block.id)) return false
           pending.add(block.id)

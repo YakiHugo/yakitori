@@ -60,6 +60,7 @@ import {
   modelNativeItems,
   modelNativeResponseMetadata,
   portableModelContent,
+  projectCompactionSummary,
   replayModelNativeItems,
   validateModelHistoryScope,
 } from "./model-native.ts"
@@ -268,10 +269,7 @@ async function* streamOpenAIWire(
         throw new ModelRequestControlsError(
           "The Kimi Responses profile supports kimi-k3, kimi-k3.1-pro and kimi-k3.1-pro-highspeed only; use an exact public API model ID.",
         )
-      if (
-        request.compaction === "responses_compact" ||
-        request.compaction === "codex_remote"
-      )
+      if (request.compaction === "provider")
         throw new ModelRequestControlsError(
           "Kimi Responses does not support remote compaction.",
         )
@@ -318,7 +316,7 @@ async function* streamOpenAIWire(
             uploadedFiles,
             request.target.model || defaultModel,
           ),
-          ...(request.compaction === "codex_remote"
+          ...(request.compaction === "provider" && requestProfile === "codex"
             ? [{ type: "compaction_trigger" as const }]
             : []),
         ],
@@ -584,7 +582,7 @@ async function* streamOpenAIWire(
               upload(document, bytes, request.signal),
           }),
     })
-    if (request.compaction === "responses_compact") {
+    if (request.compaction === "provider" && requestProfile !== "codex") {
       if (requestProfile !== undefined)
         throw new ModelRequestControlsError(
           "Public Responses compaction requires an API-key endpoint.",
@@ -629,51 +627,32 @@ async function* streamOpenAIWire(
       // /responses/compact returns the entire canonical window, including
       // retained user/tool items. Project only its opaque checkpoint; replay
       // the unpruned native window as the next input.
-      const checkpoint = compacted.output.filter(
-        (item) => item.type === "compaction",
-      )
-      if (checkpoint.length !== 1)
+      const checkpoint = responsesCheckpoint(request, compacted.output)
+      if (checkpoint === undefined)
         throw new OpenAIProtocolError(
           "Responses compaction returned no unique checkpoint.",
         )
-      const result = fromOpenAIResponse(
-        {
-          ...compacted,
-          model: request.target.model,
-          status: "completed",
-          output: checkpoint,
-        } as unknown as Response,
-        customFallbackKeys,
-        request.target.provider,
-        request.continuationScope,
-        request.target.model,
-        undefined,
-        responseProfile,
-      )
       const { output: _compactedOutput, ...compactMetadata } = compacted
       yield {
         type: "response",
         response: {
-          ...result,
+          ...responseResult(
+            compacted as unknown as Response,
+            ModelStopReason.EndTurn,
+            [],
+            responseProfile,
+          ),
+          checkpoint,
           nativeMetadata: modelNativeResponseMetadata(
             request,
             "openai_responses",
             compactMetadata,
           ),
           ...(providerRequestId === undefined ? {} : { providerRequestId }),
-          native: modelNativeItems(
-            request,
-            "openai_responses",
-            compacted.output,
-          ),
         },
       }
       return
     }
-    if (request.compaction === "codex_remote" && requestProfile !== "codex")
-      throw new ModelRequestControlsError(
-        "compaction_trigger belongs to the Codex backend, not the public Responses API.",
-      )
     let body = buildBody(media.messages, media.uploadedFiles)
     if (codexImages) validateCodexImageRequest(body)
     if (
@@ -991,7 +970,6 @@ async function* streamOpenAIWire(
               customFallbackKeys,
               request.target.provider,
               request.continuationScope,
-              request.target.model,
               new Set([outputItemId(item)].filter((id) => id !== undefined)),
               rawReasoning,
               containerImages?.byItem,
@@ -1366,7 +1344,35 @@ export function toOpenAIInput(
 ): ResponseInput {
   const input: ResponseInput = []
   const customCallIds = new Set<string>()
-  for (const message of messages) {
+  for (const entry of messages) {
+    const message = projectCompactionSummary(entry)
+    if (message.role === "compaction") {
+      validateModelHistoryScope(
+        {
+          target: {
+            provider,
+            model: model ?? "",
+            instructionProfileId: "native",
+          },
+          messages: [message],
+          ...(continuationScope === undefined ? {} : { continuationScope }),
+        },
+        "openai_responses",
+      )
+      const native = replayModelNativeItems(
+        message,
+        "openai_responses",
+        provider,
+        continuationScope,
+        model,
+      )
+      if (native === undefined)
+        throw new ModelHistoryScopeError(
+          "Opaque compaction has no replayable native window.",
+        )
+      input.push(...(native as unknown as ResponseInput))
+      continue
+    }
     if (message.role === "developer") {
       input.push({
         role: "developer",
@@ -1518,23 +1524,6 @@ export function toOpenAIInput(
       continue
     }
     for (const block of portableModelContent(message)) {
-      if (block.type === "compaction") {
-        flushText()
-        if (block.provider !== provider || block.scope !== continuationScope) {
-          throw new Error(
-            "Native compaction belongs to another provider or account; convert it through its owner before continuing.",
-          )
-        }
-        input.push({
-          type: "compaction",
-          encrypted_content: block.encryptedContent,
-          ...(block.id === undefined ? {} : { id: block.id }),
-          ...(block.metadata === undefined
-            ? {}
-            : { internal_chat_message_metadata_passthrough: block.metadata }),
-        })
-        continue
-      }
       if (block.type === "reasoning") {
         flushText()
         const reasoning = toOpenAIReasoningItem(
@@ -1719,11 +1708,10 @@ export function fromOpenAIResponse(
     }
   }
   const result = fromOpenAIOutput(
-    response.output,
+    response.output.filter((item) => item.type !== "compaction"),
     customFallbackKeys,
     provider,
     continuationScope,
-    model,
     response.status === "completed"
       ? new Set(
           response.output.flatMap((item) => {
@@ -1754,8 +1742,16 @@ export function fromOpenAIResponse(
       ? ModelStopReason.ToolUse
       : ModelStopReason.EndTurn
   const { output: _output, ...metadata } = response
+  const checkpoint = responsesCheckpoint(
+    {
+      target: { provider, model, instructionProfileId: "native" },
+      ...(continuationScope === undefined ? {} : { continuationScope }),
+    },
+    response.output,
+  )
   return {
     ...responseResult(response, stopReason, result.content, responseProfile),
+    ...(checkpoint === undefined ? {} : { checkpoint }),
     nativeMetadata: modelNativeResponseMetadata(
       {
         target: { provider, model, instructionProfileId: "native" },
@@ -1783,6 +1779,37 @@ export function fromOpenAIResponse(
       : { rawStopReason }),
     ...(lengthReason === undefined ? {} : { lengthReason }),
     ...(result.incompleteToolCalls ? { incompleteToolCalls: true } : {}),
+  }
+}
+
+function responsesCheckpoint(
+  request: Parameters<typeof modelNativeItems>[0],
+  output: Response["output"],
+): ModelResponse["checkpoint"] {
+  const checkpoints = output.filter((item) => item.type === "compaction")
+  if (checkpoints.length === 0) return undefined
+  const [checkpoint] = checkpoints
+  const scope = request.continuationScope
+  if (checkpoints.length !== 1 || !checkpoint?.encrypted_content || !scope)
+    throw new OpenAIProtocolError(
+      "Native compaction requires one non-empty encrypted checkpoint and an account scope.",
+    )
+  return {
+    role: "compaction",
+    mode: "opaque",
+    owner: {
+      provider: request.target.provider,
+      model: request.target.model,
+      scope,
+      wireApi: "openai_responses",
+    },
+    estimatedTokens: Math.ceil(
+      Math.max(
+        0,
+        Math.floor((checkpoint.encrypted_content.length * 3) / 4) - 650,
+      ) / 4,
+    ),
+    native: modelNativeItems(request, "openai_responses", output),
   }
 }
 
@@ -1874,7 +1901,6 @@ function fromOpenAIOutput(
   customFallbackKeys: ReadonlyMap<string, string>,
   provider: string,
   continuationScope: string | undefined,
-  model: string,
   completedItemIds: ReadonlySet<string>,
   rawReasoning?: ReadonlyMap<string, { parts: ReadonlyMap<number, string> }>,
   containerImages?: ReturnType<typeof createContainerImageReader>["byItem"],
@@ -1903,30 +1929,10 @@ function fromOpenAIOutput(
         continue
       }
     }
-    if (item.type === "compaction") {
-      if (
-        continuationScope === undefined ||
-        item.encrypted_content.length === 0
-      ) {
-        throw new Error(
-          "Native compaction requires non-empty encrypted content and an account scope.",
-        )
-      }
-      const metadata =
-        "internal_chat_message_metadata_passthrough" in item
-          ? item.internal_chat_message_metadata_passthrough
-          : undefined
-      content.push({
-        type: "compaction",
-        provider,
-        model,
-        scope: continuationScope,
-        encryptedContent: item.encrypted_content,
-        id: item.id,
-        ...(isJsonObject(metadata) ? { metadata } : {}),
-      })
-      continue
-    }
+    if (item.type === "compaction")
+      throw new OpenAIProtocolError(
+        "Unexpected compaction in streamed model output.",
+      )
     if (item.type === "reasoning") {
       const raw = new Map(rawReasoning?.get(item.id)?.parts)
       for (const [index, part] of (item.content ?? []).entries())

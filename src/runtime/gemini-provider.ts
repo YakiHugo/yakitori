@@ -933,10 +933,6 @@ export function toGeminiContents(
       )
       let nativeCallIndex = 0
       for (const block of portableModelContent(message)) {
-        if (block.type === "compaction")
-          throw new GeminiProtocolError(
-            "Opaque compaction cannot be sent to Gemini.",
-          )
         const metadata = block.providerMetadata?.gemini
         const owned =
           isJsonObject(metadata) &&

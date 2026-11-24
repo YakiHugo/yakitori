@@ -22,7 +22,7 @@ describe("provider registry", () => {
         info: {
           id: "personal",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false, nativePdf: true },
+          capabilities: { nativePdf: true },
         },
         stream: () => responseStream(seen, "old"),
       }),
@@ -35,7 +35,7 @@ describe("provider registry", () => {
         info: {
           id: "personal",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false, nativePdf: false },
+          capabilities: { nativePdf: false },
         },
         stream: () => responseStream(seen, "new"),
       }),
@@ -89,7 +89,7 @@ describe("provider registry", () => {
         info: {
           id: "work",
           wireApi: "anthropic_messages",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models,
         stream: async function* (input) {
@@ -168,7 +168,7 @@ describe("provider registry", () => {
           id: "openai",
           wireApi: "openai_responses",
           capabilities: {
-            remoteCompaction: "responses_compact",
+            compactionStrategy: { replacement: "native_window" },
             nativePdf: true,
             tools: {
               supportsCustomTools: true,
@@ -181,7 +181,6 @@ describe("provider registry", () => {
           return {
             models: turnModels,
             wireApi: "openai_chat_completions",
-            remoteCompaction: false,
             nativePdf: false,
             toolCapabilities: { supportsCustomTools: false },
             stream: () => responseStream([], "unused"),
@@ -193,7 +192,7 @@ describe("provider registry", () => {
     const session = registry.createClient().startTurn("openai")
     try {
       expect(session.wireApi).toBe("openai_chat_completions")
-      expect(session.remoteCompaction).toBe(false)
+      expect(session.compactionStrategy).toBeUndefined()
       expect(session.nativePdf).toBe(false)
       expect(session.toolCapabilities).toEqual({ supportsCustomTools: false })
       expect(
@@ -269,7 +268,7 @@ describe("provider registry", () => {
         info: {
           id: "openai",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
           retry: { maxAttempts: 1 },
         },
         stream: (request) => responseStream(seen, request.target.model),
@@ -297,7 +296,7 @@ describe("provider registry", () => {
       info: {
         id: "openai",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { sleep: async () => {}, random: () => 0 },
       },
       createAttemptStream(attempt) {
@@ -347,13 +346,13 @@ describe("provider registry", () => {
         info: {
           id: "openai",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models: createModelProvider({
           info: {
             id: "openai",
             wireApi: "openai_responses",
-            capabilities: { remoteCompaction: false },
+            capabilities: {},
           },
           stream: () => responseStream([], "unused"),
         }).models,
@@ -385,13 +384,13 @@ describe("provider registry", () => {
         info: {
           id: "openai",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models: createModelProvider({
           info: {
             id: "openai",
             wireApi: "openai_responses",
-            capabilities: { remoteCompaction: false },
+            capabilities: {},
           },
           stream: () => responseStream([], "unused"),
         }).models,
@@ -446,7 +445,7 @@ describe("provider registry", () => {
         info: {
           id: "grok",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models,
         stream: () => responseStream(seen, "inference"),
@@ -478,7 +477,7 @@ describe("provider registry", () => {
       info: {
         id: "openai",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
       },
       stream: () => responseStream([], "unused"),
     })
@@ -514,13 +513,13 @@ describe("provider registry", () => {
         info: {
           id: "openai",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models: createModelProvider({
           info: {
             id: "openai",
             wireApi: "openai_responses",
-            capabilities: { remoteCompaction: false },
+            capabilities: {},
           },
           stream: () => responseStream([], "unused"),
         }).models,

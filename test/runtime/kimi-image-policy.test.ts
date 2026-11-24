@@ -9,6 +9,7 @@ import type {
   ModelStreamEvent,
 } from "../../src/runtime/model.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 const endpoint = "https://api.moonshot.ai/v1"
 const limit = 20_000_000
@@ -434,6 +435,6 @@ describe("native Moonshot Responses image preparation", () => {
     expect(reads).toBe(2)
     expect(JSON.stringify(result.events)).toContain("20 MB")
     expect(createHash("sha256").update(source).digest("hex")).toBe(hash)
-    expect(input.messages[0]?.content).toHaveLength(3)
+    expect(messageContent(input.messages[0])).toHaveLength(3)
   })
 })

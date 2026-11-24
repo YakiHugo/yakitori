@@ -1,8 +1,8 @@
 import type { JsonObject, ModelToolContentBlock } from "../kernel/events.ts"
 import { applyJsonMergePatch } from "../kernel/json-equality.ts"
 import type {
-  ModelContextSettings,
   HistoryOutputBudget,
+  ModelContextSettings,
   ResponseItemEnvelope,
   StoredThread,
 } from "./rollout.ts"
@@ -273,6 +273,8 @@ function projectHistoryItem(
     }
   const budget = copied.historyOutputBudget
   if (copied.item.role !== "tool" || budget === undefined) return copied
+  const toolContentBlockCount =
+    copied.toolContentBlockCount ?? copied.item.content.length
   let remainingBytes = budget.maxBytes
   let remainingLines = budget.maxLines
   let toolContentTruncated = false
@@ -281,8 +283,7 @@ function projectHistoryItem(
   let retainedToolContentBlockCount = 0
   const content = copied.item.content.flatMap<ModelToolContentBlock>(
     (block, index) => {
-      const isToolContent =
-        index < (copied.toolContentBlockCount ?? copied.item.content.length)
+      const isToolContent = index < toolContentBlockCount
       if (block.type !== "text") {
         if (isToolContent) retainedToolContentBlockCount++
         return [block]

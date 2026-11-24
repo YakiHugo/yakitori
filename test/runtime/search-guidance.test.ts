@@ -83,9 +83,11 @@ it.each([
           message.context.sectionId === "tools",
       )
       .flatMap((message) =>
-        message.content.flatMap((part) =>
-          part.type === "text" ? [part.text] : [],
-        ),
+        message.role === "compaction"
+          ? []
+          : message.content.flatMap((part) =>
+              part.type === "text" ? [part.text] : [],
+            ),
       )
       .join("\n")
     for (const name of ["read_file", "grep", "glob", "exec_command"]) {

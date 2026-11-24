@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest"
 import type { ChatGPTPlanAccess } from "../../src/runtime/chatgpt-plan-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
-import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { captureModelsManager } from "../../src/runtime/models-manager.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createChatGPTModelConnections } from "../../src/server/chatgpt-model-connections.ts"
 import { createModelDirectory } from "../../src/server/model-directory.ts"
 
@@ -268,10 +268,10 @@ describe("ChatGPT model connections", () => {
         "Bearer fake-fake-account-b-two",
       ])
       expect(oldTurn.warmup).toBeUndefined()
-      expect(oldTurn.remoteCompaction).toBe(false)
+      expect(oldTurn.compactionStrategy).toBeUndefined()
       expect(oldTurn.nativePdf).toBe(false)
       expect(() =>
-        oldTurn.stream({ ...request, compaction: "codex_remote" }),
+        oldTurn.stream({ ...request, compaction: "provider" }),
       ).toThrow("does not support remote compaction")
       expect(calls).toHaveLength(3)
     } finally {

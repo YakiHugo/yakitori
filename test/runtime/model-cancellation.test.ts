@@ -228,7 +228,7 @@ async function inferenceFixture(options: {
                   info: {
                     id: "faux",
                     wireApi: "openai_chat_completions",
-                    capabilities: { remoteCompaction: false },
+                    capabilities: {},
                     streamIdleTimeoutMs: requestOptions.streamIdleTimeoutMs,
                     retry: requestOptions,
                   },

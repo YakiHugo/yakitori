@@ -1467,11 +1467,6 @@ function toAnthropicAssistantBlock(
   provider: string,
   continuationScope?: string,
 ): BetaContentBlockParam | undefined {
-  if (block.type === "compaction") {
-    throw new Error(
-      "Native compaction must be converted by its owning provider before using Anthropic Messages.",
-    )
-  }
   if (block.type === "text") {
     const metadata = block.providerMetadata?.anthropic
     // Document/search-result indices belong to the original request. A model

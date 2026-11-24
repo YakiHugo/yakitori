@@ -1,12 +1,13 @@
 import { once } from "node:events"
 import { createServer } from "node:http"
-import { describe, expect, it } from "vitest"
 import sharp from "sharp"
+import { describe, expect, it } from "vitest"
 import {
   prepareProviderMedia,
   readAssetSource,
 } from "../../src/runtime/asset-media.ts"
 import type { ModelRequest } from "../../src/runtime/model.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 describe("request asset access", () => {
   it("reads external content and reports HTTP errors at the asset boundary", async () => {
@@ -99,7 +100,9 @@ describe("request asset access", () => {
         ],
       },
     ])
-    expect(input.messages[0]?.content[0]).toMatchObject({ file: source })
+    expect(messageContent(input.messages[0])?.[0]).toMatchObject({
+      file: source,
+    })
   })
 })
 
@@ -228,11 +231,11 @@ it("keeps provider-addressable owned image URLs independent of local readability
     },
   }
   expect(
-    (await prepareProviderMedia(input)).messages[0]?.content[0],
+    messageContent((await prepareProviderMedia(input)).messages[0])?.[0],
   ).toMatchObject({
     file: { url: "https://example.invalid/hosted.png" },
   })
-  expect(input.messages[0]?.content[0]).toMatchObject({ file: source })
+  expect(messageContent(input.messages[0])?.[0]).toMatchObject({ file: source })
 })
 
 it.each([
@@ -280,7 +283,7 @@ it.each([
   }
   const before = structuredClone(input.messages)
   const media = await prepareProviderMedia(input)
-  expect(media.messages[0]?.content[0]).toEqual({
+  expect(messageContent(media.messages[0])?.[0]).toEqual({
     type: "image",
     mediaType: "image/png",
     detail: "high",

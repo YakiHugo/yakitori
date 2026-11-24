@@ -714,7 +714,7 @@ describe("Gemini Interactions wire boundary", () => {
 
   it.each([
     { parallelToolCalls: false },
-    { compaction: "responses_compact" as const },
+    { compaction: "provider" as const },
     ...[
       { previous_interaction_id: "server-history" },
       { background: true },

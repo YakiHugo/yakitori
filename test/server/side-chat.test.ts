@@ -22,6 +22,7 @@ import {
   createSideChatService,
   type SideChatSnapshot,
 } from "../../src/server/side-chat.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { readRequestAsset } from "../support/faux-provider.ts"
@@ -892,7 +893,7 @@ describe("temporary side conversations", () => {
         info: {
           id: "openai",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false, nativePdf: true },
+          capabilities: { nativePdf: true },
         },
         stream: async function* (request) {
           requests.push(request)
@@ -1004,13 +1005,15 @@ describe("temporary side conversations", () => {
         ).not.toContain(bytes.toString("base64"))
       }
       expect(
-        requests
-          .at(-1)
-          ?.messages.filter(
-            (message) =>
-              message.role === "user" && message.context === undefined,
-          )
-          .at(-1)?.content,
+        messageContent(
+          requests
+            .at(-1)
+            ?.messages.filter(
+              (message) =>
+                message.role === "user" && message.context === undefined,
+            )
+            .at(-1),
+        ),
       ).toMatchObject([
         {
           type: "document",

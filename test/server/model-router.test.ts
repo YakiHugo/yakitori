@@ -13,7 +13,7 @@ function account(id: string, models: readonly ConfiguredModel[]) {
     info: {
       id,
       wireApi: "openai_chat_completions",
-      capabilities: { remoteCompaction: false },
+      capabilities: {},
     },
     models: createConfiguredModelsManager({ provider: id, models }),
     stream: async function* () {},

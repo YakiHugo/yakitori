@@ -6,7 +6,6 @@ import { expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { JsonObject } from "../../src/kernel/index.ts"
-import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import type { ModelResponse } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import {
@@ -16,6 +15,7 @@ import {
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 const isolatedHome = vi.hoisted(() => ({ path: "" }))
 vi.mock("node:os", async (importOriginal) => ({
@@ -82,7 +82,7 @@ it("replays the entire public compact window after persistence without a Codex t
         instructionProfileId: "test",
       },
       continuationScope: "account",
-      compaction: "responses_compact",
+      compaction: "provider",
       cacheKey: "cache",
       system: [],
       messages: [
@@ -109,9 +109,10 @@ it("replays the entire public compact window after persistence without a Codex t
     expect(terminal).toMatchObject({
       providerRequestId: "http_compact",
       providerResponseId: "response_compact",
-      content: [{ type: "compaction", encryptedContent: "opaque" }],
+      content: [],
+      checkpoint: { role: "compaction", mode: "opaque" },
     })
-    if (terminal === undefined || terminal.native === undefined)
+    if (terminal?.checkpoint === undefined)
       throw new Error("Missing native response")
     const now = new Date().toISOString()
     await store.createThread({
@@ -129,11 +130,7 @@ it("replays the entire public compact window after persistence without a Codex t
           id: "checkpoint",
           turnId: "turn",
           createdAt: now,
-          item: {
-            role: "assistant",
-            content: terminal.content,
-            native: terminal.native,
-          },
+          item: terminal.checkpoint,
         },
       },
     ])
@@ -145,7 +142,7 @@ it("replays the entire public compact window after persistence without a Codex t
     const item = restored?.rollout.find(
       ({ item }) => item.type === "response_item",
     )?.item
-    if (item?.type !== "response_item" || item.item.item.role !== "assistant")
+    if (item?.type !== "response_item" || item.item.item.role !== "compaction")
       throw new Error("Missing checkpoint")
     expect(
       toOpenAIInput(
@@ -220,7 +217,7 @@ it("continues a Messages server-tool pause with native blocks and persists both 
       info: {
         id: "anthropic",
         wireApi: "anthropic_messages",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { maxAttempts: 1 },
       },
       stream: createAnthropicTestStream({

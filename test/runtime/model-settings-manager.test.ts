@@ -284,7 +284,7 @@ it("captures user model settings for active Turns while applying new settings to
         info: {
           id: "work",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models: createConfiguredModelsManager({
           provider: "work",
@@ -359,7 +359,7 @@ it("preserves app reasoning aliases through a user override and the actual reque
         info: {
           id: "codex",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         stream: createOpenAIProvider({
           apiKey: "fixture",

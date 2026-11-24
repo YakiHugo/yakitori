@@ -43,7 +43,6 @@ export function resolveProviderBackend(
         ? {}
         : { catalogProvider: service.catalogProvider }),
     capabilities: {
-      remoteCompaction: false,
       nativePdf: false,
       ...protocol?.capabilities,
       tools: {
@@ -72,7 +71,7 @@ const providerProtocols: Readonly<
 > = {
   "codex/openai_responses": {
     capabilities: {
-      remoteCompaction: "codex_remote",
+      compactionStrategy: { replacement: "checkpoint_only", maxAttempts: 3 },
       tools: {
         supportsCustomTools: true,
         nativeDeferredProtocol: "openai_deferred",
@@ -81,7 +80,7 @@ const providerProtocols: Readonly<
   },
   "openai/openai_responses": {
     capabilities: {
-      remoteCompaction: "responses_compact",
+      compactionStrategy: { replacement: "native_window" },
       nativePdf: true,
       tools: {
         supportsCustomTools: true,

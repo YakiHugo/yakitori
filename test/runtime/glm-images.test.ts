@@ -14,6 +14,7 @@ import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 const nativeURL = "https://api.z.ai/api/paas/v4/"
 const model = "glm-5.3-flash"
@@ -245,7 +246,7 @@ describe("native Z.AI GLM vision", () => {
           expect(image).not.toHaveProperty("detail")
         }
       }
-      expect(history[0]?.content).toEqual([block])
+      expect(messageContent(history[0])).toEqual([block])
     } finally {
       await step.toolRouter.release()
       await turn.close()

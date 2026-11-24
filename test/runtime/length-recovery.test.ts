@@ -503,7 +503,7 @@ async function createRetryingCompactionRuntime(stream: StreamFn) {
       info: {
         id: "openai",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { maxAttempts: 3, sleep: async () => {} },
       },
       stream,

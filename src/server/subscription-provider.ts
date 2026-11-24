@@ -4,7 +4,10 @@ import {
   resolveCodexAccessToken,
   resolveCodexAccountIdentity,
 } from "../runtime/codex-credentials.ts"
-import { createCodexProvider } from "../runtime/codex-provider.ts"
+import {
+  codexAccountScope,
+  createCodexProvider,
+} from "../runtime/codex-provider.ts"
 import { resolveGrokModelCredentials } from "../runtime/grok-credentials.ts"
 import { createGrokProvider } from "../runtime/grok-provider.ts"
 import {
@@ -74,6 +77,9 @@ export async function createSubscriptionProvider(
       wireApi: "openai_responses",
       capabilities: backend.capabilities,
     },
+    ...(login.accountId === undefined
+      ? {}
+      : { continuationScope: codexAccountScope(login.accountId) }),
     createTurnStream: () =>
       createCodexProvider({
         credentialsPath: path,

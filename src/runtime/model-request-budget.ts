@@ -1,7 +1,7 @@
 import { readImageDimensions } from "../kernel/image-metadata.ts"
-import type { ImageTokenEstimator } from "./openai-image-budget.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import type { ModelImageBlock, ModelMessage, ModelRequest } from "./model.ts"
+import type { ImageTokenEstimator } from "./openai-image-budget.ts"
 
 const HIGH_DETAIL_IMAGE_TOKENS = 2_000
 const ORIGINAL_IMAGE_PATCH_SIZE = 32
@@ -111,6 +111,10 @@ export function estimateHistoryTokens(
 }
 
 function estimateMessageTextTokens(message: ModelMessage): number {
+  if (message.role === "compaction")
+    return message.mode === "opaque"
+      ? message.estimatedTokens
+      : estimateTextTokens(message.text)
   if (message.role !== "assistant")
     return (
       estimateTextTokens(JSON.stringify(message, omitImagePayload)) +
@@ -125,26 +129,7 @@ function estimateMessageTextTokens(message: ModelMessage): number {
           )
         : 0)
     )
-  const native = message.content.filter((block) => block.type === "compaction")
-  if (native.length === 0) return estimateTextTokens(JSON.stringify(message))
-  // Codex estimates the decoded payload minus encryption overhead, rather
-  // than charging base64 and IR provenance as model-visible text.
-  const nativeTokens = native.reduce(
-    (total, block) =>
-      total +
-      Math.ceil(
-        Math.max(0, Math.floor((block.encryptedContent.length * 3) / 4) - 650) /
-          4,
-      ),
-    0,
-  )
-  const content = message.content.filter((block) => block.type !== "compaction")
-  return (
-    nativeTokens +
-    (content.length === 0
-      ? 0
-      : estimateTextTokens(JSON.stringify({ ...message, content })))
-  )
+  return estimateTextTokens(JSON.stringify(message))
 }
 
 function omitImagePayload(_key: string, value: unknown): unknown {

@@ -54,7 +54,7 @@ it("persists discovered model instructions before sampling and updates them acro
       info: {
         id: "codex",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { maxAttempts: 1 },
       },
       models,
@@ -189,7 +189,7 @@ it.each([
       info: {
         id: provider,
         wireApi: "unknown",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { maxAttempts: 1 },
       },
       stream,

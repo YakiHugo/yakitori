@@ -514,10 +514,7 @@ function buildMessages(
           content.push({
             toolUse: { toolUseId: block.id, name: block.name, input },
           })
-        } else if (block.type === "compaction")
-          throw new BedrockProtocolError(
-            "Opaque compaction cannot be sent to Bedrock.",
-          )
+        }
       }
       const native = replayModelNativeItems(
         message,

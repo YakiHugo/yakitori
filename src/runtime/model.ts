@@ -10,13 +10,15 @@ import type { AssetSource, RolloutAssetReference } from "../core/asset-types.ts"
 import type {
   JsonObject,
   ModelAssistantMessage,
-  ModelCompactionBlock,
+  ModelCompactionMessage,
+  ModelCompactionOwner,
   ModelContentBlock,
   ModelDeveloperMessage,
   ModelDocumentBlock,
   ModelImageBlock,
   ModelMessage,
   ModelNativeItem,
+  ModelOpaqueCheckpoint,
   ModelReasoningBlock,
   ModelResponseOrigin,
   ModelTextBlock,
@@ -31,13 +33,15 @@ import type {
 
 export type {
   ModelAssistantMessage,
-  ModelCompactionBlock,
+  ModelCompactionMessage,
+  ModelCompactionOwner,
   ModelContentBlock,
   ModelDeveloperMessage,
   ModelDocumentBlock,
   ModelImageBlock,
   ModelMessage,
   ModelNativeItem,
+  ModelOpaqueCheckpoint,
   ModelReasoningBlock,
   ModelResponseOrigin,
   ModelTextBlock,
@@ -108,7 +112,7 @@ export type ModelRequest = Readonly<{
   // Only interactive sampling may wait for connectivity without a retry limit.
   waitForConnection?: boolean
   // Request-only control; the resulting native item enters normal history.
-  compaction?: "local" | "codex_remote" | "responses_compact"
+  compaction?: "local" | "provider"
   target: ModelTarget
   // Runtime-only fence for opaque provider continuation state. The provider
   // owner adds it immediately before transport serialization; Session target
@@ -217,6 +221,7 @@ export type ModelResponse = Readonly<{
   // Tool calls in content are complete; an unusable tail is never executable.
   incompleteToolCalls?: boolean
   content: readonly ModelContentBlock[]
+  checkpoint?: ModelOpaqueCheckpoint
   native?: readonly ModelNativeItem[]
   nativeMetadata?: ModelNativeItem
   providerResponseId?: string

@@ -229,12 +229,10 @@ export function validateChatOnlyRequest(request: ModelRequest): void {
     request.messages.some(
       (message) =>
         message.role === "tool" ||
+        (message.role === "compaction" && message.mode === "opaque") ||
         (message.role === "assistant" &&
           (!isPortableChatOnlyNative(message.content, message.native) ||
-            message.content.some(
-              (block) =>
-                block.type === "tool_call" || block.type === "compaction",
-            ))),
+            message.content.some((block) => block.type === "tool_call"))),
     )
   )
     throw new ModelRequestPlanError(

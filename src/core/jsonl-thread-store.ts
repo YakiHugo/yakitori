@@ -3559,6 +3559,7 @@ function isResponseItem(value: unknown): value is ResponseItemEnvelope {
       (typeof value.toolContentBlockCount === "number" &&
         Number.isSafeInteger(value.toolContentBlockCount) &&
         value.toolContentBlockCount >= 0 &&
+        value.item.role === "tool" &&
         value.toolContentBlockCount <= value.item.content.length)) &&
     (value.historyOutputBudget === undefined ||
       (isRecord(value.historyOutputBudget) &&

@@ -1,8 +1,11 @@
 import { isJsonObject } from "../kernel/index.ts"
 import type {
   ModelAssistantMessage,
+  ModelCompactionOwner,
   ModelContentBlock,
+  ModelMessage,
   ModelNativeItem,
+  ModelOpaqueCheckpoint,
   ModelRequest,
   ModelWireApi,
 } from "./model.ts"
@@ -20,34 +23,51 @@ export function validateModelHistoryScope(
   wireApi: ModelWireApi,
 ): void {
   for (const message of request.messages) {
-    if (message.role !== "assistant") continue
-    for (const block of message.content) {
-      if (block.type !== "compaction") continue
-      if (
-        wireApi !== "openai_responses" ||
-        block.provider !== request.target.provider ||
-        block.model !== request.target.model ||
-        request.continuationScope === undefined ||
-        block.scope !== request.continuationScope
+    if (
+      message.role === "compaction" &&
+      message.mode === "opaque" &&
+      !matchesCompactionOwner(message.owner, {
+        ...request.target,
+        wireApi,
+        scope: request.continuationScope,
+      })
+    )
+      throw new ModelHistoryScopeError(
+        "Opaque compaction belongs to another provider, model, API or account; convert it through its owner before continuing.",
       )
-        throw new ModelHistoryScopeError(
-          "Opaque compaction belongs to another provider, model, API or account; convert it through its owner before continuing.",
-        )
-    }
-    for (const native of message.native ?? []) {
-      if (native.value.type !== "compaction") continue
-      if (
-        wireApi !== "openai_responses" ||
-        native.wireApi !== wireApi ||
-        native.provider !== request.target.provider ||
-        native.model !== request.target.model ||
-        request.continuationScope === undefined ||
-        native.scope !== request.continuationScope
-      )
-        throw new ModelHistoryScopeError(
-          "Native compaction cannot be projected into portable history for another provider, model, API or account.",
-        )
-    }
+  }
+}
+
+export function matchesCompactionOwner(
+  owner: ModelCompactionOwner,
+  target: Readonly<{
+    provider: string
+    model: string
+    wireApi: ModelWireApi | undefined
+    scope: string | undefined
+  }>,
+): boolean {
+  return (
+    owner.provider === target.provider &&
+    owner.model === target.model &&
+    owner.wireApi === target.wireApi &&
+    owner.scope === target.scope
+  )
+}
+
+export function projectCompactionSummary(
+  message: ModelMessage,
+): Exclude<ModelMessage, { role: "compaction" }> | ModelOpaqueCheckpoint {
+  if (message.role !== "compaction" || message.mode !== "summary")
+    return message
+  return {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${message.text}\n</context_compacted>`,
+      },
+    ],
   }
 }
 
@@ -75,12 +95,19 @@ export function modelNativeItems(
 }
 
 export function replayModelNativeItems(
-  message: ModelAssistantMessage,
+  message: ModelAssistantMessage | ModelOpaqueCheckpoint,
   wireApi: NativeWireApi,
   provider: string,
   scope?: string,
   model?: string,
 ): ModelNativeItem["value"][] | undefined {
+  if (
+    message.role === "assistant" &&
+    message.native?.some((item) => item.value.type === "compaction")
+  )
+    throw new ModelHistoryScopeError(
+      "Opaque compaction requires a checkpoint message.",
+    )
   if (message.native === undefined || message.native.length === 0)
     return undefined
   if (

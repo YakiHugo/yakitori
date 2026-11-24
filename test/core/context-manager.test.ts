@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import type {
-  RolloutItem,
   ResponseItemEnvelope,
+  RolloutItem,
   StoredThread,
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
 import { toolContentText } from "../../src/runtime/model-tool-content.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 it("preserves agent provenance in live and restored model history without changing stored text", () => {
   const envelope: ResponseItemEnvelope = {
@@ -91,7 +92,7 @@ describe("ContextManager tool history", () => {
       image,
     ])
     expect(result.content[0]).toEqual({ type: "text", text: "start" })
-    expect(envelope.item.content).toHaveLength(5)
+    expect(messageContent(envelope.item)).toHaveLength(5)
     const projected = manager.snapshot().history
     expect(projected[0]?.toolContentBlockCount).toBe(result.content.length)
     manager.replace(projected)

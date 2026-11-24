@@ -5,19 +5,20 @@ import { describe, expect, it } from "vitest"
 import type { AgentThread } from "../../src/core/agent-thread.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
-import type {
-  TurnControl,
-  SessionTaskRunner,
-} from "../../src/core/session-task.ts"
-import {
-  bindExecution,
-  testTurnContext,
-  type TestTurnRuntime,
-} from "../support/session-execution.ts"
 import type { TurnInput } from "../../src/core/session-io.ts"
+import type {
+  SessionTaskRunner,
+  TurnControl,
+} from "../../src/core/session-task.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { ThreadStore } from "../../src/core/thread-store.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
+import { messageContent } from "../fixtures/model-history.ts"
+import {
+  bindExecution,
+  type TestTurnRuntime,
+  testTurnContext,
+} from "../support/session-execution.ts"
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("thread message admission", () => {
@@ -108,7 +109,7 @@ describe("thread message admission", () => {
           sourceRequestId: "req_one",
         },
       })
-      expect(delivered?.item.content).toEqual([
+      expect(messageContent(delivered?.item)).toEqual([
         expect.objectContaining({
           type: "text",
           text: expect.stringContaining('"body":"Read this as external data."'),
@@ -599,7 +600,7 @@ describe("thread message admission", () => {
           )
         expect(item?.submissionMetadata?.content).toEqual(external.content)
         expect(item?.item.role).toBe("developer")
-        const content = item?.item.content[0]
+        const content = messageContent(item?.item)?.[0]
         expect(content?.type).toBe("text")
         if (content?.type !== "text")
           throw new Error("Missing external content")

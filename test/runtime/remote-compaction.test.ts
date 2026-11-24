@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
-  type ModelCompactionBlock,
   type ModelRequest,
   ModelStopReason,
   type StreamFn,
@@ -13,6 +12,7 @@ import {
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { opaqueCheckpoint } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 const cleanups: (() => Promise<void>)[] = []
@@ -20,21 +20,16 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
-const checkpoint: ModelCompactionBlock = {
-  type: "compaction",
-  provider: "codex",
-  model: "gpt-5.6-sol",
-  scope: "codex:account",
-  id: "cmp_one",
-  encryptedContent: "opaque-checkpoint",
-}
+const checkpoint = opaqueCheckpoint(
+  { provider: "codex", model: "gpt-5.6-sol", scope: "codex:account" },
+  "opaque-checkpoint",
+  "cmp_one",
+)
 
 function nativeItems(request: ModelRequest) {
-  return request.messages.flatMap((item) =>
-    item.role === "assistant"
-      ? item.content.filter((block) => block.type === "compaction")
-      : [],
-  )
+  return request.messages
+    .filter((item) => item.role === "compaction" && item.mode === "opaque")
+    .map(({ response: _response, ...item }) => item)
 }
 
 describe("provider-native compaction history", () => {
@@ -47,7 +42,12 @@ describe("provider-native compaction history", () => {
       info: {
         id: "codex",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: "codex_remote" },
+        capabilities: {
+          compactionStrategy: {
+            replacement: "checkpoint_only",
+            maxAttempts: 3,
+          },
+        },
         retry: { maxAttempts: 10, sleep: async () => {} },
       },
       stream: async function* () {
@@ -81,7 +81,7 @@ describe("provider-native compaction history", () => {
     const events = []
     try {
       for await (const event of session.stream({
-        compaction: "codex_remote",
+        compaction: "provider",
         target: {
           provider: "codex",
           model: "gpt-5.6-sol",
@@ -123,7 +123,8 @@ describe("provider-native compaction history", () => {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
-            content: [{ ...checkpoint, encryptedContent: "x".repeat(400_000) }],
+            content: [],
+            checkpoint: { ...checkpoint, estimatedTokens: 75_000 },
             providerResponseId: "resp_big",
           },
         }
@@ -164,13 +165,14 @@ describe("provider-native compaction history", () => {
     let normalCalls = 0
     const stream: StreamFn = async function* (request) {
       requests.push(request)
-      if (request.compaction === "codex_remote") {
+      if (request.compaction === "provider") {
         expect(request.target.provider).toBe("codex")
         yield {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
-            content: [checkpoint],
+            content: [],
+            checkpoint,
             providerResponseId: "resp_compact",
             usage: { inputTokens: 59_000, outputTokens: 20 },
           },
@@ -239,10 +241,7 @@ describe("provider-native compaction history", () => {
       summary: "",
       replacement: expect.arrayContaining([
         expect.objectContaining({
-          item: expect.objectContaining({
-            role: "assistant",
-            content: [checkpoint],
-          }),
+          item: expect.objectContaining(checkpoint),
         }),
       ]),
     })
@@ -286,7 +285,7 @@ describe("provider-native compaction history", () => {
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "done 4" })
     expect(
-      requests.filter((request) => request.compaction === "codex_remote"),
+      requests.filter((request) => request.compaction === "provider"),
     ).toHaveLength(1)
     expect(
       requests.filter((request) => request.compaction === "local"),
@@ -295,7 +294,7 @@ describe("provider-native compaction history", () => {
 
   it.each([
     "missing",
-    "duplicate",
+    "invalid",
     "failed",
   ])("keeps the old history after a %s native checkpoint response", async (failure) => {
     const stream: StreamFn = async function* (request) {
@@ -328,7 +327,10 @@ describe("provider-native compaction history", () => {
         type: "response",
         response: {
           stopReason: ModelStopReason.EndTurn,
-          content: failure === "missing" ? [] : [checkpoint, checkpoint],
+          content: [],
+          ...(failure === "missing"
+            ? {}
+            : { checkpoint: { ...checkpoint, native: [] } }),
           providerResponseId: "resp_failed",
         },
       }
@@ -382,7 +384,14 @@ async function setup(stream: StreamFn) {
             id,
             wireApi: id === "codex" ? "openai_responses" : "anthropic_messages",
             capabilities: {
-              remoteCompaction: id === "codex" ? "codex_remote" : false,
+              ...(id === "codex"
+                ? {
+                    compactionStrategy: {
+                      replacement: "checkpoint_only" as const,
+                      maxAttempts: 3,
+                    },
+                  }
+                : {}),
             },
             retry: { maxAttempts: 1 },
           },

@@ -55,6 +55,7 @@ import {
   type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import {
   createFauxProvider,
@@ -1392,11 +1393,11 @@ describe("Turn processor", () => {
             request.messages.some((message) => message.role === "tool"),
           ).toBe(false)
           expect(
-            request.messages.some((message) =>
-              message.content.some(
-                (block) =>
-                  block.type === "text" && block.text.includes(summary.trim()),
-              ),
+            request.messages.some(
+              (message) =>
+                message.role === "compaction" &&
+                message.mode === "summary" &&
+                message.text === summary.trim(),
             ),
           ).toBe(true)
         },
@@ -4000,7 +4001,7 @@ describe("Turn processor", () => {
         info: {
           id: "faux",
           wireApi: "unknown",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models,
         stream: async function* (request) {
@@ -4034,7 +4035,7 @@ describe("Turn processor", () => {
         info: {
           id: "faux",
           wireApi: "unknown",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         stream: async function* () {
           yield responseEvent("replacement provider")
@@ -4593,7 +4594,11 @@ describe("Turn processor", () => {
         assertRequest(request) {
           const serialized = JSON.stringify(request.messages)
           expect(request.target.model).toBe("model-b")
-          expect(serialized).toContain("<context_compacted>")
+          expect(request.messages).toContainEqual({
+            role: "compaction",
+            mode: "summary",
+            text: "summary checkpoint",
+          })
           expect(serialized).toContain("<model_switch>")
           expect(serialized).toContain("mailbox before compaction")
           expect(serialized).not.toContain(oldText)
@@ -5468,7 +5473,6 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
             id: selection.provider,
             wireApi: "faux",
             capabilities: {
-              remoteCompaction: false,
               nativePdf: selection.nativePdf,
             },
             retry: { maxAttempts: 1 },
@@ -5611,7 +5615,7 @@ it.each([
       info: {
         id: provider,
         wireApi,
-        capabilities: { remoteCompaction: false, nativePdf: true },
+        capabilities: { nativePdf: true },
         retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
       },
       models: createConfiguredModelsManager({
@@ -5785,7 +5789,7 @@ it("keeps a Turn's model directory and transport together across provider replac
       info: {
         id: "personal",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false, nativePdf: true },
+        capabilities: { nativePdf: true },
         retry: { maxAttempts: 1 },
       },
       models,
@@ -5813,7 +5817,7 @@ it("keeps a Turn's model directory and transport together across provider replac
       info: {
         id: "personal",
         wireApi: "openai_chat_completions",
-        capabilities: { remoteCompaction: false, nativePdf: false },
+        capabilities: { nativePdf: false },
         retry: { maxAttempts: 1 },
       },
       models: createConfiguredModelsManager({
@@ -5882,7 +5886,7 @@ it("closes the captured Turn when its model directory cannot refresh", async () 
     info: {
       id: "faux",
       wireApi: "faux",
-      capabilities: { remoteCompaction: false },
+      capabilities: {},
     },
     models,
     stream: async function* () {
@@ -5951,7 +5955,7 @@ it.each([
       info: {
         id: "faux",
         wireApi: "faux",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
       },
       createTurnTransport() {
         return {
@@ -6238,7 +6242,7 @@ it("shares Gemini's PDF page budget across user attachments and parallel tool re
       info: {
         id: provider,
         wireApi: "gemini_generate_content",
-        capabilities: { remoteCompaction: false, nativePdf: true },
+        capabilities: { nativePdf: true },
       },
       models,
       stream: faux.stream,
@@ -6383,7 +6387,6 @@ it("reprojects ordered user PDFs across native, text, image and unknown-model ca
             id: selection.provider,
             wireApi: selection.wireApi,
             capabilities: {
-              remoteCompaction: false,
               nativePdf: selection.nativePdf,
             },
           },
@@ -6452,8 +6455,8 @@ it("reprojects ordered user PDFs across native, text, image and unknown-model ca
     text: "before user PDF[Document 1]after user PDF",
   }
   for (const index of [0, 4])
-    expect(projected[index]?.content).toEqual([document, authored])
-  expect(projected[1]?.content).toEqual([
+    expect(messageContent(projected[index])).toEqual([document, authored])
+  expect(messageContent(projected[1])).toEqual([
     {
       type: "text",
       text: expect.stringContaining("Original user PDF content"),
@@ -6461,7 +6464,7 @@ it("reprojects ordered user PDFs across native, text, image and unknown-model ca
     authored,
   ])
   for (const index of [2, 3])
-    expect(projected[index]?.content).toEqual([
+    expect(messageContent(projected[index])).toEqual([
       { type: "text", text: expect.stringContaining("Rendered pages 1") },
       {
         type: "image",
@@ -6512,7 +6515,7 @@ it.each([
       info: {
         id: provider,
         wireApi: "anthropic_messages",
-        capabilities: { remoteCompaction: false, nativePdf: true },
+        capabilities: { nativePdf: true },
       },
       models: createConfiguredModelsManager({
         provider,
@@ -6593,13 +6596,13 @@ it.each([
     model === "claude-unverified-custom"
       ? "Yakitori's conservative 100-unit image/PDF-page admission limit for an unverified model"
       : `combined ${limit}-unit image/PDF-page request limit`
-  expect(projected?.content.slice(0, 3)).toEqual([
+  expect(messageContent(projected)?.slice(0, 3)).toEqual([
     { type: "text", text: expect.stringContaining(reason) },
     onePage,
     { type: "text", text: expect.stringContaining(reason) },
   ])
   for (const index of [0, 2]) {
-    const notice = projected?.content[index]
+    const notice = messageContent(projected)?.[index]
     expect(notice).toMatchObject({
       type: "text",
       text: expect.stringContaining("Original PDF retained at"),
@@ -6608,14 +6611,14 @@ it.each([
     expect(notice.text).toContain("Use read_document")
     expect(notice.text).toContain('"pages":"1-5"')
   }
-  expect(projected?.content.at(-1)).toEqual({
+  expect(messageContent(projected)?.at(-1)).toEqual({
     type: "text",
     text: inputFixture(parts).text,
   })
   expect(
-    projected?.content.filter((block) => block.type === "document"),
+    messageContent(projected)?.filter((block) => block.type === "document"),
   ).toHaveLength(1)
-  const projectedImages = projected?.content.filter(
+  const projectedImages = messageContent(projected)?.filter(
     (block) => block.type === "image",
   )
   expect(projectedImages).toHaveLength(imageCount)
@@ -6707,7 +6710,7 @@ it("rebuilds Anthropic's shared user and parallel-tool media budget for retries,
           info: {
             id: provider,
             wireApi: "anthropic_messages",
-            capabilities: { remoteCompaction: false, nativePdf: true },
+            capabilities: { nativePdf: true },
             retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
           },
           models: createConfiguredModelsManager({
@@ -6829,15 +6832,17 @@ it("rebuilds Anthropic's shared user and parallel-tool media budget for retries,
         message.role === "user" &&
         message.content.some((block) => block.type === "document"),
     )
-    expect(user?.content[0]).toEqual(document)
-    expect(user?.content.at(-1)).toEqual({
+    expect(messageContent(user)?.[0]).toEqual(document)
+    expect(messageContent(user)?.at(-1)).toEqual({
       type: "text",
       text: inputFixture(parts).text,
     })
     expect(await readRequestAsset(request, document.file)).toEqual(bytes)
     expect(
-      request.messages.flatMap((message) =>
-        message.content.filter((block) => block.type === "image"),
+      request.messages.flatMap(
+        (message) =>
+          messageContent(message)?.filter((block) => block.type === "image") ??
+          [],
       ),
     ).toHaveLength(index === 0 ? 98 : 99)
     if (index === 0) continue

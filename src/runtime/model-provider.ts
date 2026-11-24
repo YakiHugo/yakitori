@@ -24,7 +24,10 @@ export type ProviderToolCapabilities = Readonly<{
 }>
 
 export type ModelProviderCapabilities = Readonly<{
-  remoteCompaction: false | "codex_remote" | "responses_compact"
+  compactionStrategy?: Readonly<{
+    replacement: "native_window" | "checkpoint_only"
+    maxAttempts?: number
+  }>
   // Opt in only for an endpoint whose native PDF support is known.
   nativePdf?: boolean
   // Endpoint upper bound; model capabilities may only narrow it.
@@ -45,7 +48,8 @@ export type ModelClientSession = {
   readonly models: ModelsManager
   readonly serviceId?: string
   readonly wireApi?: ModelWireApi
-  readonly remoteCompaction?: ModelProviderCapabilities["remoteCompaction"]
+  readonly compactionStrategy?: ModelProviderCapabilities["compactionStrategy"]
+  readonly continuationScope?: string
   readonly nativePdf?: boolean
   readonly toolCapabilities?: ProviderToolCapabilities
   readonly stream: StreamFn
@@ -168,51 +172,49 @@ export function createModelProvider(
         ...input.info.retry,
         ...policy,
       })
-      // Codex remote v2 permits at most two stream retries, including
-      // failures after provisional output. No history is installed yet.
-      const remoteStream = createModelRequestStream(providerStream, {
-        wireApi: input.info.wireApi,
-        ...(input.info.streamIdleTimeoutMs === undefined
-          ? {}
-          : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
-        ...input.info.retry,
-        ...policy,
-        maxAttempts: Math.min(
-          policy?.maxAttempts ?? input.info.retry?.maxAttempts ?? 4,
-          3,
-        ),
-        rateLimitMaxAttempts: Math.min(
-          policy?.rateLimitMaxAttempts ??
-            input.info.retry?.rateLimitMaxAttempts ??
-            2,
-          3,
-        ),
-      })
+      const strategy = input.info.capabilities.compactionStrategy
+      const maxAttempts = strategy?.maxAttempts
+      const compactStream =
+        maxAttempts === undefined
+          ? stream
+          : createModelRequestStream(providerStream, {
+              wireApi: input.info.wireApi,
+              ...(input.info.streamIdleTimeoutMs === undefined
+                ? {}
+                : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
+              ...input.info.retry,
+              ...policy,
+              maxAttempts: Math.min(
+                policy?.maxAttempts ?? input.info.retry?.maxAttempts ?? 4,
+                maxAttempts,
+              ),
+              rateLimitMaxAttempts: Math.min(
+                policy?.rateLimitMaxAttempts ??
+                  input.info.retry?.rateLimitMaxAttempts ??
+                  2,
+                maxAttempts,
+              ),
+            })
       return {
         models,
         ...(input.info.serviceId === undefined
           ? {}
           : { serviceId: input.info.serviceId }),
         wireApi: input.info.wireApi,
-        remoteCompaction: input.info.capabilities.remoteCompaction,
+        ...(strategy === undefined ? {} : { compactionStrategy: strategy }),
+        continuationScope,
         nativePdf: input.info.capabilities.nativePdf === true,
         ...(input.info.capabilities.tools === undefined
           ? {}
           : { toolCapabilities: input.info.capabilities.tools }),
         stream(request) {
           requireTargetProvider(input.info.id, request.target)
-          if (
-            (request.compaction === "codex_remote" ||
-              request.compaction === "responses_compact") &&
-            input.info.capabilities.remoteCompaction !== request.compaction
-          ) {
+          if (request.compaction === "provider" && strategy === undefined) {
             throw new Error(
               `Provider ${input.info.id} does not support remote compaction.`,
             )
           }
-          return (
-            request.compaction === "codex_remote" ? remoteStream : stream
-          )({
+          return (request.compaction === "provider" ? compactStream : stream)({
             ...request,
             continuationScope,
           })
@@ -241,7 +243,7 @@ export function createInjectedModelProvider(
     info: {
       id,
       wireApi: "unknown",
-      capabilities: { remoteCompaction: false },
+      capabilities: {},
       // An injected stream owns its own retry behavior unless the injector
       // supplies a real ModelProvider with an explicit policy.
       retry: { maxAttempts: 1 },

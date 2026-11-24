@@ -27,7 +27,7 @@ describe("model directory", () => {
         info: {
           id: "custom",
           wireApi: "unknown",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         stream: async function* () {},
         models: {

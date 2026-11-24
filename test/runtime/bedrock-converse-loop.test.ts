@@ -68,7 +68,6 @@ it("persists streamed Converse tool rounds and resumes native history without re
           id: "work",
           wireApi: "bedrock_converse",
           capabilities: {
-            remoteCompaction: false,
             tools: { supportsCustomTools: false, eagerTools: true },
           },
         },

@@ -122,7 +122,7 @@ function codexLoginFailure(cause: unknown, provider: string): ModelStreamEvent {
   }
 }
 
-function codexAccountScope(accountId: string): string {
+export function codexAccountScope(accountId: string): string {
   return `codex:${createHash("sha256").update(accountId).digest("hex")}`
 }
 
