@@ -1,4 +1,3 @@
-import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
@@ -29,6 +28,7 @@ import {
   createOpenAIProvider,
   toOpenAIInput,
 } from "../../src/runtime/openai-provider.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 const encryptedReasoning = "opaque".repeat(50_000)
 const openAIUsage = {
@@ -447,7 +447,7 @@ it.each(
           [assistant],
           provider,
           scope,
-          "generic",
+          undefined,
           model,
         )
       return toGeminiContents([assistant], provider, scope, model)[0]?.parts

@@ -1,7 +1,7 @@
-import { mergeEffectiveModel } from "../../src/runtime/effective-model.ts"
 import { expect, it } from "vitest"
 import { toChatCompletionsMessages } from "../../src/runtime/chat-completions-provider.ts"
 import { isPortableChatOnlyNative } from "../../src/runtime/chat-only-native.ts"
+import { mergeEffectiveModel } from "../../src/runtime/effective-model.ts"
 import type { ModelNativeItem } from "../../src/runtime/model.ts"
 import { resolveFallbackModel } from "../../src/runtime/model-catalog.ts"
 import { prepareModelRequestPlan } from "../../src/runtime/model-request-plan.ts"
@@ -38,7 +38,7 @@ it("admits exactly equivalent text-native history without changing its envelope"
       planned.request.messages,
       "account",
       "owner",
-      "generic",
+      undefined,
       "vision",
     ),
   ).toEqual([{ role: "assistant", content: answer }])

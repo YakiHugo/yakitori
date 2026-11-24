@@ -1,7 +1,8 @@
 import sharp from "sharp"
 import { afterEach, expect, it, vi } from "vitest"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
-import { createMimoImagePolicy } from "../../src/runtime/mimo-image-policy.ts"
+import { createDeclarativeChatImagePolicy } from "../../src/runtime/chat-image-admission.ts"
+import { mimoImageSpec } from "../../src/runtime/chat-image-specs.ts"
 import type {
   ModelImageBlock,
   ModelRequest,
@@ -148,7 +149,11 @@ it("measures the single image boundary as encoded base64, not raw bytes", async 
   const exact = Buffer.alloc(37_500_000)
   source.copy(exact)
   const input = request([inline(source)])
-  const policy = createMimoImagePolicy(input, "mimo-v2.6-pro")
+  const policy = createDeclarativeChatImagePolicy(
+    mimoImageSpec,
+    input,
+    "mimo-v2.6-pro",
+  )
   if (!policy) throw new Error("Missing policy")
   const image = await policy.prepareImage(exact, inline(source))
   expect(image.data?.length).toBe(50_000_000)
@@ -160,7 +165,8 @@ it("bounds aggregate encoding and full UTF-8 request bytes independently of per-
   const source = await png()
   const bytes = Buffer.alloc(24_000_000)
   source.copy(bytes)
-  const policy = createMimoImagePolicy(
+  const policy = createDeclarativeChatImagePolicy(
+    mimoImageSpec,
     request([inline(source)]),
     "mimo-v2.6-pro",
   )
