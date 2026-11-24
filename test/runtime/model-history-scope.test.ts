@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest"
+import { isModelMessage } from "../../src/kernel/index.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createGeminiInteractionsProvider } from "../../src/runtime/gemini-interactions-provider.ts"
 import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
 import type { ModelRequest, ModelWireApi } from "../../src/runtime/model.ts"
 import { validateModelHistoryScope } from "../../src/runtime/model-native.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import {
+  createOpenAIProvider,
+  toOpenAIInput,
+} from "../../src/runtime/openai-provider.ts"
+import { opaqueCheckpoint } from "../fixtures/model-history.ts"
 import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 const request: ModelRequest = {
@@ -15,18 +20,10 @@ const request: ModelRequest = {
   },
   continuationScope: "owner",
   messages: [
-    {
-      role: "assistant",
-      content: [
-        {
-          type: "compaction",
-          provider: "account",
-          model: "example",
-          scope: "owner",
-          encryptedContent: "checkpoint",
-        },
-      ],
-    },
+    opaqueCheckpoint(
+      { provider: "account", model: "example", scope: "owner" },
+      "checkpoint",
+    ),
   ],
   system: [],
   tools: [],
@@ -78,9 +75,18 @@ describe("opaque history admission", () => {
     expect(() =>
       validateModelHistoryScope(request, "openai_responses"),
     ).not.toThrow()
-    expect(request.messages[0]).toMatchObject({
-      content: [{ encryptedContent: "checkpoint" }],
-    })
+    expect(
+      toOpenAIInput(
+        request.messages,
+        true,
+        "account",
+        "owner",
+        new Map(),
+        "example",
+      ),
+    ).toEqual([
+      { type: "compaction", id: "cmp", encrypted_content: "checkpoint" },
+    ])
   })
 
   it.each<Readonly<{ request: ModelRequest; wireApi: ModelWireApi }>>([
@@ -103,7 +109,7 @@ describe("opaque history admission", () => {
     ).toThrowError(expect.objectContaining({ code: "history_incompatible" }))
   })
 
-  it("also fences native checkpoints without a display projection", () => {
+  it("rejects encrypted checkpoints hidden inside assistant native output", () => {
     const native: ModelRequest = {
       ...request,
       messages: [
@@ -122,13 +128,15 @@ describe("opaque history admission", () => {
         },
       ],
     }
+    expect(isModelMessage(native.messages[0])).toBe(false)
     expect(() =>
-      validateModelHistoryScope(native, "openai_responses"),
-    ).not.toThrow()
-    expect(() =>
-      validateModelHistoryScope(
-        { ...native, continuationScope: "other" },
-        "openai_responses",
+      toOpenAIInput(
+        native.messages,
+        true,
+        "account",
+        "owner",
+        new Map(),
+        "example",
       ),
     ).toThrowError(expect.objectContaining({ code: "history_incompatible" }))
   })

@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest"
-import { prepareModelRequestPlan } from "../../../src/runtime/model-request-plan.ts"
-import { pngImageBase64 } from "../../fixtures/images.ts"
 import { createConfiguredModelsManager } from "../../../src/runtime/configured-models-manager.ts"
 import type { ModelTarget } from "../../../src/runtime/model.ts"
 import { createModelProvider } from "../../../src/runtime/model-provider.ts"
+import { prepareModelRequestPlan } from "../../../src/runtime/model-request-plan.ts"
 import { createProviderRegistry } from "../../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../../src/runtime/session-configuration.ts"
 import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../../src/runtime/tools/spec-plan.ts"
 import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
+import { pngImageBase64 } from "../../fixtures/images.ts"
 
 describe("Step tool planning", () => {
   it.each([
@@ -404,7 +404,7 @@ describe("Step tool planning", () => {
         info: {
           id: provider,
           wireApi,
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models,
         stream: async function* () {},

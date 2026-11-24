@@ -1,6 +1,4 @@
 import OpenAI from "openai"
-import { createModelProvider } from "../../src/runtime/model-provider.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 import { describe, expect, it, vi } from "vitest"
 import type { CodexAuthProvider } from "../../src/runtime/codex-credentials.ts"
 import { createCodexProvider } from "../../src/runtime/codex-provider.ts"
@@ -10,7 +8,9 @@ import {
   type ModelStreamEvent,
   type StreamFn,
 } from "../../src/runtime/model.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import type { OpenAIProviderOptions } from "../../src/runtime/openai-provider.ts"
+import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 
 describe("Codex provider auth recovery", () => {
   it("refreshes once after a pre-output 401 and hides the failed attempt", async () => {
@@ -257,7 +257,7 @@ it("replays the first Codex routing token within a turn and isolates concurrent 
     info: {
       id: "codex",
       wireApi: "openai_responses",
-      capabilities: { remoteCompaction: false },
+      capabilities: {},
       retry: { maxAttempts: 1 },
     },
     createTurnStream: () =>

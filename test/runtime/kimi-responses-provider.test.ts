@@ -531,7 +531,7 @@ describe("Kimi Responses profile", () => {
     },
     {
       name: "remote compaction",
-      overrides: { compaction: "responses_compact" },
+      overrides: { compaction: "provider" },
       message: "remote compaction",
     },
     {

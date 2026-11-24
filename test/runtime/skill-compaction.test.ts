@@ -13,11 +13,12 @@ import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { opaqueCheckpoint } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 it.each([
   "local",
-  "codex_remote",
+  "provider",
 ] as const)("%s compaction summarizes a loaded skill while preserving the user's request through reload", async (mode) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-skill-compaction-"))
   const skillDir = join(root, ".agents", "skills", "review")
@@ -38,19 +39,16 @@ it.each([
         type: "response",
         response: {
           stopReason: ModelStopReason.EndTurn,
-          content:
-            mode === "local"
-              ? [{ type: "text", text: "Parser review checkpoint." }]
-              : [
-                  {
-                    type: "compaction",
-                    provider: "faux",
-                    model: "scripted",
-                    scope: "test",
-                    id: "checkpoint",
-                    encryptedContent: "opaque",
-                  },
-                ],
+          ...(mode === "local"
+            ? { content: [{ type: "text", text: "Parser review checkpoint." }] }
+            : {
+                content: [],
+                checkpoint: opaqueCheckpoint(
+                  { provider: "faux", model: "scripted", scope: "test" },
+                  "opaque",
+                  "checkpoint",
+                ),
+              }),
           providerResponseId: "compacted_response",
         },
       }
@@ -71,9 +69,16 @@ it.each([
     faux: createModelProvider({
       info: {
         id: "faux",
-        wireApi: "unknown",
+        wireApi: "openai_responses",
         capabilities: {
-          remoteCompaction: mode === "codex_remote" ? "codex_remote" : false,
+          ...(mode === "provider"
+            ? {
+                compactionStrategy: {
+                  replacement: "checkpoint_only" as const,
+                  maxAttempts: 3,
+                },
+              }
+            : {}),
         },
         retry: { maxAttempts: 1 },
       },

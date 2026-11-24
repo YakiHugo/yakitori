@@ -17,6 +17,7 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import { handleServerControlRequest } from "../../src/server/server-process.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { requireStoredAssetSource } from "../support/asset-source.ts"
@@ -561,17 +562,17 @@ describe("structured context and ephemeral forks", () => {
         (message) => message.role === "user" && message.context === undefined,
       )
       .at(-1)
-    expect(user?.content.map((block) => block.type)).toEqual([
+    expect(messageContent(user)?.map((block) => block.type)).toEqual([
       "text",
       "image",
       "image",
       "text",
     ])
-    expect(user?.content[0]).toMatchObject({
+    expect(messageContent(user)?.[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining("report.pdf"),
     })
-    expect(user?.content.at(-1)).toEqual({
+    expect(messageContent(user)?.at(-1)).toEqual({
       type: "text",
       text: "before PDF[Document 1]between media[Image 2]after image",
     })
@@ -1078,7 +1079,7 @@ describe("structured context and ephemeral forks", () => {
       ],
     })
     expect(requestUser).not.toHaveProperty("contextAttachments")
-    const hydrated = requestUser?.content.at(-1)
+    const hydrated = messageContent(requestUser)?.at(-1)
     if (hydrated?.type !== "text") throw new Error("Missing input context")
     const sections = hydrated.text.split("\n\n")
     expect(sections[0]).toContain("User feedback")

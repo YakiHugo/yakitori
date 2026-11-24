@@ -15,6 +15,7 @@ import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { opaqueCheckpoint } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 const cleanups: (() => Promise<void>)[] = []
@@ -92,21 +93,17 @@ describe("pre-sampling model switches", () => {
     let samples = 0
     const stream: StreamFn = async function* (request) {
       requests.push(request)
-      if (request.compaction === "codex_remote") {
+      if (request.compaction === "provider") {
         yield {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
             providerResponseId: "native_response",
-            content: [
-              {
-                type: "compaction",
-                provider: "work",
-                model: "model-a",
-                scope: "work:account",
-                encryptedContent: "opaque checkpoint",
-              },
-            ],
+            content: [],
+            checkpoint: opaqueCheckpoint(
+              { provider: "work", model: "model-a", scope: "work:account" },
+              "opaque checkpoint",
+            ),
           },
         }
         return
@@ -158,7 +155,7 @@ describe("pre-sampling model switches", () => {
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "sample 2" })
     expect(
-      requests.filter((request) => request.compaction === "codex_remote"),
+      requests.filter((request) => request.compaction === "provider"),
     ).toHaveLength(1)
     const provider = removed === "model" ? "work" : "other"
     await harness.registration.replace({
@@ -195,21 +192,17 @@ describe("pre-sampling model switches", () => {
     let samples = 0
     const stream: StreamFn = async function* (request) {
       requests.push(request)
-      if (request.compaction === "codex_remote") {
+      if (request.compaction === "provider") {
         yield {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
             providerResponseId: "native_response",
-            content: [
-              {
-                type: "compaction",
-                provider: "work",
-                model: "model-a",
-                scope: "work:account",
-                encryptedContent: "opaque checkpoint",
-              },
-            ],
+            content: [],
+            checkpoint: opaqueCheckpoint(
+              { provider: "work", model: "model-a", scope: "work:account" },
+              "opaque checkpoint",
+            ),
           },
         }
         return
@@ -303,21 +296,17 @@ describe("pre-sampling model switches", () => {
     const stream: StreamFn = async function* (request) {
       validateModelHistoryScope(request, "openai_responses")
       requests.push(request)
-      if (request.compaction === "codex_remote") {
+      if (request.compaction === "provider") {
         yield {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
             providerResponseId: "native_response",
-            content: [
-              {
-                type: "compaction",
-                provider: "work",
-                model: "model-a",
-                scope: "work:account",
-                encryptedContent: "opaque checkpoint",
-              },
-            ],
+            content: [],
+            checkpoint: opaqueCheckpoint(
+              { provider: "work", model: "model-a", scope: "work:account" },
+              "opaque checkpoint",
+            ),
           },
         }
         return
@@ -365,7 +354,7 @@ describe("pre-sampling model switches", () => {
         .toEqual({ completed: "done model-a" })
     }
     expect(
-      requests.filter((request) => request.compaction === "codex_remote"),
+      requests.filter((request) => request.compaction === "provider"),
     ).toHaveLength(1)
     await harness.registration.replace({
       work: harness.provider("work", [
@@ -387,7 +376,7 @@ describe("pre-sampling model switches", () => {
         .filter((request) => request.compaction !== undefined)
         .map((request) => [request.target.model, request.compaction]),
     ).toEqual([
-      ["model-a", "codex_remote"],
+      ["model-a", "provider"],
       ["model-a", "local"],
     ])
     const final = requests.at(-1)
@@ -866,7 +855,14 @@ async function setupConfigured(stream: StreamFn, remoteCompaction = false) {
           ? "openai_responses"
           : "openai_chat_completions",
         capabilities: {
-          remoteCompaction: remoteCompaction ? "codex_remote" : false,
+          ...(remoteCompaction
+            ? {
+                compactionStrategy: {
+                  replacement: "checkpoint_only" as const,
+                  maxAttempts: 3,
+                },
+              }
+            : {}),
         },
         retry: { maxAttempts: 1 },
       },
@@ -912,21 +908,21 @@ function recordingStream(requests: ModelRequest[], usage: number): StreamFn {
       }
       return
     }
-    if (request.compaction === "codex_remote") {
+    if (request.compaction === "provider") {
       yield {
         type: "response",
         response: {
           stopReason: ModelStopReason.EndTurn,
           providerResponseId: "compaction_response",
-          content: [
+          content: [],
+          checkpoint: opaqueCheckpoint(
             {
-              type: "compaction",
               provider: "codex",
               model: request.target.model,
               scope: "codex:account",
-              encryptedContent: "checkpoint",
             },
-          ],
+            "checkpoint",
+          ),
         },
       }
       return
@@ -958,11 +954,19 @@ async function setup(fixtures: Record<string, ModelFixture>, stream: StreamFn) {
               id: provider,
               wireApi: "openai_responses",
               capabilities: {
-                remoteCompaction: provider === "codex" ? "codex_remote" : false,
+                ...(provider === "codex"
+                  ? {
+                      compactionStrategy: {
+                        replacement: "checkpoint_only" as const,
+                        maxAttempts: 3,
+                      },
+                    }
+                  : {}),
               },
               retry: { maxAttempts: 1 },
             },
             stream,
+            continuationScope: `${provider}:account`,
             models: {
               ...base,
               capture() {

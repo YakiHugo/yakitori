@@ -76,7 +76,7 @@ it.each([
       },
     ],
   },
-  { compaction: "responses_compact" as const },
+  { compaction: "provider" as const },
   {
     providerOptions: {
       provider: "faux",

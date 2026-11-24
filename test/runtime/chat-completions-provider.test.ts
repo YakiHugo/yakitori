@@ -1152,7 +1152,7 @@ describe("Chat Completions provider", () => {
             info: {
               id: "custom_1",
               wireApi: "openai_chat_completions",
-              capabilities: { remoteCompaction: false },
+              capabilities: {},
             },
             models: createConfiguredModelsManager({
               provider: "custom_1",
@@ -1365,7 +1365,7 @@ describe("Chat Completions provider", () => {
                       id: "custom_1",
                       ...(flavor === "minimax" ? { serviceId: "minimax" } : {}),
                       wireApi: "openai_chat_completions",
-                      capabilities: { remoteCompaction: false },
+                      capabilities: {},
                     },
                     models: createConfiguredModelsManager({
                       provider: "custom_1",
@@ -1781,7 +1781,7 @@ describe("Chat Completions provider", () => {
         expect(
           (
             await collect(
-              provider(baseURL)(request({ compaction: "codex_remote" })),
+              provider(baseURL)(request({ compaction: "provider" })),
             )
           ).at(-1),
         ).toMatchObject({

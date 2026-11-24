@@ -110,7 +110,6 @@ it("exposes only the exact text model and a static catalog without probing crede
     chatCompletionsFlavor: "spark",
     capabilities: {
       nativePdf: false,
-      remoteCompaction: false,
       tools: { supportsCustomTools: false },
     },
   })

@@ -7,19 +7,24 @@ export function prepareGrokRequest(request: ModelRequest): ModelRequest {
   const rebuild = request.rebuildMessagesAfterOutput
   return {
     ...request,
-    messages: grokUserQueries(request.messages),
+    messages: grokUserQueries(request.messages, request.compaction === "local"),
     ...(rebuild === undefined
       ? {}
       : {
           rebuildMessagesAfterOutput: async () =>
-            grokUserQueries(await rebuild()),
+            grokUserQueries(await rebuild(), request.compaction === "local"),
         }),
   }
 }
 
-function grokUserQueries(messages: readonly ModelMessage[]): ModelMessage[] {
-  return messages.map((message) =>
-    message.role === "user" && message.context === undefined
+function grokUserQueries(
+  messages: readonly ModelMessage[],
+  hasCompactionInstruction: boolean,
+): ModelMessage[] {
+  return messages.map((message, index) =>
+    message.role === "user" &&
+    message.context === undefined &&
+    !(hasCompactionInstruction && index === messages.length - 1)
       ? {
           ...message,
           content: [

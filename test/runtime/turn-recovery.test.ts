@@ -887,7 +887,7 @@ async function fixture(stream: StreamFn, tools: RuntimeTool[]) {
       info: {
         id: "faux",
         wireApi: "unknown",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { sleep: async () => {}, random: () => 0 },
       },
       stream,

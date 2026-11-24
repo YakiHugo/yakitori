@@ -114,7 +114,9 @@ it.each([
         info: {
           id: "work",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: "responses_compact" },
+          capabilities: {
+            compactionStrategy: { replacement: "native_window" },
+          },
           retry: { maxAttempts: 1 },
         },
         models: createConfiguredModelsManager({
@@ -171,16 +173,23 @@ it.each([
     if (resumed === undefined) throw new Error("Missing restored thread")
     const restoredCheckpoint = resumed
       .snapshot()
-      .context.history.flatMap(({ item }) =>
-        item.role === "assistant"
-          ? item.content.filter((block) => block.type === "compaction")
-          : [],
-      )
+      .context.history.map(({ item }) => item)
+      .filter((item) => item.role === "compaction")
     expect(restoredCheckpoint).toMatchObject([
       {
-        provider: "work",
-        model: "model-a",
-        encryptedContent: "opaque-model-a-state",
+        mode: "opaque",
+        owner: {
+          provider: "work",
+          model: "model-a",
+          wireApi: "openai_responses",
+        },
+        native: expect.arrayContaining([
+          expect.objectContaining({
+            value: expect.objectContaining({
+              encrypted_content: "opaque-model-a-state",
+            }),
+          }),
+        ]),
       },
     ])
     await resumed.startIfIdle({

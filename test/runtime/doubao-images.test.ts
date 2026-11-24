@@ -13,6 +13,7 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -216,7 +217,7 @@ describe("direct Doubao images", () => {
         ).toBe(3000)
         expect(data).toBe(block.data)
       }
-      expect(history[0]?.content).toEqual([block])
+      expect(messageContent(history[0])).toEqual([block])
     } finally {
       await step.toolRouter.release()
       await turn.close()

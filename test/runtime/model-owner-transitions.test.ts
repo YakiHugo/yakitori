@@ -213,7 +213,7 @@ describe("Session client close transitions", () => {
       info: {
         id: "codex",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
       },
       models: createStaticModelsManager("codex"),
       startTurn() {

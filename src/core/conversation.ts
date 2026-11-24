@@ -22,17 +22,6 @@ export type ModelReasoningBlock = Readonly<{
   format?: ReasoningFormat
   providerMetadata?: JsonObject
 }>
-// Opaque history owned by one provider/account. Convert it through that owner
-// before a cross-provider handoff; dropping it would silently lose context.
-export type ModelCompactionBlock = Readonly<{
-  type: "compaction"
-  provider: string
-  model: string
-  scope: string
-  encryptedContent: string
-  id?: string
-  metadata?: JsonObject
-}>
 export type ModelToolInputFormat = Readonly<{
   type: "grammar"
   syntax: "lark" | "regex"
@@ -60,12 +49,10 @@ export type ModelToolCallBlock = Readonly<{
 export type ModelContentBlock =
   | ModelAssistantTextBlock
   | ModelReasoningBlock
-  | ModelCompactionBlock
   | ModelToolCallBlock
   | HostedToolBlock
   | ModelImageOutputBlock
 export type ModelHistoryContext =
-  | Readonly<{ type: "compaction" }>
   | Readonly<{ type: "agent_message" }>
   | Readonly<{
       type: "thread_message"
@@ -132,6 +119,23 @@ export type ModelNativeItem = Readonly<{
     | "bedrock_converse"
   value: JsonObject
 }>
+export type ModelCompactionOwner = Readonly<{
+  provider: string
+  wireApi: ModelNativeItem["wireApi"]
+  model: string
+  scope: string
+}>
+export type ModelOpaqueCheckpoint = Readonly<{
+  role: "compaction"
+  mode: "opaque"
+  owner: ModelCompactionOwner
+  estimatedTokens: number
+  native: readonly ModelNativeItem[]
+  response?: ModelResponseOrigin
+}>
+export type ModelCompactionMessage =
+  | Readonly<{ role: "compaction"; mode: "summary"; text: string }>
+  | ModelOpaqueCheckpoint
 export type FileObservation = Readonly<{
   path: string
   aliases?: readonly string[]
@@ -171,6 +175,7 @@ export type ModelMessage =
   | ModelDeveloperMessage
   | ModelAssistantMessage
   | ModelToolResultMessage
+  | ModelCompactionMessage
 
 import type { ModelImageOutputBlock } from "../protocol/conversation.ts"
 import type { HostedToolBlock } from "../protocol/hosted-tool.ts"

@@ -132,7 +132,6 @@ describe("compaction request", () => {
       ...sourceTurn().messages,
       {
         role: "user",
-        context: { type: "compaction" },
         content: [
           {
             type: "text",
@@ -152,13 +151,9 @@ describe("compaction request", () => {
     const checkpoint = {
       messages: [
         {
-          role: "user" as const,
-          content: [
-            {
-              type: "text" as const,
-              text: "<context_compacted>Goal: old checkpoint.</context_compacted>",
-            },
-          ],
+          role: "compaction" as const,
+          mode: "summary" as const,
+          text: "Goal: old checkpoint.",
         },
       ],
     }

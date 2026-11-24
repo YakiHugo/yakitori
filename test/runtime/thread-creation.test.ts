@@ -7,8 +7,8 @@ import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
 import type { ModelSelection } from "../../src/kernel/events.ts"
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
-import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createThreadCollaboration } from "../../src/runtime/thread-collaboration.ts"
@@ -139,7 +139,7 @@ describe("independent session creation", () => {
                 id: provider,
                 serviceId: `${provider}-service`,
                 wireApi: "anthropic_messages",
-                capabilities: { remoteCompaction: false },
+                capabilities: {},
               },
               models,
               stream: worker.stream,

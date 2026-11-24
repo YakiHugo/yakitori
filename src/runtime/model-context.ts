@@ -28,16 +28,7 @@ export function createCompactionReplacementHistory(input: {
         revision: fragment.revision,
       },
     })),
-    {
-      role: "user",
-      context: { type: "compaction" },
-      content: [
-        {
-          type: "text",
-          text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${input.summary}\n</context_compacted>`,
-        },
-      ],
-    },
+    { role: "compaction", mode: "summary", text: input.summary },
   ]
 }
 

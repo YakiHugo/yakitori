@@ -1,10 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest"
-import type { ModelMessage, ModelRequest } from "../../src/runtime/model.ts"
-import { prepareGrokRequest } from "../../src/runtime/grok-request.ts"
-import { createCompactionReplacementHistory } from "../../src/runtime/model-context.ts"
 import { buildCompactionRequest } from "../../src/runtime/compaction.ts"
+import { prepareGrokRequest } from "../../src/runtime/grok-request.ts"
+import type { ModelMessage, ModelRequest } from "../../src/runtime/model.ts"
+import { createCompactionReplacementHistory } from "../../src/runtime/model-context.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { pngImageBase64 } from "../fixtures/images.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -195,10 +196,14 @@ it.each([
 it("classifies a user request by provenance even when its text resembles internal context", () => {
   const userText = "<context_compacted>Quoted example</context_compacted>"
   expect(
-    prepareGrokRequest({
-      ...request,
-      messages: [{ role: "user", content: [{ type: "text", text: userText }] }],
-    }).messages[0]?.content,
+    messageContent(
+      prepareGrokRequest({
+        ...request,
+        messages: [
+          { role: "user", content: [{ type: "text", text: userText }] },
+        ],
+      }).messages[0],
+    ),
   ).toEqual([
     { type: "text", text: "<user_query>\n" },
     {
@@ -228,10 +233,9 @@ it("distinguishes compaction instructions from user queries at their producer", 
   const projected = prepareGrokRequest(compaction)
   expect(projected.messages.at(-1)).toEqual({
     role: "user",
-    context: { type: "compaction" },
     content: [{ type: "text", text: "Produce a checkpoint" }],
   })
-  expect(projected.messages[0]?.content).toEqual([
+  expect(messageContent(projected.messages[0])).toEqual([
     { type: "text", text: "<user_query>\n" },
     { type: "text", text: "Original request" },
     { type: "text", text: "\n</user_query>" },

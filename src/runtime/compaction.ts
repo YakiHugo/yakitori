@@ -92,6 +92,7 @@ export function canRetryCompactionWithCurrentModel(error: unknown): boolean {
     error.failure.kind === "stream_disconnected" ||
     (typeof status === "number" && status >= 400 && status !== 401) ||
     [
+      "history_incompatible",
       "invalid_request_error",
       "model_not_found",
       "context_length_exceeded",
@@ -161,7 +162,6 @@ export function buildCompactionRequest(input: {
       ...input.source.flatMap((group) => group.messages),
       {
         role: "user",
-        context: { type: "compaction" },
         content: [
           {
             type: "text",

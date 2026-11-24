@@ -18,11 +18,7 @@ import {
 } from "../core/user-input.ts"
 import {
   type CompletedExecutionItem,
-  type ContextCompactionCompletedItem,
   createCompactionId,
-  type JsonObject,
-  type KernelError,
-  MISSING_TOOL_RESULT_TEXT,
   type ModelMessage,
   type ModelSelection,
   type ModelTransportPolicy,
@@ -43,12 +39,13 @@ import {
   createBackgroundCompaction,
 } from "./background-compaction.ts"
 import { isPortableChatOnlyNative } from "./chat-only-native.ts"
+import { buildCompactionRequest, isContextOverflowError } from "./compaction.ts"
 import {
-  buildCompactionRequest,
-  canRetryCompactionWithCurrentModel,
-  isContextOverflowError,
-  trimRemoteCompactionToolTail,
-} from "./compaction.ts"
+  type CompactionRunInput,
+  compactLiveHistory,
+  compactModelHandoff,
+  completeCompactionItem,
+} from "./compaction-runner.ts"
 import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
@@ -73,11 +70,8 @@ import {
   type StreamFn,
 } from "./model.ts"
 import { createModelAttemptTracker } from "./model-attempt.ts"
-import {
-  createCompactionReplacementHistory,
-  retainCompactionUserMessages,
-  retainRemoteCompactionMessages,
-} from "./model-context.ts"
+import { createCompactionReplacementHistory } from "./model-context.ts"
+import { completeToolCallHistory, envelope } from "./model-history.ts"
 import { prepareModelMedia } from "./model-media.ts"
 import type { ModelClient, ModelClientSession } from "./model-provider.ts"
 import { ModelStreamCleanupError } from "./model-request.ts"
@@ -92,11 +86,9 @@ import {
 import { modelRoutingRequirements } from "./model-routing-requirements.ts"
 import { consumeModelWarmup } from "./model-warmup.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
-import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   type ApprovalPolicy,
   createTurnContext,
-  type ResolvedStepConfiguration,
   resolveModelRequestPolicy,
   SessionConfiguration,
   toolHistoryOutputBudget,
@@ -117,11 +109,7 @@ import { finalizeToolOutput } from "./tools/result-output.ts"
 import { captureStepContext, type StepContext } from "./tools/spec-plan.ts"
 import { createVisibleFileObservationsFromMessages } from "./tools/visible-file-observations.ts"
 import { waitForTurnReadiness } from "./turn-readiness.ts"
-import {
-  buildWorldState,
-  diffWorldState,
-  type WorldState,
-} from "./world-state.ts"
+import { buildWorldState, diffWorldState } from "./world-state.ts"
 
 // Follow grok-build's bounded Length salvage, enabled by default in Yakitori.
 // Ordinary ToolUse loops remain unbounded. Unlike grok's adapters, Yakitori
@@ -692,7 +680,7 @@ async function executeTurnModelLoop(
   admitInitialInput: () => Promise<boolean>,
   timing: Readonly<{ startedAt: number; admittedAt: number | undefined }>,
 ): Promise<TurnCompletion | undefined> {
-  const remoteCompaction = modelSession?.remoteCompaction ?? false
+  const compactionStrategy = modelSession?.compactionStrategy
   const wireApi = modelSession?.wireApi
   const nativePdf = modelSession?.nativePdf === true
   const metadata = input.session.executionSnapshot(input.execution).metadata
@@ -1000,6 +988,67 @@ async function executeTurnModelLoop(
         }
         latency.backgroundCompactionsDiscarded += 1
       }
+      const compactionRun: CompactionRunInput = {
+        session: input.session,
+        execution: input.execution,
+        turnId: input.input.submissionId,
+        step,
+        worldState,
+        history: compactionHistory,
+        injectWorldState: modelCalls !== 0,
+        stream,
+        strategy: compactionStrategy,
+        wireApi,
+        scope: modelSession?.continuationScope,
+        signal: input.signal,
+        rolloutAssets: input.options.rolloutAssets,
+        assetUrl: input.options.assetUrl,
+        rolloutBudget: budget,
+        hookRunner: input.options.hookRunner,
+        onHookContext: (context) =>
+          recordHookContext(
+            input.session,
+            input.execution,
+            input.input.submissionId,
+            context,
+          ),
+        async sample(request, stream, wireApi, toolPolicy) {
+          const modelStartedAt = Date.now()
+          input.session.recordRequestStartedAt(input.execution, modelStartedAt)
+          let firstTokenAt: number | undefined
+          const response = await consumeModelStream({
+            request,
+            stream,
+            wireApi,
+            toolPolicy,
+            recordModelAttempt: (attempt) =>
+              input.session.recordModelAttempt(input.execution, attempt),
+            emitWarning: (message, diagnostic) =>
+              input.session.emitWarning(input.execution, message, diagnostic),
+            onOperationalFailure: input.options.onOperationalFailure,
+            onRetry: () =>
+              input.session.invalidateRequestStartedAt(input.execution),
+            onFirstToken() {
+              firstTokenAt ??= Date.now()
+            },
+            async onUsage(usage) {
+              usages.push(usage)
+              const aggregate = aggregateTokenUsage(usages)
+              if (aggregate !== undefined)
+                await input.session.checkpointUsage(input.execution, aggregate)
+              budget?.recordUsage(usage)
+            },
+            setActiveStream: input.setActiveStream,
+          })
+          onCompactionModelTiming(
+            Date.now() - modelStartedAt,
+            firstTokenAt === undefined
+              ? undefined
+              : firstTokenAt - modelStartedAt,
+          )
+          return response
+        },
+      }
       if (input.input.manualCompact) {
         await input.session.recordModelContext(input.execution, {
           provider: step.target.provider,
@@ -1009,27 +1058,9 @@ async function executeTurnModelLoop(
             : { compactionHash: step.modelInfo.compactionHash }),
         })
         const compacted = await compactLiveHistory({
-          session: input.session,
-          execution: input.execution,
-          turnId: input.input.submissionId,
-          step,
-          worldState,
-          history: compactionHistory,
+          ...compactionRun,
+          injectWorldState: true,
           baseHistoryLength: beforeStep.context.history.length,
-          stream,
-          remoteCompaction,
-          wireApi,
-          signal: input.signal,
-          rolloutAssets: input.options.rolloutAssets,
-          assetUrl: input.options.assetUrl,
-          usages,
-          onModelTiming: onCompactionModelTiming,
-          rolloutBudget: budget,
-          onOperationalFailure: input.options.onOperationalFailure,
-          ...(input.options.hookRunner === undefined
-            ? {}
-            : { hookRunner: input.options.hookRunner }),
-          setActiveStream: input.setActiveStream,
           trigger: "manual",
         })
         if (!compacted)
@@ -1049,193 +1080,19 @@ async function executeTurnModelLoop(
         })
         return
       }
-      const nativeCheckpoints = beforeStep.context.history
-        .flatMap(({ item }) => (item.role === "assistant" ? item.content : []))
-        .filter((block) => block.type === "compaction")
-      const foreignCheckpoint = nativeCheckpoints.find(
-        (block) =>
-          block.provider !== step?.target.provider ||
-          block.model !== step.target.model,
-      )
-      const previousModel = beforeStep.context.previousModel
-      const sourceSelection =
-        foreignCheckpoint?.type === "compaction"
-          ? {
-              provider: foreignCheckpoint.provider,
-              model: foreignCheckpoint.model,
-            }
-          : previousModel !== undefined &&
-              (previousModel.provider === step.target.provider ||
-                input.options.modelClient?.hasProvider(
-                  previousModel.provider,
-                )) &&
-              modelCalls === 0 &&
-              compactedAtModelCall !== modelCalls
-            ? { provider: previousModel.provider, model: previousModel.model }
-            : undefined
-      const ownerUnavailable =
-        foreignCheckpoint !== undefined &&
-        !input.options.modelClient?.hasProvider(foreignCheckpoint.provider)
-      let ownerUnconfigured = false
-      if (sourceSelection !== undefined && !ownerUnavailable) {
-        const client = input.options.modelClient
-        const sourceSession =
-          sourceSelection.provider === step.target.provider
-            ? modelSession
-            : client?.startTurn(
-                sourceSelection.provider,
-                resolveModelRequestPolicy(
-                  input.context.configuration.modelTransport,
-                  sourceSelection.provider,
-                ),
-              )
-        try {
-          const sourceModels = sourceSession?.models
-          await waitForTurnReadiness(
-            Promise.resolve().then(() => sourceModels?.refresh()),
-            input.signal,
-          )
-          const {
-            modelContextWindowTokens: _contextWindowOverride,
-            ...sourceSnapshot
-          } = input.context.configuration
-          let sourceConfiguration: ResolvedStepConfiguration | undefined
-          try {
-            sourceConfiguration = SessionConfiguration.restore(
-              {
-                ...(sourceSelection.provider === step.target.provider
-                  ? input.context.configuration
-                  : sourceSnapshot),
-                defaultTarget: sourceSelection,
-              },
-              sourceModels,
-            ).resolveStep(sourceSelection, sourceModels)
-          } catch (error) {
-            if (!(error instanceof ModelNotConfiguredError)) throw error
-            if (
-              nativeCheckpoints.some(
-                (block) =>
-                  block.provider === sourceSelection.provider &&
-                  block.model === sourceSelection.model,
-              )
-            ) {
-              ownerUnconfigured = true
-            }
-            // Ordinary history is portable. A removed prior model cannot prepare
-            // a checkpoint; let the selected model's admission use its transport.
-          }
-          if (sourceConfiguration !== undefined) {
-            const oldWindow =
-              sourceConfiguration.modelCapacity?.effectiveContextWindowTokens
-            const newWindow =
-              configuration.modelCapacity?.effectiveContextWindowTokens
-            const activeTokens = admission.activeTokens
-            const hashChanged =
-              previousModel?.provider === step.target.provider &&
-              previousModel.compactionHash !== undefined &&
-              step.modelInfo.compactionHash !== undefined &&
-              previousModel.compactionHash !== step.modelInfo.compactionHash
-            // The previous model still prepares the checkpoint when the window
-            // shrinks past what it can see, or past the selected model's compact
-            // limit. Failure falls back to the selected model below.
-            const downshift =
-              (sourceSelection.model !== step.target.model ||
-                sourceSelection.provider !== step.target.provider) &&
-              oldWindow !== undefined &&
-              newWindow !== undefined &&
-              oldWindow > newWindow &&
-              (activeTokens >= newWindow ||
-                (configuration.autoCompact.scope === "total" &&
-                  configuration.autoCompact.limitTokens !== undefined &&
-                  activeTokens > configuration.autoCompact.limitTokens))
-            if (foreignCheckpoint !== undefined || hashChanged || downshift) {
-              const sourceStep = captureStepContext({
-                registry: input.toolRegistry,
-                configuration: sourceConfiguration,
-                ...(sourceSession?.wireApi === undefined
-                  ? {}
-                  : { wireApi: sourceSession.wireApi }),
-                nativePdf: sourceSession?.nativePdf === true,
-                ...(sourceSession?.serviceId === undefined
-                  ? {}
-                  : { serviceId: sourceSession.serviceId }),
-                ...(sourceSession?.toolCapabilities === undefined
-                  ? {}
-                  : { toolCapabilities: sourceSession.toolCapabilities }),
-              })
-              // The selected model is the fallback whenever this preflight uses
-              // another model, including an encrypted checkpoint it cannot read.
-              const fallbackToSelectedModel =
-                sourceSelection.provider !== step.target.provider ||
-                sourceSelection.model !== step.target.model
-              try {
-                await compactLiveHistory({
-                  session: input.session,
-                  execution: input.execution,
-                  turnId: input.input.submissionId,
-                  step: sourceStep,
-                  worldState,
-                  history: compactionHistory,
-                  injectWorldState: modelCalls !== 0,
-                  stream: sourceSession?.stream ?? stream,
-                  wireApi: sourceSession?.wireApi ?? wireApi,
-                  // A different model/account needs a portable text summary,
-                  // rather than another checkpoint encrypted for its owner.
-                  remoteCompaction:
-                    sourceSelection.provider === step.target.provider &&
-                    sourceSelection.model === step.target.model &&
-                    (sourceSession?.remoteCompaction ?? false),
-                  ...(fallbackToSelectedModel
-                    ? { fallback: { step, stream } }
-                    : {}),
-                  signal: input.signal,
-                  rolloutAssets: input.options.rolloutAssets,
-                  assetUrl: input.options.assetUrl,
-                  usages,
-                  onModelTiming: onCompactionModelTiming,
-                  rolloutBudget: budget,
-                  onOperationalFailure: input.options.onOperationalFailure,
-                  ...(input.options.hookRunner === undefined
-                    ? {}
-                    : { hookRunner: input.options.hookRunner }),
-                  setActiveStream: input.setActiveStream,
-                })
-              } finally {
-                await settleTaskResources(() => sourceStep.toolRouter.release())
-              }
-              compactedAtModelCall = modelCalls
-              continue
-            }
-          }
-        } finally {
-          if (sourceSession !== modelSession)
-            await settleTaskResources(() => sourceSession?.close())
-        }
-      }
-      if (ownerUnavailable || ownerUnconfigured) {
-        await compactLiveHistory({
-          session: input.session,
-          execution: input.execution,
-          turnId: input.input.submissionId,
-          step,
-          worldState,
-          history: historyReadableBy(compactionHistory, step.target),
-          injectWorldState: modelCalls !== 0,
-          stream,
-          remoteCompaction: false,
-          wireApi,
-          signal: input.signal,
-          rolloutAssets: input.options.rolloutAssets,
-          assetUrl: input.options.assetUrl,
-          usages,
-          onModelTiming: onCompactionModelTiming,
-          rolloutBudget: budget,
-          onOperationalFailure: input.options.onOperationalFailure,
-          ...(input.options.hookRunner === undefined
-            ? {}
-            : { hookRunner: input.options.hookRunner }),
-          setActiveStream: input.setActiveStream,
+      if (
+        await compactModelHandoff({
+          ...compactionRun,
+          client: input.options.modelClient,
+          selectedSession: modelSession,
+          configuration: input.context.configuration,
+          previousModel: beforeStep.context.previousModel,
+          checkPreviousModel:
+            modelCalls === 0 && compactedAtModelCall !== modelCalls,
+          activeTokens: admission.activeTokens,
+          registry: input.toolRegistry,
         })
+      ) {
         compactedAtModelCall = modelCalls
         continue
       }
@@ -1243,29 +1100,7 @@ async function executeTurnModelLoop(
         (admission.shouldCompact || continuationNeedsCompaction) &&
         compactedAtModelCall !== modelCalls
       ) {
-        const compacted = await compactLiveHistory({
-          session: input.session,
-          execution: input.execution,
-          turnId: input.input.submissionId,
-          step,
-          worldState,
-          history: compactionHistory,
-          injectWorldState: modelCalls !== 0,
-          stream,
-          remoteCompaction,
-          wireApi,
-          signal: input.signal,
-          rolloutAssets: input.options.rolloutAssets,
-          assetUrl: input.options.assetUrl,
-          usages,
-          onModelTiming: onCompactionModelTiming,
-          rolloutBudget: budget,
-          onOperationalFailure: input.options.onOperationalFailure,
-          ...(input.options.hookRunner === undefined
-            ? {}
-            : { hookRunner: input.options.hookRunner }),
-          setActiveStream: input.setActiveStream,
-        })
+        const compacted = await compactLiveHistory(compactionRun)
         if (compacted) {
           compactedAtModelCall = modelCalls
           continuationNeedsCompaction = false
@@ -2015,7 +1850,7 @@ async function executeTurnModelLoop(
       if (
         calls.length > 0 &&
         pendingToolBatches > 0 &&
-        !remoteCompaction &&
+        compactionStrategy === undefined &&
         input.options.hookRunner === undefined &&
         !lengthStopped &&
         canCompactPrefix(stablePrefix) &&
@@ -2462,13 +2297,11 @@ async function consumeModelStream(input: {
       ) {
         const output = event.type === "response" ? event.response : event
         if (
-          output.content.some(
-            (block) =>
-              block.type === "tool_call" || block.type === "compaction",
-          ) ||
+          output.content.some((block) => block.type === "tool_call") ||
           !isPortableChatOnlyNative(output.content, output.native) ||
           (event.type === "response" &&
-            (event.response.stopReason === "tool_use" ||
+            (event.response.checkpoint !== undefined ||
+              event.response.stopReason === "tool_use" ||
               event.response.incompleteToolCalls === true))
         ) {
           throw new ModelFailureError({
@@ -2566,7 +2399,7 @@ async function consumeModelStream(input: {
         continue
       }
       if (event.type !== "response") {
-        if (input.request.compaction === "codex_remote") continue
+        if (input.request.compaction === "provider") continue
         input.onFirstToken?.()
         const kind =
           event.type === "reasoning_delta" ? "reasoning" : "assistant"
@@ -2608,6 +2441,13 @@ async function consumeModelStream(input: {
       if (terminal !== undefined) {
         throw new Error("Model stream emitted more than one terminal response.")
       }
+      if (
+        event.response.checkpoint !== undefined &&
+        input.request.compaction === undefined
+      )
+        throw new Error(
+          "Interactive sampling returned an unexpected opaque checkpoint.",
+        )
       terminal = event.response
       input.onFirstToken?.()
       if (event.response.usage !== undefined)
@@ -2698,393 +2538,6 @@ function assessModelRequest(input: {
     shouldCompact:
       (autoCompactLimit !== undefined && scopeTokens >= autoCompactLimit) ||
       (fullContextLimit !== undefined && requestTokens >= fullContextLimit),
-  }
-}
-
-async function compactLiveHistory(
-  input: Readonly<{
-    trigger?: "manual" | "auto"
-    wireApi?: ModelWireApi | undefined
-    remoteCompaction?: ModelClientSession["remoteCompaction"]
-    fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
-    injectWorldState?: boolean
-    session: Session
-    execution: ExecutionContext
-    turnId: string
-    step: StepContext
-    worldState: WorldState
-    history: readonly ResponseItemEnvelope[]
-    baseHistoryLength?: number
-    stream: StreamFn
-    signal: AbortSignal
-    rolloutAssets: RolloutAssets | undefined
-    assetUrl?: TurnLoopOptions["assetUrl"]
-    usages: ModelUsage[]
-    onModelTiming: (
-      durationMs: number,
-      timeToFirstTokenMs: number | undefined,
-    ) => void
-    rolloutBudget: RolloutBudget | undefined
-    hookRunner?: HookRunner
-    onOperationalFailure: TurnLoopOperationalFailureReporter | undefined
-    setActiveStream: (
-      stream: AsyncIterator<ModelStreamEvent> | undefined,
-    ) => void
-  }>,
-): Promise<boolean> {
-  let compactionStep = input.step
-  let compactionStream = input.stream
-  let usedFallback = false
-  let fallbackSourceError: unknown
-  let source = input.history.map((item) => item.item)
-  if (source.length === 0) return false
-  if (input.remoteCompaction) {
-    source = trimRemoteCompactionToolTail(
-      source,
-      compactionStep.configuration.baseInstructions.text,
-      compactionStep.configuration.modelCapacity?.effectiveContextWindowTokens,
-    )
-  }
-
-  const preHook = await input.hookRunner?.run({
-    event: HookEvent.PreCompact,
-    matcher: input.remoteCompaction ? "remote" : "local",
-    payload: {
-      session_id: input.session.executionSnapshot(input.execution).metadata.id,
-      turn_id: input.turnId,
-      trigger: input.trigger ?? "auto",
-      custom_instructions: null,
-    },
-    cwd: input.step.configuration.workspaceRoot,
-    signal: input.signal,
-  })
-  if (preHook?.continue === false) {
-    throw new Error(preHook.reason ?? "PreCompact hook blocked compaction.")
-  }
-  await recordHookContext(
-    input.session,
-    input.execution,
-    input.turnId,
-    preHook?.additionalContext ?? [],
-  )
-
-  const compactionItem: StartedExecutionItem = {
-    type: "context_compaction",
-    itemId: createCompactionId(),
-  }
-  input.session.emitItemStarted(input.execution, compactionItem)
-  let completed = false
-
-  try {
-    const compact = async (request: ModelRequest) => {
-      const modelStartedAt = Date.now()
-      input.session.recordRequestStartedAt(input.execution, modelStartedAt)
-      let firstTokenAt: number | undefined
-      const response = await consumeModelStream({
-        request,
-        stream: compactionStream,
-        toolPolicy: compactionStep.modelInfo.toolPolicy,
-        recordModelAttempt: (attempt) =>
-          input.session.recordModelAttempt(input.execution, attempt),
-        wireApi: input.wireApi,
-        emitWarning: (message, diagnostic) =>
-          input.session.emitWarning(input.execution, message, diagnostic),
-        onOperationalFailure: input.onOperationalFailure,
-        onRetry: () =>
-          input.session.invalidateRequestStartedAt(input.execution),
-        onFirstToken() {
-          firstTokenAt ??= Date.now()
-        },
-        async onUsage(usage) {
-          input.usages.push(usage)
-          const aggregate = aggregateTokenUsage(input.usages)
-          if (aggregate !== undefined)
-            await input.session.checkpointUsage(input.execution, aggregate)
-          input.rolloutBudget?.recordUsage(usage)
-        },
-        setActiveStream: input.setActiveStream,
-      })
-      input.onModelTiming(
-        Date.now() - modelStartedAt,
-        firstTokenAt === undefined ? undefined : firstTokenAt - modelStartedAt,
-      )
-      if (response.stopReason === ModelStopReason.Length) {
-        // Provider-owned streams retry truncated compaction before returning.
-        // Keep the replacement guard for directly injected ModelClients too.
-        throw new Error("Compaction was truncated by a generation limit.")
-      }
-      if (
-        response.stopReason !== ModelStopReason.EndTurn ||
-        response.incompleteToolCalls ||
-        response.content.some((block) => block.type === "tool_call")
-      ) {
-        throw new Error("Compaction did not produce a complete summary.")
-      }
-      const nativeItems = response.content.filter(
-        (block) => block.type === "compaction",
-      )
-      if (
-        input.remoteCompaction &&
-        (nativeItems.length !== 1 || response.providerResponseId === undefined)
-      ) {
-        throw new Error(
-          "Remote compaction requires exactly one native compaction item and a completed response id.",
-        )
-      }
-      const summary = input.remoteCompaction
-        ? ""
-        : response.content
-            .flatMap((block) => (block.type === "text" ? [block.text] : []))
-            .join("")
-            .trim()
-      if (!input.remoteCompaction && summary.length === 0) {
-        throw new Error("Compaction produced an empty checkpoint.")
-      }
-      const usage =
-        response.usage === undefined
-          ? undefined
-          : aggregateTokenUsage([response.usage])
-      return {
-        summary,
-        native: input.remoteCompaction ? nativeItems[0] : undefined,
-        nativeItems: response.native,
-        origin: response.origin,
-        ...(usage === undefined ? {} : { usage }),
-      }
-    }
-    let result: Awaited<ReturnType<typeof compact>> | undefined
-    while (result === undefined) {
-      const messages = await prepareModelMedia(
-        completeToolCallHistory(source),
-        {
-          target: compactionStep.target,
-          imageCapabilities: compactionStep.modelInfo,
-          deferImagePreparation: compactionStep.deferImagePreparation,
-          rolloutAssets: input.rolloutAssets,
-          documentReading: compactionStep.documentReading,
-          userDocumentReading: compactionStep.userDocumentReading,
-          signal: input.signal,
-        },
-      )
-      try {
-        result = await compact(
-          input.remoteCompaction
-            ? {
-                compaction: input.remoteCompaction,
-                assets: {
-                  read: (source, signal) =>
-                    readAssetSource(source, input.rolloutAssets, signal),
-                  ...(input.assetUrl === undefined
-                    ? {}
-                    : { url: input.assetUrl }),
-                },
-                target: compactionStep.target,
-                cacheKey: compactionStep.configuration.promptCacheKey,
-                system: [compactionStep.configuration.baseInstructions],
-                messages,
-                tools: compactionStep.toolRouter.modelDefinitions,
-                toolWireProtocol: compactionStep.toolWireProtocol,
-                signal: input.signal,
-              }
-            : buildCompactionRequest({
-                assets: {
-                  read: (source, signal) =>
-                    readAssetSource(source, input.rolloutAssets, signal),
-                  ...(input.assetUrl === undefined
-                    ? {}
-                    : { url: input.assetUrl }),
-                },
-                source: [{ messages }],
-                target: compactionStep.target,
-                baseInstructions: compactionStep.configuration.baseInstructions,
-                cacheKey: compactionStep.configuration.promptCacheKey,
-                ...(compactionStep.configuration.maxOutputTokens === undefined
-                  ? {}
-                  : {
-                      maxOutputTokens:
-                        compactionStep.configuration.maxOutputTokens,
-                    }),
-                signal: input.signal,
-              }),
-        )
-      } catch (error) {
-        if (input.signal.aborted || isAbortError(error)) throw error
-        if (
-          !usedFallback &&
-          input.fallback !== undefined &&
-          canRetryCompactionWithCurrentModel(error)
-        ) {
-          usedFallback = true
-          fallbackSourceError = error
-          compactionStep = input.fallback.step
-          compactionStream = input.fallback.stream
-          const readable = historyReadableBy(
-            input.history,
-            compactionStep.target,
-          ).map(({ item }) => item)
-          source = input.remoteCompaction
-            ? trimRemoteCompactionToolTail(
-                readable,
-                compactionStep.configuration.baseInstructions.text,
-                compactionStep.configuration.modelCapacity
-                  ?.effectiveContextWindowTokens,
-              )
-            : readable
-          continue
-        }
-        // A selected-model fallback still trims an over-long portable history.
-        // Any other fallback failure keeps the source model's error.
-        if (
-          usedFallback &&
-          fallbackSourceError !== undefined &&
-          (input.remoteCompaction || !isContextOverflowError(error))
-        ) {
-          throw fallbackSourceError
-        }
-        if (
-          input.remoteCompaction ||
-          !isContextOverflowError(error) ||
-          source.length <= 1
-        )
-          throw error
-        // Codex retries local compaction by dropping the oldest input item.
-        // The live history stays intact until a complete checkpoint is ready.
-        source = source.slice(1)
-      }
-    }
-    const fullWorldState = diffWorldState(undefined, input.worldState)
-    if (fullWorldState === undefined) {
-      throw new Error(
-        "World-state snapshot could not be rendered for compaction.",
-      )
-    }
-    const generated = createCompactionReplacementHistory({
-      summary: result.summary,
-      ...(input.injectWorldState === false
-        ? {}
-        : { worldStateFragments: fullWorldState.fragments }),
-    }).map((message) => envelope(input.turnId, message))
-    const retained =
-      input.remoteCompaction === "responses_compact"
-        ? []
-        : input.remoteCompaction
-          ? retainRemoteCompactionMessages(input.history)
-          : retainCompactionUserMessages(input.history)
-    // Codex keeps its checkpoint last. The public compact API instead supplies
-    // an entire canonical window, followed by fresh harness context.
-    const summaryItem =
-      result.native === undefined
-        ? generated.at(-1)
-        : envelope(input.turnId, {
-            role: "assistant",
-            content: [result.native],
-            ...(result.nativeItems === undefined
-              ? {}
-              : { native: result.nativeItems }),
-            ...(result.origin === undefined ? {} : { response: result.origin }),
-          })
-    if (summaryItem === undefined)
-      throw new Error("Missing compaction checkpoint.")
-    const replacement = [
-      ...(input.remoteCompaction === "responses_compact"
-        ? [summaryItem, ...generated.slice(0, -1)]
-        : [
-            ...retained.slice(0, -1),
-            ...generated.slice(0, -1),
-            ...retained.slice(-1),
-            summaryItem,
-          ]),
-      ...(omittedEncryptedCheckpoint(input.history, compactionStep.target)
-        ? [
-            envelope(input.turnId, {
-              role: "developer",
-              content: [{ type: "text", text: OMITTED_ENCRYPTED_CONTEXT }],
-            }),
-          ]
-        : []),
-    ]
-    await input.session.checkpointHistory(input.execution, {
-      replacement,
-      summary: result.summary,
-      baseHistoryLength: input.baseHistoryLength ?? input.history.length,
-      ...(input.injectWorldState === false
-        ? {}
-        : {
-            worldState: {
-              state: fullWorldState.state,
-              snapshot: fullWorldState.snapshot,
-            },
-          }),
-    })
-    const estimatedContextTokens = estimateModelRequestBudget(
-      {
-        target: compactionStep.target,
-        system: [compactionStep.configuration.baseInstructions],
-        messages: input.session
-          .executionSnapshot(input.execution)
-          .context.history.map((item) => item.item),
-        tools: [],
-        toolWireProtocol: "eager",
-      },
-      compactionStep.imageTokenEstimator,
-      "history",
-    ).estimatedInputTokens
-    await input.session.recordContextTokens(input.execution, {
-      activeContextTokens: estimatedContextTokens,
-      inputTokens: estimatedContextTokens,
-      estimatedPrefill: true,
-      historyAnchorItemId:
-        input.session.executionSnapshot(input.execution).context.history.at(-1)
-          ?.id ?? input.turnId,
-      provider: compactionStep.target.provider,
-      model: compactionStep.target.model,
-      ...(compactionStep.configuration.modelCapacity
-        ?.effectiveContextWindowTokens === undefined
-        ? {}
-        : {
-            capacityTokens:
-              compactionStep.configuration.modelCapacity
-                .effectiveContextWindowTokens,
-          }),
-    })
-    await input.session.recordItemCompletions(input.execution, [
-      completeCompactionItem(compactionItem, "completed"),
-    ])
-    completed = true
-    const postHook = await input.hookRunner?.run({
-      event: HookEvent.PostCompact,
-      matcher: input.remoteCompaction ? "remote" : "local",
-      payload: {
-        session_id: input.session.executionSnapshot(input.execution).metadata
-          .id,
-        turn_id: input.turnId,
-        trigger: input.trigger ?? "auto",
-      },
-      cwd: input.step.configuration.workspaceRoot,
-      signal: input.signal,
-    })
-    if (postHook?.continue === false) {
-      throw new Error(postHook.reason ?? "PostCompact hook blocked the Turn.")
-    }
-    await recordHookContext(
-      input.session,
-      input.execution,
-      input.turnId,
-      postHook?.additionalContext ?? [],
-    )
-    input.rolloutBudget?.rearm(
-      input.session.executionSnapshot(input.execution).metadata.id,
-    )
-    return true
-  } catch (error) {
-    if (error instanceof TaskCleanupError) throw error
-    if (input.signal.aborted || isAbortError(error)) throw abortError()
-    if (!completed) {
-      await input.session.recordItemCompletions(input.execution, [
-        completeCompactionItem(compactionItem, "failed", error),
-      ])
-    }
-    throw error
   }
 }
 
@@ -3181,25 +2634,6 @@ function completedResponseItems(
   )
 }
 
-function completeCompactionItem(
-  started: Extract<
-    StartedExecutionItem,
-    { readonly type: "context_compaction" }
-  >,
-  status: ContextCompactionCompletedItem["status"],
-  error?: unknown,
-): ContextCompactionCompletedItem {
-  const kernelError: KernelError | undefined =
-    error === undefined
-      ? undefined
-      : { message: error instanceof Error ? error.message : String(error) }
-  return {
-    ...started,
-    status,
-    ...(kernelError === undefined ? {} : { error: kernelError }),
-  }
-}
-
 async function recordSteering(
   input: Parameters<typeof executeTurn>[0],
   steering: readonly TurnInput[],
@@ -3271,21 +2705,6 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
   }
 }
 
-function envelope(
-  turnId: string,
-  item: ModelMessage,
-  providerMetadata?: JsonObject,
-  id = `message_${globalThis.crypto.randomUUID()}`,
-): ResponseItemEnvelope {
-  return {
-    id,
-    turnId,
-    createdAt: new Date().toISOString(),
-    item,
-    ...(providerMetadata === undefined ? {} : { providerMetadata }),
-  }
-}
-
 function aggregateTokenUsage(
   usages: readonly ModelUsage[],
 ): TokenUsage | undefined {
@@ -3306,138 +2725,6 @@ function aggregateTokenUsage(
     }),
     { inputTokens: 0, outputTokens: 0 },
   )
-}
-
-function completeToolCallHistory(
-  messages: readonly ModelMessage[],
-): readonly ModelMessage[] {
-  const completed: ModelMessage[] = []
-  let pending: Array<
-    Readonly<{ id: string; toolKind: ModelToolCallBlock["toolKind"] }>
-  > = []
-  const flushMissing = () => {
-    completed.push(
-      ...pending.map(({ id: toolCallId, toolKind }) => ({
-        role: "tool" as const,
-        toolCallId,
-        content: [{ type: "text" as const, text: MISSING_TOOL_RESULT_TEXT }],
-        isError: true,
-        ...(toolKind === "tool_search" ? { toolSearch: { tools: [] } } : {}),
-      })),
-    )
-    pending = []
-  }
-  for (const message of messages) {
-    if (
-      message.role === "tool" &&
-      pending.some(({ id }) => id === message.toolCallId)
-    ) {
-      completed.push(message)
-      pending = pending.filter(({ id }) => id !== message.toolCallId)
-      continue
-    }
-    if (message.role === "tool") continue
-    if (message.role !== "assistant" && pending.length > 0) flushMissing()
-    completed.push(message)
-    if (message.role === "assistant") {
-      pending.push(
-        ...message.content.flatMap((block) =>
-          block.type === "tool_call"
-            ? [{ id: block.id, toolKind: block.toolKind }]
-            : [],
-        ),
-      )
-    }
-  }
-  if (pending.length > 0) flushMissing()
-  return completed
-}
-
-const OMITTED_ENCRYPTED_CONTEXT =
-  "<filtered_context>\nSome earlier context was filtered out because it was stored in an encrypted checkpoint that this model cannot read.\n</filtered_context>"
-
-function omittedEncryptedCheckpoint(
-  history: readonly ResponseItemEnvelope[],
-  target: { provider: string; model: string },
-): boolean {
-  return history.some((entry) => {
-    const message = entry.item
-    if (
-      message.role === "developer" &&
-      message.content.some(
-        (block) =>
-          block.type === "text" && block.text === OMITTED_ENCRYPTED_CONTEXT,
-      )
-    ) {
-      return true
-    }
-    if (message.role !== "assistant") return false
-    return (
-      message.content.some(
-        (block) =>
-          block.type === "compaction" &&
-          (block.provider !== target.provider || block.model !== target.model),
-      ) ||
-      (message.native?.some(
-        (item) =>
-          item.value.type === "compaction" &&
-          (item.provider !== target.provider || item.model !== target.model),
-      ) ??
-        false)
-    )
-  })
-}
-
-function historyReadableBy(
-  history: readonly ResponseItemEnvelope[],
-  target: { provider: string; model: string },
-): ResponseItemEnvelope[] {
-  let omitted = false
-  const readable = history.flatMap((envelope) => {
-    const message = envelope.item
-    if (message.role !== "assistant") return [envelope]
-    const content = message.content.filter((block) => {
-      const foreign =
-        block.type === "compaction" &&
-        (block.provider !== target.provider || block.model !== target.model)
-      if (foreign) omitted = true
-      return !foreign
-    })
-    const native = message.native?.filter((item) => {
-      const foreign =
-        item.value.type === "compaction" &&
-        (item.provider !== target.provider || item.model !== target.model)
-      if (foreign) omitted = true
-      return !foreign
-    })
-    if (
-      content.length === message.content.length &&
-      native?.length === message.native?.length
-    ) {
-      return [envelope]
-    }
-    if (content.length === 0 && (native === undefined || native.length === 0)) {
-      return []
-    }
-    return [
-      {
-        ...envelope,
-        item: {
-          ...message,
-          content,
-          ...(message.native === undefined ? {} : { native: native ?? [] }),
-        },
-      },
-    ]
-  })
-  if (!omitted) return readable
-  return [
-    ...readable,
-    envelope(history.at(-1)?.turnId ?? "turn", {
-      role: "developer",
-      content: [{ type: "text", text: OMITTED_ENCRYPTED_CONTEXT }],
-    }),
-  ]
 }
 
 function previousModelId(

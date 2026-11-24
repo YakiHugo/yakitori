@@ -4,6 +4,7 @@ import {
   canCompactPrefix,
   createBackgroundCompaction,
 } from "../../src/runtime/background-compaction.ts"
+import { opaqueCheckpoint } from "../fixtures/model-history.ts"
 
 const entry = (
   id: string,
@@ -34,18 +35,13 @@ describe("background checkpoint boundary", () => {
       canCompactPrefix([
         call,
         result,
-        entry("opaque", {
-          role: "assistant",
-          content: [
-            {
-              type: "compaction",
-              provider: "codex",
-              model: "model",
-              scope: "account",
-              encryptedContent: "secret",
-            },
-          ],
-        }),
+        entry(
+          "opaque",
+          opaqueCheckpoint(
+            { provider: "codex", model: "model", scope: "account" },
+            "secret",
+          ),
+        ),
       ]),
     ).toBe(false)
   })

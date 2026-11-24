@@ -200,7 +200,7 @@ describe("application composition", () => {
                   info: {
                     id: "custom",
                     wireApi: "openai_chat_completions",
-                    capabilities: { remoteCompaction: false },
+                    capabilities: {},
                     retry: { maxAttempts: 1 },
                   },
                   models: createConfiguredModelsManager({
@@ -271,7 +271,7 @@ describe("application composition", () => {
                 info: {
                   id: "custom",
                   wireApi: "unknown",
-                  capabilities: { remoteCompaction: false },
+                  capabilities: {},
                 },
                 stream: async function* () {},
                 close() {
@@ -1525,7 +1525,7 @@ describe("application composition", () => {
                       info: {
                         id,
                         wireApi: "openai_chat_completions",
-                        capabilities: { remoteCompaction: false },
+                        capabilities: {},
                       },
                       models: createConfiguredModelsManager({
                         provider: id,
@@ -1651,7 +1651,7 @@ describe("application composition", () => {
                 info: {
                   id: "custom",
                   wireApi: "openai_chat_completions",
-                  capabilities: { remoteCompaction: false },
+                  capabilities: {},
                 },
                 models: createConfiguredModelsManager({
                   provider: "custom",

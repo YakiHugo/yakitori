@@ -1300,10 +1300,6 @@ export function toChatCompletionsMessages(
       const reasoning: string[] = []
       let text = ""
       for (const block of portableModelContent(message)) {
-        if (block.type === "compaction")
-          throw new ChatCompletionsProtocolError(
-            "Opaque provider compaction cannot be sent through Chat Completions.",
-          )
         if (block.type === "text") text += block.text
         if (block.type === "reasoning") {
           const metadata = chatContinuationMetadata(

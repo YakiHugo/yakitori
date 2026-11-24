@@ -8,6 +8,7 @@ import type {
   ModelRequest,
   ModelStreamEvent,
 } from "../../src/runtime/model.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 const endpoint = "https://generativelanguage.googleapis.com/v1beta"
 const limit = 20_000_000
@@ -328,7 +329,7 @@ describe("native GenerateContent image preparation", () => {
       "20 MB local request budget",
     )
     expect(createHash("sha256").update(source).digest("hex")).toBe(originalHash)
-    expect(input.messages[0]?.content).toHaveLength(3)
+    expect(messageContent(input.messages[0])).toHaveLength(3)
   })
 
   it("accepts exactly 3600 small image occurrences", async () => {

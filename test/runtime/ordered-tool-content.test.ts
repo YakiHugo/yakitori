@@ -7,9 +7,10 @@ import {
 import { toAnthropicMessages } from "../../src/runtime/anthropic-provider.ts"
 import { toChatCompletionsMessages } from "../../src/runtime/chat-completions-provider.ts"
 import { toGeminiContents } from "../../src/runtime/gemini-provider.ts"
-import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
 import { adaptImagesForModel } from "../../src/runtime/model-images.ts"
+import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
 import { finalizeToolContent } from "../../src/runtime/tools/result-output.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 const image = {
   type: "image" as const,
@@ -179,7 +180,7 @@ describe("ordered tool content", () => {
       { inputModalities: ["text"], imageDetailModes: [] },
     )
     expect(projected.omittedImageCount).toBe(1)
-    expect(projected.messages[0]?.content).toEqual([
+    expect(messageContent(projected.messages[0])).toEqual([
       { type: "text", text: "before" },
       {
         type: "text",

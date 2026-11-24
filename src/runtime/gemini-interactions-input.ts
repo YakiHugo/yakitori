@@ -1,5 +1,5 @@
-import { supportsGeminiToolImages } from "./gemini-models.ts"
 import { isJsonObject, type JsonObject } from "../kernel/index.ts"
+import { supportsGeminiToolImages } from "./gemini-models.ts"
 import {
   type ModelMessage,
   type ModelUserContentBlock,
@@ -89,10 +89,6 @@ export function toGeminiInteractionInput(
     const steps =
       native ??
       portableModelContent(message).flatMap((block): JsonObject[] => {
-        if (block.type === "compaction")
-          throw new ModelRequestControlsError(
-            "Opaque compaction cannot be sent to Interactions.",
-          )
         if (block.type === "reasoning") return []
         if (block.type === "text")
           return [

@@ -68,7 +68,7 @@ it.each([
         info: {
           id,
           wireApi: "openai_chat_completions",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
           retry: { maxAttempts: 1 },
         },
         stream: createChatCompletionsProvider({

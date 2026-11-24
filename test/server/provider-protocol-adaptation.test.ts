@@ -218,7 +218,6 @@ function expectLimitedCapabilities(
   model: string,
 ): void {
   expect(provider.info.capabilities).toMatchObject({
-    remoteCompaction: false,
     nativePdf: false,
   })
   expect(

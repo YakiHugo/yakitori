@@ -1,11 +1,4 @@
 import sharp from "sharp"
-import { qwenEndpointPolicy } from "../../src/runtime/qwen-endpoints.ts"
-import { prepareModelMedia } from "../../src/runtime/model-media.ts"
-import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
-import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
-import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
-import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   createChatCompletionsProvider,
@@ -16,11 +9,19 @@ import type {
   ModelMessage,
   ModelRequest,
 } from "../../src/runtime/model.ts"
+import { prepareModelMedia } from "../../src/runtime/model-media.ts"
 import { resolveProviderBackend } from "../../src/runtime/provider-backend.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { qwenEndpointPolicy } from "../../src/runtime/qwen-endpoints.ts"
 import {
   prepareQwenImage,
   validateQwenImageRequest,
 } from "../../src/runtime/qwen-image-policy.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
+import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -223,7 +224,7 @@ describe("direct Qwen images", () => {
         ).toBe(3000)
         expect(data).toBe(block.data)
       }
-      expect(history[0]?.content).toEqual([block])
+      expect(messageContent(history[0])).toEqual([block])
     } finally {
       await step.toolRouter.release()
       await turn.close()

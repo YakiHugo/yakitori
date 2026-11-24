@@ -7,8 +7,8 @@ import type {
   StreamFn,
 } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
-import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import { ModelStreamCleanupError } from "../../src/runtime/model-request.ts"
+import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 
 it.each([
@@ -131,7 +131,7 @@ it("prevents stream and warmup work after Turn closure, including an unconsumed 
       info: {
         id: "personal",
         wireApi: "unknown",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
       },
       createTurnTransport: () => ({ stream, warmup: stream, close() {} }),
     }),
@@ -157,7 +157,7 @@ it("retains failed Turn ownership instead of disposing its shared provider", asy
       info: {
         id: "personal",
         wireApi: "unknown",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
       },
       createTurnTransport: () => ({
         stream: async function* () {},
@@ -226,7 +226,7 @@ async function endpoint(label: string, id = "personal", failClose = false) {
     await (await fetch(`${baseURL}/catalog`)).text()
   }
   const provider = createModelProvider({
-    info: { id, wireApi: "unknown", capabilities: { remoteCompaction: false } },
+    info: { id, wireApi: "unknown", capabilities: {} },
     models: {
       ...models,
       capture: () => ({
@@ -274,7 +274,7 @@ it("retains unresolved stream ownership even when the transport close callback s
       info: {
         id: "personal",
         wireApi: "unknown",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
         retry: { maxAttempts: 1, streamCleanupTimeoutMs: 5 },
       },
       createTurnTransport: () => ({

@@ -1,22 +1,22 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type OpenAI from "openai"
 import sharp from "sharp"
 import { expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { inspectImageBytes } from "../../src/kernel/image-metadata.ts"
+import { createCodexProvider } from "../../src/runtime/codex-provider.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
+import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
-import type OpenAI from "openai"
-import { createModelProvider } from "../../src/runtime/model-provider.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
-import { createCodexProvider } from "../../src/runtime/codex-provider.ts"
-import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
-import { inspectImageBytes } from "../../src/kernel/image-metadata.ts"
-import { withSDKResponse } from "../support/sdk-response.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
+import { withSDKResponse } from "../support/sdk-response.ts"
 
 it("preserves Codex tool-image pixels through actual execution, persistence and a reopened thread", async () => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-codex-replay-"))
@@ -95,7 +95,7 @@ it("preserves Codex tool-image pixels through actual execution, persistence and 
         id: "personal",
         serviceId: "codex",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false },
+        capabilities: {},
       },
       models,
       createTurnStream: () =>

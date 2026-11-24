@@ -41,7 +41,7 @@ async function fixture() {
         info: {
           id: "codex",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
         },
         models: source,
         stream: async function* () {},

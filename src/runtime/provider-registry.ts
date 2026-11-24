@@ -1,5 +1,4 @@
 import type { ProviderModelSettings } from "../protocol/providers.ts"
-import { createModelSettingsManager } from "./model-settings-manager.ts"
 import type { ModelRequest, StreamFn } from "./model.ts"
 import {
   createInjectedModelProvider,
@@ -8,15 +7,16 @@ import {
   type ModelProvider,
 } from "./model-provider.ts"
 import {
-  ModelStreamCleanupError,
   type ModelRequestPolicy,
+  ModelStreamCleanupError,
 } from "./model-request.ts"
-import { captureModelsManager, type ModelsManager } from "./models-manager.ts"
+import { ModelRequestControlsError } from "./model-request-controls.ts"
 import {
   ModelRequestPlanError,
   prepareModelRequestPlan,
 } from "./model-request-plan.ts"
-import { ModelRequestControlsError } from "./model-request-controls.ts"
+import { createModelSettingsManager } from "./model-settings-manager.ts"
+import { captureModelsManager, type ModelsManager } from "./models-manager.ts"
 
 type ProviderDefinitions = Readonly<Record<string, ModelProvider | StreamFn>>
 
@@ -168,6 +168,7 @@ export function createProviderRegistry(
     const requireActive = () => {
       if (closing !== undefined) throw new Error("Model Turn is closed.")
     }
+    const strategy = session.compactionStrategy
     const guarded =
       (stream: StreamFn): StreamFn =>
       (request) => {
@@ -176,13 +177,7 @@ export function createProviderRegistry(
           throw new Error(
             `Turn transport for ${entry.provider.info.id} cannot stream target ${request.target.provider}/${request.target.model}.`,
           )
-        if (
-          (request.compaction === "codex_remote" ||
-            request.compaction === "responses_compact") &&
-          request.compaction !==
-            (session.remoteCompaction ??
-              entry.provider.info.capabilities.remoteCompaction)
-        )
+        if (request.compaction === "provider" && strategy === undefined)
           throw new Error(
             `Provider ${entry.provider.info.id} does not support remote compaction.`,
           )
@@ -255,9 +250,10 @@ export function createProviderRegistry(
         ? {}
         : { serviceId: session.serviceId }),
       wireApi: session.wireApi ?? entry.provider.info.wireApi,
-      remoteCompaction:
-        session.remoteCompaction ??
-        entry.provider.info.capabilities.remoteCompaction,
+      ...(strategy === undefined ? {} : { compactionStrategy: strategy }),
+      ...(session.continuationScope === undefined
+        ? {}
+        : { continuationScope: session.continuationScope }),
       nativePdf:
         session.nativePdf ??
         entry.provider.info.capabilities.nativePdf === true,

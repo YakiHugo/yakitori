@@ -28,6 +28,7 @@ import { createSessionEventHub } from "../../src/server/event-hub.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { InputQueue } from "../../src/server/input-queue.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { messageContent } from "../fixtures/model-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { requireStoredAssetSource } from "../support/asset-source.ts"
@@ -662,12 +663,9 @@ describe("thread server handlers", () => {
       expect.arrayContaining([
         expect.objectContaining({
           item: expect.objectContaining({
-            role: "user",
-            content: [
-              expect.objectContaining({
-                text: expect.stringContaining("durable summary"),
-              }),
-            ],
+            role: "compaction",
+            mode: "summary",
+            text: "durable summary",
           }),
         }),
       ]),
@@ -2261,7 +2259,7 @@ describe("thread server handlers", () => {
         info: {
           id: "faux",
           wireApi: "faux",
-          capabilities: { remoteCompaction: false },
+          capabilities: {},
           retry: { sleep: async () => {}, random: () => 0 },
         },
         stream,
@@ -2449,7 +2447,7 @@ describe("thread server handlers", () => {
     )
     expect(inputs).toHaveLength(1)
     expect(inputs?.[0]?.id).toBe(admitted.value.inputId)
-    const image = inputs?.[0]?.item.content.find(
+    const image = messageContent(inputs?.[0]?.item)?.find(
       (block) => block.type === "image",
     )
     if (image?.type !== "image") throw new Error("Missing admitted image.")
