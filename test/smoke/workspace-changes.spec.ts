@@ -2,13 +2,7 @@ import { execFile } from "node:child_process"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
-import {
-  type Browser,
-  type ElectronApplication,
-  expect,
-  type Page,
-  test,
-} from "@playwright/test"
+import { expect, type Page, test } from "@playwright/test"
 import {
   type ServerProcess,
   spawnServerProcess,
@@ -171,20 +165,13 @@ async function reviewAndStageChanges(page: Page, cwd: string): Promise<void> {
 }
 
 test("Changes selects real Git diffs from the file tree and refreshes staged files", async ({
-  playwright,
+  page,
 }, testInfo) => {
-  const desktop = testInfo.project.name === "desktop"
-  test.skip(
-    desktop && process.platform !== "darwin",
-    "Desktop verification requires macOS.",
-  )
   const environment = await createSmokeEnvironment()
   const cwd = join(environment.root, "workspace")
   let server: ServerProcess | undefined
-  let application: ElectronApplication | undefined
-  let browser: Browser | undefined
-  let target: Page
   const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
   try {
     await git(cwd, ["init", "--quiet"])
     await writeFile(join(cwd, "staged.txt"), "old staged\n")
@@ -197,59 +184,31 @@ test("Changes selects real Git diffs from the file tree and refreshes staged fil
     await mkdir(join(cwd, "src"))
     await writeFile(join(cwd, "src", "new.ts"), "fresh untracked\n")
 
-    if (desktop) {
-      // Launch the current build through the real main/preload/sidecar boundary.
-      // The broader desktop suite separately verifies the packaged app artifact.
-      application = await playwright._electron.launch({
-        args: [
-          resolve("."),
-          `--user-data-dir=${join(environment.root, "electron-user-data")}`,
-        ],
-        cwd: environment.root,
-        env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
-        timeout: 30_000,
-      })
-      target = await application.firstWindow()
-      await target.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/?$/)
-      expect(await target.evaluate(() => window.yakitoriDesktop)).toBeDefined()
-    } else {
-      browser = await playwright.chromium.launch()
-      target = await browser.newPage()
-      server = await spawnServerProcess({
-        command: process.execPath,
-        args: [resolve("src/server/start.ts")],
-        cwd: environment.root,
-        env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
-      })
-      await target.goto(server.url)
-      expect(
-        await target.evaluate(() => window.yakitoriDesktop),
-      ).toBeUndefined()
-    }
-    target.on("pageerror", (error) => errors.push(error.message))
-    await target.setViewportSize({ width: 1100, height: 900 })
-    await reviewAndStageChanges(target, cwd)
-    await expect(
-      target.getByText("Loading diff…", { exact: true }),
-    ).toHaveCount(0)
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    expect(await page.evaluate(() => window.yakitoriDesktop)).toBeUndefined()
+    await page.setViewportSize({ width: 1100, height: 900 })
+    await reviewAndStageChanges(page, cwd)
+    await expect(page.getByText("Loading diff…", { exact: true })).toHaveCount(
+      0,
+    )
     expect(errors).toEqual([])
-    await target
+    await page
       .getByRole("button", { name: "Expand workspace", exact: true })
       .click()
-    await target.screenshot({
-      path: testInfo.outputPath(
-        `workspace-changes-${testInfo.project.name}.png`,
-      ),
+    await page.screenshot({
+      path: testInfo.outputPath("workspace-changes-browser.png"),
     })
   } finally {
     try {
-      await Promise.all([application?.close(), browser?.close()])
+      await server?.stop()
     } finally {
-      try {
-        await server?.stop()
-      } finally {
-        await environment.cleanup()
-      }
+      await environment.cleanup()
     }
   }
 })

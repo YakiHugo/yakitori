@@ -27,6 +27,7 @@ const appRoot = path.resolve(
 
 const maxLoadAttempts = 20
 const loadRetryDelayMs = 500
+const testBackground = process.env.YAKITORI_TEST_BACKGROUND === "1"
 
 let serverProcess: ServerProcess | undefined
 let browserController: DesktopBrowser | undefined
@@ -89,6 +90,8 @@ app.on("will-quit", (event) => {
 // Thin shell: the main process only spawns/manages the sidecar server child
 // and the window. Dev and prod share the topology; only the spawn differs.
 async function start(): Promise<void> {
+  if (testBackground && process.platform === "darwin") app.dock?.hide()
+
   // All state lives in one user-level home shared by every app form (codex's
   // CODEX_HOME pattern); YAKITORI_STORE_DIR overrides it for isolated stores.
   // Dev loads the checkout .env; packaged installs have no checkout, so they
@@ -293,7 +296,8 @@ async function openMainWindow(
   })
   browserController = registerWorkspaceBrowser(window)
   window.once("ready-to-show", () => {
-    window.show()
+    if (testBackground) window.showInactive()
+    else window.show()
   })
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
   window.webContents.on("will-prevent-unload", (event) => {

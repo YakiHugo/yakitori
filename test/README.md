@@ -34,22 +34,35 @@ named `gui` does not imply that a contract needs a rendered component.
 
 ## Running and interpreting checks
 
+- For routine local changes, run `pnpm lint`, `pnpm typecheck`, and
+  `pnpm test <path>` for affected Vitest files.
+- For renderer or browser interaction changes, run only the affected spec with
+  `pnpm test:browser <spec>`. This runs headless Chromium against built bundles.
+- Run `pnpm test:desktop-smoke`, `pnpm package`, `pnpm test:computer`,
+  `pnpm test:computer:live`, or `pnpm test:computer:web` locally only when the
+  user explicitly requests local acceptance. The `macos-latest` Desktop
+  workflow handles packaging, archive/restore, Electron smoke, and native
+  Computer contracts. The separate live and web Computer acceptance suites
+  require macOS Accessibility and Screen Recording grants.
+
 - `pnpm test:contracts`: Node contracts, including real filesystem, process and
   localhost integration tests. This is not a claim that every test is a unit
   test or that a remote provider accepted the request.
 - `pnpm test:ui`: happy-dom component/event checks. This is not browser layout
   or packaged desktop verification.
 - `pnpm test`: both disjoint Vitest projects, once per file.
-- `pnpm test path/to/file.test.ts`: focused checks across the same projects.
-- `pnpm test:browser`: Chromium smoke against built bundles.
-- `pnpm test:desktop-smoke`: packaged macOS Electron smoke. See the Desktop
-  workflow for packaging and archive/restore prerequisites.
+- `pnpm test:browser`: full headless Chromium smoke suite, run by CI.
+- `pnpm test:desktop-smoke`: serial packaged macOS Electron smoke.
+  Local smoke starts the app in the background by default. Set
+  `YAKITORI_TEST_BACKGROUND=0` for explicit foreground focus acceptance.
 - `pnpm check`, `pnpm build`: aggregate local checks
   and both production bundles.
 
 Every PR runs both Vitest lanes, Chromium, and packaged macOS verification. The
-`CI required` job requires every lane to succeed. There are no automatic test
-retries. OS-conditional tests must be reported as skipped on that OS, not passed.
+`macos-latest` Desktop workflow also runs the macOS-only Computer panel spec in
+headless Chromium. The `CI required` job requires every lane to succeed.
+Automatic test retries are disabled. Report OS-conditional tests as skipped on
+the affected OS.
 
 Vitest gives each file a temporary home inherited by child processes, clears
 provider credentials and rejects non-loopback socket connections. Account tests

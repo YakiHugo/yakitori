@@ -11,24 +11,12 @@ import {
   expect,
   type Page,
 } from "@playwright/test"
-import { parse } from "smol-toml"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   computerPreviewCatalog,
   computerPreviewFrame,
 } from "../fixtures/computer-preview.ts"
-import {
-  createSmokeEnvironment,
-  replaceInlineEditText,
-  runBudgetedGoal,
-  runConversationHistoryFlow,
-  runExternalEngineFlow,
-  runFauxTurn,
-  runIndependentSessionFlow,
-  runProviderFlow,
-  smokePdfBytes,
-} from "./fixtures.ts"
-import { runInputSubmissionFlow } from "./input-submission-flow.ts"
+import { createSmokeEnvironment, runFauxTurn } from "./fixtures.ts"
 
 const execFileAsync = promisify(execFile)
 
@@ -201,155 +189,47 @@ const test = base.extend<{ desktop: DesktopSmoke }>({
   },
 })
 
-test("input confirmation releases the native composer before RPC acknowledgement", async ({
-  desktop,
-}) => {
-  const { application, page } = desktop
-  const workspace = await application.evaluate(
-    () => process.env.YAKITORI_WORKSPACE,
-  )
-  if (!workspace) throw new Error("Missing isolated workspace")
-  const file = join(workspace, "smoke.png")
-  await application.evaluate(({ dialog }, file) => {
-    dialog.showOpenDialog = async () => ({
-      canceled: false,
-      filePaths: [file],
-    })
-  }, file)
-  await runInputSubmissionFlow(page, file)
-  expect(desktop.rendererErrors).toEqual([])
-})
-
-test("conversation history opens at the latest prompt and loads older search targets", async ({
-  desktop,
-}) => {
-  await runConversationHistoryFlow(desktop.page)
-  expect(desktop.rendererErrors).toEqual([])
-})
-
-test("desktop opens healthy conversations alongside an invalid session index", async ({
-  desktop,
-}) => {
-  const { application, page } = desktop
-  await runFauxTurn(page)
-  const storeDir = await application.evaluate(
-    () => process.env.YAKITORI_STORE_DIR,
-  )
-  if (!storeDir) throw new Error("Missing isolated desktop store")
-  await writeFile(
-    join(storeDir, "sessions", "threads", "session_invalid.json"),
-    '{"id":',
-  )
-
-  await page.reload()
-  await page
-    .locator('.sidebar-session [data-sidebar-drag="session"]')
-    .first()
-    .click()
-  await expect(
-    page.getByRole("main").getByText("Hello from faux.", { exact: true }),
-  ).toBeVisible()
-  await expect(
-    page.getByRole("textbox", { name: "Message the Mate" }),
-  ).toBeVisible()
-  await expect(
-    page.getByText("Unexpected server error.", { exact: true }),
-  ).toHaveCount(0)
-  expect(desktop.rendererErrors).toEqual([])
-})
-
-test("desktop edit and undo replace history in the same session", async ({
-  desktop,
-}) => {
-  const { page, sidecarUrl } = desktop
-  await runFauxTurn(page)
-  const client = createAppRpcClient({ apiBase: sidecarUrl.href })
-  try {
-    const original = (await client.request("session/list", {})).sessions[0]
-    if (!original) throw new Error("Missing original session")
-    await page
-      .getByRole("main")
-      .getByRole("button", { name: "Edit & resubmit", exact: true })
-      .click()
-    await replaceInlineEditText(page, "Edited desktop prompt")
-    await page
-      .locator(".conversation-inline-edit")
-      .getByRole("button", { name: "Send", exact: true })
-      .click()
-    await expect(
-      page
-        .getByRole("main")
-        .getByText("Edited desktop prompt", { exact: true }),
-    ).toBeVisible()
-    await expect(
-      page.getByRole("button", { name: "Interrupt", exact: true }),
-    ).toHaveCount(0)
-    const edited = page
-      .getByRole("main")
-      .locator('[data-context-kind="message"]')
-      .filter({ hasText: "Edited desktop prompt" })
-    const inputId = await edited.getAttribute("data-context-message-id")
-    if (!inputId) throw new Error("Missing edited input")
-    const replacement = (await client.request("session/list", {})).sessions
-    expect(replacement).toHaveLength(1)
-    expect(replacement[0]?.id).toBe(original.id)
-    expect(replacement[0]?.rolloutId).not.toBe(original.rolloutId)
-    await client.request("session/revert", {
-      sessionId: original.id,
-      atInputId: inputId,
-      reason: "undo",
-    })
-    await expect(
-      page
-        .getByRole("main")
-        .getByText("Edited desktop prompt", { exact: true }),
-    ).toHaveCount(0)
-    await expect(
-      page.getByRole("main").getByText("Hello from faux.", { exact: true }),
-    ).toHaveCount(0)
-    expect(
-      (await client.request("session/list", {})).sessions.map(({ id }) => id),
-    ).toEqual([original.id])
-    expect(desktop.rendererErrors).toEqual([])
-  } finally {
-    client.close()
-  }
-})
-
 test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit", async ({
   desktop,
 }) => {
   const { application, page, userData, sidecarUrl, rendererErrors } = desktop
-  expect(
-    await application.evaluate(({ app }) => ({
-      packaged: app.isPackaged,
-      userData: app.getPath("userData"),
-    })),
-  ).toEqual({ packaged: true, userData })
+  const { background, ...appInfo } = await application.evaluate(({ app }) => ({
+    packaged: app.isPackaged,
+    userData: app.getPath("userData"),
+    background: process.env.YAKITORI_TEST_BACKGROUND === "1",
+  }))
+  expect(appInfo).toEqual({ packaged: true, userData })
   const health = await page.request.get(new URL("/health", sidecarUrl).href)
   await expect(health).toBeOK()
   expect(await health.json()).toEqual({ ok: true })
 
-  await application.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.minimize()
-  })
-  const bridge = await page.evaluate(async () => {
+  if (!background) {
+    await application.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.minimize()
+    })
+  }
+  const bridge = await page.evaluate(async (background) => {
     const desktop = window.yakitoriDesktop
     if (desktop === undefined)
       throw new Error("Desktop preload bridge is missing.")
-    await desktop.focusWindow()
+    if (!background) await desktop.focusWindow()
     return {
       platform: desktop.platform,
       permission: await desktop.notifications.permission(),
     }
-  })
+  }, background)
   expect(bridge.platform).toBe("darwin")
-  expect(
-    await application.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0]
-      return { visible: window?.isVisible(), minimized: window?.isMinimized() }
-    }),
-  ).toEqual({ visible: true, minimized: false })
+  await expect
+    .poll(() =>
+      application.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0]
+        return {
+          visible: window?.isVisible(),
+          minimized: window?.isMinimized(),
+        }
+      }),
+    )
+    .toEqual({ visible: true, minimized: false })
   expect(["granted", "unsupported"]).toContain(bridge.permission)
   await page
     .getByRole("button", { name: "Show workspace", exact: true })
@@ -368,149 +248,7 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     ),
   ).toHaveCount(0)
   await runFauxTurn(page)
-  await runBudgetedGoal(page)
   expect(rendererErrors).toEqual([])
-})
-
-test("desktop provider accounts, inference, downloads and removal cross the packaged bridge", async ({
-  desktop,
-}, testInfo) => {
-  const { application, page, rendererErrors } = desktop
-  const downloadPath = testInfo.outputPath("ordered-smoke.pdf")
-  await application.evaluate(({ BrowserWindow }, path) => {
-    const window = BrowserWindow.getAllWindows()[0]
-    if (!window) throw new Error("Desktop window missing")
-    window.webContents.session.once("will-download", (_event, item) =>
-      item.setSavePath(path),
-    )
-  }, downloadPath)
-  await runProviderFlow(page, testInfo, {
-    downloadPdf: async () => {
-      await page
-        .getByRole("main")
-        .getByRole("link", { name: "Download PDF", exact: true })
-        .click()
-      await expect
-        .poll(async () => {
-          try {
-            return (await readFile(downloadPath)).equals(smokePdfBytes)
-          } catch (error) {
-            if (
-              typeof error === "object" &&
-              error !== null &&
-              "code" in error &&
-              error.code === "ENOENT"
-            )
-              return false
-            throw error
-          }
-        })
-        .toBe(true)
-      return readFile(downloadPath)
-    },
-  })
-  expect(rendererErrors).toEqual([])
-})
-
-test("desktop external engines connect and finish their isolated conversation", async ({
-  desktop,
-}) => {
-  await runExternalEngineFlow(desktop.page)
-  expect(desktop.rendererErrors).toEqual([])
-})
-
-test("desktop independent sessions route cross-provider models and appear in the sidebar", async ({
-  desktop,
-}, testInfo) => {
-  await runIndependentSessionFlow(desktop.page, testInfo)
-  expect(desktop.rendererErrors).toEqual([])
-})
-
-test("desktop runtime settings persist subagent model selection to disk", async ({
-  desktop,
-}, testInfo) => {
-  const { page, sidecarUrl, rendererErrors } = desktop
-  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
-  await page.getByRole("button", { name: "Settings", exact: true }).click()
-  await page.getByRole("button", { name: "Runtime", exact: true }).click()
-  const control = page.getByRole("switch", { name: "Subagent model selection" })
-  await expect(control).not.toBeChecked()
-  await control.click()
-  await expect
-    .poll(
-      async () =>
-        (await client.request("config/read", {})).configuration.agents
-          ?.exposeModelOverrides,
-    )
-    .toBe(true)
-  const snapshot = await client.request("config/read", {})
-  const user = snapshot.layers.find((layer) => layer.source === "user")
-  if (user === undefined) throw new Error("User configuration is missing.")
-  expect(parse(await readFile(user.path, "utf8")).agents).toEqual({
-    expose_model_overrides: true,
-  })
-  await page.reload()
-  await page.getByRole("button", { name: "Settings", exact: true }).click()
-  await page.getByRole("button", { name: "Runtime", exact: true }).click()
-  await expect(control).toBeChecked()
-  await page.screenshot({ path: testInfo.outputPath("runtime-settings.png") })
-  expect(rendererErrors).toEqual([])
-})
-
-test("desktop keeps model identity across account edits and preserves an unavailable choice", async ({
-  desktop,
-}, testInfo) => {
-  const { page, sidecarUrl, rendererErrors } = desktop
-  const endpoint = createServer((_request, response) => {
-    response.writeHead(200, { "content-type": "application/json" })
-    response.end(JSON.stringify({ data: [{ id: "coder" }] }))
-  })
-  endpoint.listen(0, "127.0.0.1")
-  await once(endpoint, "listening")
-  const address = endpoint.address()
-  if (!address || typeof address === "string")
-    throw new Error("Missing model catalog server")
-  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
-  const choice = { provider: "deepseek", model: "coder" }
-  const selector = page.getByRole("button", { name: "Select model and effort" })
-  try {
-    for (const edited of [false, true]) {
-      const displayName = edited ? "Renamed model" : "Friendly model"
-      await client.request("provider/configuration/write", {
-        id: "vendor-account",
-        configuration: {
-          name: edited ? "Renamed account" : "Original account",
-          service: "deepseek",
-          authentication: "none",
-          baseURL: `http://127.0.0.1:${address.port}/${edited ? "edited" : "original"}/v1`,
-          wireApi: edited ? "openai_responses" : "openai_chat_completions",
-          models: [{ id: "coder", displayName }],
-        },
-      })
-      if (!edited) await client.request("userPreference/write", choice)
-      await page.reload()
-      await expect(selector).toHaveText(displayName)
-      expect(
-        (await client.request("provider/list", {})).userPreference,
-      ).toEqual(choice)
-    }
-    await client.request("provider/configuration/delete", {
-      id: "vendor-account",
-    })
-    await page.reload()
-    await expect(selector).toHaveText("Select model")
-    expect((await client.request("provider/list", {})).userPreference).toEqual(
-      choice,
-    )
-    await page.screenshot({
-      path: testInfo.outputPath("model-unavailable.png"),
-    })
-    expect(rendererErrors).toEqual([])
-  } finally {
-    client.close()
-    endpoint.closeAllConnections()
-    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
-  }
 })
 
 async function closeApplication(

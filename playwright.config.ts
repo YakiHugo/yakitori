@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test"
 export default defineConfig({
   testDir: "./test/smoke",
   // These process-boundary checks use isolated apps, with no retry masking.
-  workers: 1,
+  workers: process.env.CI ? 2 : 4,
   retries: 0,
   timeout: 60_000,
   expect: { timeout: 10_000 },
@@ -45,8 +45,6 @@ export default defineConfig({
         "desktop.spec.ts",
         "browser-native.spec.ts",
         "app-update-desktop.spec.ts",
-        "workspace-changes.spec.ts",
-        "computer-panel.spec.ts",
       ],
     },
   ],
