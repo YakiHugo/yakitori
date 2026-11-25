@@ -4,6 +4,7 @@ import { createServer, type ServerResponse } from "node:http"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { test as base, expect, type Locator } from "@playwright/test"
+import sharp from "sharp"
 import { stringify } from "smol-toml"
 import {
   type ServerProcess,
@@ -918,6 +919,7 @@ test("Markdown images load local, inline and HTTP sources during streaming and a
       "![Encoded workspace](space%20image.png)",
       `![Inline image](${renderingApp.imageDataURL})`,
       `![HTTP image](${renderingApp.imageURL})`,
+      `[![Linked image](${renderingApp.imageURL})](#destination)`,
     ].join("\n\n")}`,
   )
   await expectLoadedPNG(
@@ -933,8 +935,27 @@ test("Markdown images load local, inline and HTTP sources during streaming and a
       "Encoded workspace",
       "Inline image",
       "HTTP image",
+      "Linked image",
     ])
       await expectLoadedPNG(response.getByRole("img", { name, exact: true }))
+    await expect(
+      response.getByRole("link", { name: "Linked image", exact: true }),
+    ).toHaveAttribute("href", "#destination")
+    await expect(
+      response.getByRole("button", {
+        name: "Preview Linked image",
+        exact: true,
+      }),
+    ).toHaveCount(0)
+    await response
+      .getByRole("button", { name: "Preview Streaming workspace", exact: true })
+      .click()
+    const preview = page.getByRole("dialog", {
+      name: "Preview Streaming workspace",
+      exact: true,
+    })
+    await expectLoadedPNG(preview.getByRole("img"))
+    await preview.getByRole("button", { name: "Close preview" }).click()
   }
   await verify()
   await page.reload()
@@ -2252,8 +2273,15 @@ test("keeps tool media visible and unique when activity collapses and history re
   renderingApp,
 }) => {
   const prompt = "View the screenshot fixture"
+  await sharp({
+    create: { width: 800, height: 1280, channels: 3, background: "#397596" },
+  })
+    .png()
+    .toFile(join(renderingApp.workspace, "tall-capture.png"))
   await renderingApp.send(prompt)
-  await renderingApp.callTool(prompt, "view_image", { path: "smoke.png" })
+  await renderingApp.callTool(prompt, "view_image", {
+    path: "tall-capture.png",
+  })
   const live = page.getByRole("region", { name: "Current response" })
   const media = live.getByRole("region", { name: "Tool attachments" })
   await expect(media.getByRole("img")).toBeVisible()
@@ -2294,5 +2322,13 @@ test("keeps tool media visible and unique when activity collapses and history re
   await history.getByRole("button", { name: /View image/ }).click()
   await expect(history.getByRole("img")).toHaveCount(1)
   await renderingApp.reopen()
-  await expect(image).toBeVisible()
+  await expect(image).toHaveCSS("width", "100px")
+  await expect(image).toHaveCSS("height", "160px")
+  await history
+    .getByRole("region", { name: "Tool attachments" })
+    .getByRole("button", { name: /^Preview / })
+    .click()
+  const preview = page.getByRole("dialog", { name: /^Preview / })
+  await preview.getByRole("button", { name: "Actual size" }).click()
+  await expect(preview.getByRole("img")).toHaveCSS("height", "1280px")
 })

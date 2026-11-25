@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ToolResultParts } from "../../src/gui/components/cells/tool-result-parts.tsx"
@@ -108,24 +109,26 @@ describe("ordered tool result presentation", () => {
       />,
     )
     const group = screen.getByRole("region", { name: "Ordered tool result" })
-    expect([...group.children].map((node) => node.tagName)).toEqual([
-      "PRE",
-      "IMG",
-      "PRE",
-      "A",
-      "PRE",
-      "IMG",
-    ])
-    expect([...group.children].map((node) => node.textContent)).toEqual([
-      "before",
-      "",
-      "between",
-      "Open PDF: report.pdf",
-      "after PDF",
-      "",
-    ])
-    expect(screen.getAllByRole("img", { name: "captured.png" })).toHaveLength(2)
-    const link = screen.getByRole("link", { name: "Open PDF: report.pdf" })
+    const result = within(group)
+    const images = result.getAllByRole("img", { name: "captured.png" })
+    expect(images).toHaveLength(2)
+    const [firstImage, secondImage] = images
+    const link = result.getByRole("link", { name: "Open PDF: report.pdf" })
+    const orderedParts = [
+      result.getByText("before"),
+      firstImage,
+      result.getByText("between"),
+      link,
+      result.getByText("after PDF"),
+      secondImage,
+    ]
+    for (const [index, part] of orderedParts.entries()) {
+      const next = orderedParts[index + 1]
+      if (part && next)
+        expect(part.compareDocumentPosition(next)).toBe(
+          Node.DOCUMENT_POSITION_FOLLOWING,
+        )
+    }
     expect(link.getAttribute("href")).toBe(
       "http://localhost:1234/base/rollouts/rollout_1/assets/tools/call_1/report.pdf",
     )

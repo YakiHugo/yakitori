@@ -47,6 +47,7 @@ export function AssistantMessageCell({
       ) : null}
       <MarkdownView
         apiBase={apiBase}
+        compactImages
         className={cn(
           className,
           entry.purpose === "commentary" && "assistant-commentary",

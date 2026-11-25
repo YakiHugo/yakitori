@@ -28,64 +28,49 @@ export function ToolResultParts({
               {part.text}
             </pre>
           )
-        if (part.type === "image" && part.file === undefined)
+        if (part.type === "image")
           return (
             <ImageOutputCell
               key={key}
               image={part}
               apiBase={apiBase}
-              label="Tool image"
+              label={
+                part.file && !("url" in part.file)
+                  ? (part.file.path.split("/").at(-1) ?? "Tool image")
+                  : "Tool image"
+              }
             />
           )
-        const url =
-          part.file === undefined
-            ? undefined
-            : rolloutAssetUrl(part.file, apiBase)
+        const url = rolloutAssetUrl(part.file, apiBase)
         if (url === undefined)
           return (
             <p key={key} className="text-caption text-muted-foreground">
-              {part.type === "document" ? "PDF" : "Image"} preview unavailable
+              PDF preview unavailable
             </p>
           )
-        if (part.type === "document")
-          return (
-            <a
-              key={key}
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(event) => {
-                event.preventDefault()
-                setOpenError(undefined)
-                void openUrlTarget({ kind: "url", url }).catch(
-                  (error: unknown) => {
-                    setOpenError(
-                      error instanceof Error
-                        ? error.message
-                        : "Could not open PDF",
-                    )
-                  },
-                )
-              }}
-              className="block text-caption underline underline-offset-2"
-            >
-              Open PDF: {part.name}
-            </a>
-          )
         return (
-          <img
+          <a
             key={key}
-            src={url}
-            alt={
-              ("name" in part ? part.name : undefined) ??
-              (part.file && !("url" in part.file)
-                ? part.file.path.split("/").at(-1)
-                : undefined) ??
-              "Tool image"
-            }
-            loading="lazy"
-            className="max-h-96 max-w-full rounded object-contain"
-          />
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => {
+              event.preventDefault()
+              setOpenError(undefined)
+              void openUrlTarget({ kind: "url", url }).catch(
+                (error: unknown) => {
+                  setOpenError(
+                    error instanceof Error
+                      ? error.message
+                      : "Could not open PDF",
+                  )
+                },
+              )
+            }}
+            className="block text-caption underline underline-offset-2"
+          >
+            Open PDF: {part.name}
+          </a>
         )
       })}
       {openError === undefined ? null : (

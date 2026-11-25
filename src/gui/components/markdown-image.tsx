@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react"
+import { createContext, useContext, useEffect, useState } from "react"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
+import { TranscriptImage } from "./transcript-image.tsx"
+
+export const MarkdownImageInLink = createContext(false)
 
 // Match the image formats already handled by workspace/readMedia and file
 // preview. An image data URL stays inside <img>, never an HTML/document viewer.
@@ -90,6 +93,7 @@ export function MarkdownImage({
   workspaceRoot,
   documentPath,
   apiBase,
+  compact,
 }: Readonly<{
   src?: string | undefined
   alt?: string | undefined
@@ -97,6 +101,7 @@ export function MarkdownImage({
   workspaceRoot?: string | undefined
   documentPath?: string | undefined
   apiBase: string
+  compact: boolean
 }>) {
   const source = resolveSource(src, workspaceRoot, documentPath)
   // A different file or environment remounts the read, so a pending result can
@@ -108,6 +113,7 @@ export function MarkdownImage({
       alt={alt}
       title={title}
       apiBase={apiBase}
+      compact={compact}
     />
   )
 }
@@ -117,12 +123,15 @@ function ResolvedMarkdownImage({
   alt,
   title,
   apiBase,
+  compact,
 }: Readonly<{
   source: ImageSource
   alt: string
   title: string | undefined
   apiBase: string
+  compact: boolean
 }>) {
+  const inLink = useContext(MarkdownImageInLink)
   const cwd = source.kind === "workspace" ? source.cwd : undefined
   const path = source.kind === "workspace" ? source.path : undefined
   const fragment = source.kind === "workspace" ? source.fragment : ""
@@ -176,6 +185,10 @@ function ResolvedMarkdownImage({
       >
         Loading image{alt ? ` · ${alt}` : ""}…
       </span>
+    )
+  if (compact)
+    return (
+      <TranscriptImage src={url} alt={alt} title={title} preview={!inLink} />
     )
   return (
     <img

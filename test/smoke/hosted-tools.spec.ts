@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises"
 import { createServer, type ServerResponse } from "node:http"
 import { join, resolve } from "node:path"
 import { expect, test } from "@playwright/test"
+import sharp from "sharp"
 import { stringify } from "smol-toml"
 import {
   type ServerProcess,
@@ -53,6 +54,19 @@ for (const output of ["search", "image", "chart"] as const) {
     let server: ServerProcess | undefined
     let running: ServerResponse | undefined
     let chartDownloads = 0
+    const generatedImage =
+      output === "image"
+        ? await sharp({
+            create: {
+              width: 1280,
+              height: 720,
+              channels: 3,
+              background: "#107880",
+            },
+          })
+            .png()
+            .toBuffer()
+        : undefined
     const search = {
       type: "web_search_call",
       id: "fixture_search",
@@ -177,8 +191,12 @@ for (const output of ["search", "image", "chart"] as const) {
                 sources: [{ type: "url", url: source }],
               },
             }
-          : output === "image"
-            ? { ...initial, status: "completed", result: pngImageBase64 }
+          : generatedImage !== undefined
+            ? {
+                ...initial,
+                status: "completed",
+                result: generatedImage.toString("base64"),
+              }
             : { ...initial, status: "completed", code: "draw_fixture()" }
       send(running, {
         type: "response.output_item.done",
@@ -228,6 +246,24 @@ for (const output of ["search", "image", "chart"] as const) {
               image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
             )
             .toBeGreaterThan(0)
+          if (output === "image") {
+            await expect(image).toHaveCSS("width", "240px")
+            await expect(image).toHaveCSS("height", "135px")
+            const trigger = completed.getByRole("button", {
+              name: "Preview Generated image",
+              exact: true,
+            })
+            await trigger.click()
+            const preview = page.getByRole("dialog", {
+              name: "Preview Generated image",
+              exact: true,
+            })
+            await preview.getByRole("button", { name: "Actual size" }).click()
+            await expect(preview.getByRole("img")).toHaveCSS("width", "1280px")
+            await page.keyboard.press("Escape")
+            await expect(preview).toHaveCount(0)
+            await expect(trigger).toBeFocused()
+          }
         }
         await completed.getByRole("button", { name: /^Worked for/ }).click()
         if (output === "search") {
