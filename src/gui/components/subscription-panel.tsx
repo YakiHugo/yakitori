@@ -199,7 +199,7 @@ function accountLabel(provider: ApiSubscriptionSummary): string {
     : `${formatPlan(provider.plan)} plan`
 }
 
-function formatPlan(plan: string): string {
+export function formatPlan(plan: string): string {
   const known = {
     prolite: "Pro Lite",
     self_serve_business_prolite: "Business Pro Lite",
@@ -228,7 +228,7 @@ function validDate(timestamp: number | undefined): Date | undefined {
   return Number.isFinite(date.getTime()) ? date : undefined
 }
 
-function formatResetTime(reset: Date): string {
+export function formatResetTime(reset: Date): string {
   const now = new Date()
   const time = new Intl.DateTimeFormat("en", {
     hour: "numeric",

@@ -53,7 +53,7 @@ export function SettingsPage() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.key !== "Escape" || event.isComposing)
         return
-      if (document.querySelector("dialog[open]")) return
+      if (document.querySelector("dialog[open], [popover]:popover-open")) return
       closeSettings()
     }
     window.addEventListener("keydown", onKeyDown)

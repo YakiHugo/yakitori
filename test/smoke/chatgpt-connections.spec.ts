@@ -383,6 +383,7 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
           result = {
             usage: {
               generatedAt: new Date().toISOString(),
+              recentAccountIds: [],
               totals: {
                 inputTokens: 0,
                 outputTokens: 0,

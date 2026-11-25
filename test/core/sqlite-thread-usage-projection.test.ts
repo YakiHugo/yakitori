@@ -140,6 +140,7 @@ describe("thread usage projection", () => {
       now: new Date("2026-10-02T12:00:00Z"),
     })
     expect(usage.totals.turns).toBe(4)
+    expect(usage.recentAccountIds).toEqual(["other", "codex"])
     expect(usage.days).toEqual([
       {
         date: "2026-10-02",

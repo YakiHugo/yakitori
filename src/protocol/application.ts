@@ -260,6 +260,7 @@ export type ApiSubscriptionSummary = Readonly<{
   plan?: string
   usage: ApiRateLimits
   financials?: ApiAccountFinancials
+  management?: "chatgpt"
 }>
 
 export type ApiReadSubscriptionRequest = Readonly<{

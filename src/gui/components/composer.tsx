@@ -7,7 +7,10 @@ import {
 } from "../../protocol/user-input.ts"
 import { discardDraftAttachments } from "../composer-attachments.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
-import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
+import {
+  type ComposerRoute,
+  useComposerRoute,
+} from "../hooks/use-composer-route.ts"
 import {
   attachmentInputDraft,
   sameInputDraft,
@@ -16,7 +19,6 @@ import {
 } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
-  resolveEffectiveModel,
   selectCurrentThreadId,
   useAppStore,
   useExecutionView,
@@ -32,7 +34,9 @@ import { ContextWindowIndicator } from "./context-window-indicator.tsx"
 import { ModelSelector } from "./model-selector.tsx"
 import { SessionCommandPanel } from "./session-command-panel.tsx"
 
-export function Composer() {
+export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
+  const ownRoute = useComposerRoute(route === undefined)
+  const { effectiveModel, preview } = route ?? ownRoute
   const conversationScroll = useContext(ConversationScrollContext)
   const draft = useAppStore((state) => state.promptDraft) ?? textInputDraft("")
   const excerpts = useAppStore((state) => state.promptExcerpts)
@@ -51,9 +55,6 @@ export function Composer() {
     (state) => state.restoringModelSelectionFor,
   )
   const providers = useAppStore((state) => state.providers)
-  const defaultProvider = useAppStore((state) => state.defaultProvider)
-  const defaultModel = useAppStore((state) => state.defaultModel)
-  const userPreference = useAppStore((state) => state.userPreference)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const sessionId = useAppStore((state) => state.selection.sessionId)
@@ -63,11 +64,6 @@ export function Composer() {
     (state) => state.sessionSelectionIntentRevision,
   )
   const threadId = useAppStore(selectCurrentThreadId)
-  const sessionCurrent = useAppStore((state) =>
-    state.selection.sessionId === undefined
-      ? state.draftModelSelection
-      : state.modelSelections[state.selection.sessionId],
-  )
   const setPromptDraft = useAppStore((state) => state.setPromptDraft)
   const admitInput = useAppStore((state) => state.admitInput)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
@@ -138,26 +134,9 @@ export function Composer() {
     },
     [getFileIndex],
   )
-  const effectiveModel = resolveEffectiveModel({
-    sessionCurrent,
-    userPreference,
-    defaultProvider,
-    defaultModel,
-  })
-  const draftAttachments = inputContentAttachments(draft)
-  const requiresImages = draftAttachments.some((attachment) =>
-    attachment.mediaType.startsWith("image/"),
-  )
-  const route = useModelRoutePreview(
-    effectiveModel,
-    {
-      ...(requiresImages ? { inputModalities: ["image"] } : {}),
-    },
-    sessionId,
-  )
   const routeError =
-    route?.preview?.available === false
-      ? (route.preview.rejections[0]?.message ??
+    preview?.available === false
+      ? (preview.rejections[0]?.message ??
         "No connected account can run this model selection.")
       : undefined
   const modelEntry = providers
@@ -166,9 +145,9 @@ export function Composer() {
   const supportsImages =
     modelEntry === undefined
       ? true
-      : ((
-          route?.preview?.inputModalities ?? modelEntry.inputModalities
-        )?.includes("image") ?? false)
+      : ((preview?.inputModalities ?? modelEntry.inputModalities)?.includes(
+          "image",
+        ) ?? false)
   const contextTokens = view.contextTokens
   // The snapshot pairs tokens with the window of the model that produced
   // them. Records written before capacity was persisted fall back to the
@@ -439,7 +418,7 @@ export function Composer() {
             usedTokens={contextTokens?.activeContextTokens}
             capacity={contextCapacity}
           />
-          <ModelSelector routePreview={{ value: route?.preview }} />
+          <ModelSelector routePreview={{ value: preview }} />
         </>
       }
       importAttachments={importAttachments}

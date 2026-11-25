@@ -7195,6 +7195,7 @@ it.each([
   const newRead = useAppStore.getState().loadUsage()
   const usage = {
     generatedAt: "2026-10-08T15:00:00Z",
+    recentAccountIds: [],
     totals: {
       inputTokens: 100,
       outputTokens: 20,

@@ -861,6 +861,7 @@ export async function createYakitoriApplication(
               account.state === "connected" ? "available" : "requires_login",
             credentialKind: "oauth",
             usage: { status: "unavailable", reason: "not_supported" },
+            management: "chatgpt",
           },
           fetchedAt: Date.now(),
         }

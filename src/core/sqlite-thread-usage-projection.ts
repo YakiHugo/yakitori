@@ -194,6 +194,13 @@ export class SqliteThreadUsageProjection {
       ORDER BY SUM(input_tokens + output_tokens) DESC, provider, model
     `)
       .all() as unknown as ModelRow[]
+    const recentAccounts = this.#database
+      .prepare(`
+        SELECT provider FROM usage_unique_turns
+        WHERE source_kind = 'turn' AND provider <> ''
+        GROUP BY provider ORDER BY MAX(julianday(occurred_at)) DESC, provider
+      `)
+      .all() as unknown as ReadonlyArray<Readonly<{ provider: string }>>
     const modelDays = this.#database
       .prepare(`
       SELECT date(occurred_at) AS date, ${modelColumns} FROM usage_unique_turns
@@ -219,6 +226,7 @@ export class SqliteThreadUsageProjection {
       .all(threadCount) as unknown as ThreadRow[]
     return {
       generatedAt: now.toISOString(),
+      recentAccountIds: recentAccounts.map((row) => row.provider),
       models: models.map((row) => ({
         provider: row.provider,
         model: row.model,

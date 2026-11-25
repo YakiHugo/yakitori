@@ -12,6 +12,8 @@ export type ThreadUsageSummary = Readonly<{
   generatedAt: string
   unavailableThreads?: number
   models: readonly ModelUsage[]
+  // Concrete accounts ordered by their latest recorded conversation turn.
+  recentAccountIds: readonly string[]
   modelDays: readonly (ModelUsage & Readonly<{ date: string }>)[]
   totals: UsageTokenTotals & Readonly<{ turns: number }>
   days: readonly (UsageTokenTotals &

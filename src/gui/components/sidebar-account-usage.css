@@ -1,0 +1,115 @@
+.account-usage-trigger[aria-expanded="true"] {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+}
+
+.account-usage-popover {
+  position: fixed;
+  inset: auto auto 54px 51px;
+  width: min(298px, calc(100vw - 63px));
+  max-height: calc(100dvh - 66px);
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  color: var(--popover-foreground);
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px #0002;
+  font-size: 12px;
+}
+
+.account-usage-heading,
+.account-usage-body {
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+  overflow-wrap: anywhere;
+}
+
+.account-usage-heading {
+  gap: 2px;
+  background: color-mix(in oklab, var(--muted) 40%, var(--popover));
+}
+
+.account-usage-heading h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.account-usage-heading > :not(h2),
+.account-usage-body > p,
+.account-usage-meter time,
+.account-usage-actions small {
+  color: var(--muted-foreground);
+}
+
+.account-usage-meter {
+  display: grid;
+  gap: 4px;
+  padding-block: 2px;
+}
+
+.account-usage-meter > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.account-usage-meter strong {
+  flex-shrink: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-usage-meter progress {
+  width: 100%;
+  height: 4px;
+  border-radius: 99px;
+  overflow: hidden;
+  appearance: none;
+}
+
+.account-usage-meter progress::-webkit-progress-bar {
+  background: var(--muted);
+}
+
+.account-usage-meter progress::-webkit-progress-value {
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--foreground) 65%, var(--muted));
+}
+
+.account-usage-meter time {
+  font-size: 11px;
+}
+
+.account-usage-actions {
+  display: grid;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+  padding: 5px 7px;
+}
+
+.account-usage-actions :is(button, a) {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.account-usage-actions :is(button, a):hover,
+.account-usage-actions button[aria-pressed="true"] {
+  background: var(--muted);
+}
+
+.account-usage-actions ul {
+  display: grid;
+  gap: 2px;
+  padding-inline-start: 8px;
+}

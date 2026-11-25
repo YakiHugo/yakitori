@@ -52,6 +52,7 @@ export function useModelRoutePreview(
   const [result, setResult] =
     useState<
       Readonly<{
+        apiBase: string
         key: string
         directory: typeof providers
         preview?: ModelRoutePreview
@@ -68,11 +69,12 @@ export function useModelRoutePreview(
       )
       .then(
         (preview) => {
-          if (active) setResult({ key, directory: providers, preview })
+          if (active) setResult({ apiBase, key, directory: providers, preview })
         },
         (error: unknown) => {
           if (active)
             setResult({
+              apiBase,
               key,
               directory: providers,
               error:
@@ -87,6 +89,7 @@ export function useModelRoutePreview(
     }
   }, [apiBase, key, providers])
   return result !== undefined &&
+    result.apiBase === apiBase &&
     result.key === key &&
     result.directory === providers
     ? result
