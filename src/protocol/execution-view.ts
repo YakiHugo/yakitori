@@ -209,6 +209,7 @@ export type TurnActivityPage = number | "unloaded" | "loaded"
 export type ExecutionView = Readonly<{
   deferredTurnActivity?: Readonly<Record<string, TurnActivityPage>>
   turnTimings: Readonly<Record<string, TurnTiming>>
+  finalAnswerItemIds?: Readonly<Record<string, readonly string[]>>
   entries: readonly ExecutionEntry[]
   activeTurnId?: string
   mateId?: string

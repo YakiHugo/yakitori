@@ -1,3 +1,4 @@
+import { executionEntries } from "../execution-view.ts"
 import { useEffect, useState } from "react"
 import type { AgentSummary } from "../../protocol/agents.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
@@ -20,7 +21,7 @@ export function useSessionAgents(
   const owner = `${apiBase}:${sessionId}`
   const collaborationCount = useAppStore((state) =>
     state.selection.sessionId === sessionId
-      ? state.execution.entries.filter(
+      ? executionEntries(state.execution).filter(
           (entry) =>
             entry.kind === "tool" &&
             entry.execution.type === "collaboration_tool_call" &&

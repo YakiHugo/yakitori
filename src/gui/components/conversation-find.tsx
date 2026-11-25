@@ -1,3 +1,4 @@
+import { executionEntries } from "../execution-view.ts"
 import { useTranslation } from "../i18n/use-translation.ts"
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react"
 import {
@@ -41,7 +42,7 @@ export function ConversationFind({
   )
   const rolloutId = useAppStore((state) => state.selectedSession?.rolloutId)
   const title = useAppStore((state) => state.selectedSession?.title)
-  const entries = useAppStore((state) => state.execution.entries)
+  const entries = useAppStore((state) => executionEntries(state.execution))
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
   const historyBefore = useAppStore((state) => state.historyBefore)
   const loadingHistory = useAppStore((state) =>

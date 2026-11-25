@@ -1,3 +1,4 @@
+import { executionEntries } from "../execution-view.ts"
 import { useTranslation } from "../i18n/use-translation.ts"
 import { ArrowDown } from "lucide-react"
 import {
@@ -127,7 +128,7 @@ export function Transcript({
       if (
         source.kind !== "message" ||
         source.sessionId !== state.selection.sessionId ||
-        containsMessageSource(state.execution.entries, source.messageId)
+        containsMessageSource(executionEntries(state.execution), source.messageId)
       )
         return
       setPendingSource({
@@ -181,7 +182,7 @@ export function Transcript({
         if (
           !found &&
           !state.inFlightActions.has(`history:${source.sessionId}`) &&
-          !containsMessageSource(state.execution.entries, source.messageId)
+          !containsMessageSource(executionEntries(state.execution), source.messageId)
         )
           setPendingSource((current) =>
             current === pendingSource ? undefined : current,

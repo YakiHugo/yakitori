@@ -17,6 +17,7 @@ export type ConversationScope = {
   workspaceRoot: string | undefined
   capabilities: ConversationCapabilities
   interactiveQuestions: boolean
+  focusItemId?: string | undefined
   loadTurnActivity?(turnId: string): Promise<void>
 }
 

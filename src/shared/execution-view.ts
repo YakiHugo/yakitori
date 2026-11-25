@@ -44,10 +44,24 @@ export type {
 
 type EntryPosition = Readonly<{ seq: number } | { afterSeq: number }>
 
+type TurnActivityEntries = Readonly<{
+  entries: readonly ExecutionEntry[]
+  positions: Readonly<Record<string, EntryPosition>>
+}>
+
+type CompletedExecutionTurn = TurnActivityEntries &
+  Readonly<{
+    turnId: string
+    answerItemIds: readonly string[]
+  }>
+
 export type ExecutionViewState = Readonly<{
   deferredTurnActivity: Readonly<Record<string, TurnActivityPage>>
+  turnActivity: Readonly<Record<string, TurnActivityEntries>>
   turnTimings: Readonly<Record<string, TurnTiming>>
   turnPositions: Readonly<Record<string, number>>
+  completedTurns: readonly CompletedExecutionTurn[]
+  // Only live entries and inputs awaiting their owning Turn are mutable.
   entries: readonly ExecutionEntry[]
   entryPositions: Readonly<Record<string, EntryPosition>>
   activeTurnId: string | undefined
@@ -147,6 +161,8 @@ export function createExecutionViewState(
 ): ExecutionViewState {
   const initial: ExecutionViewState = {
     deferredTurnActivity: {},
+    turnActivity: {},
+    completedTurns: [],
     entries: [],
     entryPositions: {},
     turnTimings: {},
@@ -356,6 +372,13 @@ export function prependExecutionHistory(
       replay: true,
     })
   }
+  return prependExecutionState(state, prefix)
+}
+
+export function prependExecutionState(
+  state: ExecutionViewState,
+  prefix: ExecutionViewState,
+): ExecutionViewState {
   const entryPositions = { ...prefix.entryPositions }
   for (const [key, position] of Object.entries(state.entryPositions)) {
     const earlier = entryPositions[key]
@@ -416,6 +439,14 @@ export function prependExecutionHistory(
   }
   return {
     ...state,
+    deferredTurnActivity: {
+      ...prefix.deferredTurnActivity,
+      ...state.deferredTurnActivity,
+    },
+    completedTurns:
+      prefix.completedTurns.length === 0
+        ? state.completedTurns
+        : [...prefix.completedTurns, ...state.completedTurns],
     entries,
     entryPositions,
     // Consumers enumerate timings chronologically, including the composer's
@@ -443,10 +474,203 @@ export function prependExecutionHistory(
   }
 }
 
+export function archiveExecutionTurn(
+  state: ExecutionViewState,
+  turnId: string,
+  keepEntry: (entry: ExecutionEntry) => boolean,
+): ExecutionViewState {
+  const entries: ExecutionEntry[] = []
+  const remaining: ExecutionEntry[] = []
+  const entryPositions = { ...state.entryPositions }
+  const positions: Record<string, EntryPosition> = {}
+  for (const entry of state.entries) {
+    if (keepEntry(entry)) {
+      remaining.push(entry)
+    } else {
+      entries.push(entry)
+      const key = executionEntryIdentity(entry)
+      const position = entryPositions[key]
+      if (position !== undefined) positions[key] = position
+      delete entryPositions[key]
+    }
+  }
+  const outcome = state.turnTimings[turnId]?.outcome
+  const last = entries.findLast(
+    (entry) =>
+      "turnId" in entry &&
+      entry.turnId === turnId &&
+      entry.kind !== "permission" &&
+      entry.kind !== "compaction" &&
+      entry.kind !== "image_output" &&
+      entry.kind !== "turn_terminal",
+  )
+  const answerItemIds =
+    outcome?.status === "completed"
+      ? (outcome.answerItemIds ??
+        (last?.kind === "assistant" && !last.refusal
+          ? [last.source?.itemId ?? last.itemId]
+          : []))
+      : []
+  return {
+    ...state,
+    completedTurns: [
+      ...state.completedTurns,
+      { turnId, entries, positions, answerItemIds },
+    ],
+    entries: remaining,
+    entryPositions,
+    ...indexEntries(remaining),
+  }
+}
+
+const completedEntriesCache = new WeakMap<
+  readonly CompletedExecutionTurn[],
+  {
+    entries: readonly ExecutionEntry[]
+    positions: Readonly<Record<string, EntryPosition>>
+    finalAnswerItemIds: Readonly<Record<string, readonly string[]>>
+    withLive: WeakMap<readonly ExecutionEntry[], readonly ExecutionEntry[]>
+  }
+>()
+
+function completedExecution(segments: readonly CompletedExecutionTurn[]) {
+  const cached = completedEntriesCache.get(segments)
+  if (cached !== undefined) return cached
+  const positions: Record<string, EntryPosition> = {}
+  const finalAnswerItemIds: Record<string, readonly string[]> = {}
+  for (const turn of segments) {
+    Object.assign(positions, turn.positions)
+    finalAnswerItemIds[turn.turnId] = turn.answerItemIds
+  }
+  const completed = {
+    entries: segments.flatMap((turn) => turn.entries),
+    positions,
+    finalAnswerItemIds,
+    withLive: new WeakMap<
+      readonly ExecutionEntry[],
+      readonly ExecutionEntry[]
+    >(),
+  }
+  completedEntriesCache.set(segments, completed)
+  return completed
+}
+
+function executionPosition(position: EntryPosition | undefined): number {
+  return position === undefined
+    ? Number.POSITIVE_INFINITY
+    : "seq" in position
+      ? position.seq
+      : position.afterSeq + 0.5
+}
+
+export function executionEntries(
+  state: ExecutionViewState,
+): readonly ExecutionEntry[] {
+  if (state.completedTurns.length === 0) return state.entries
+  const completed = completedExecution(state.completedTurns)
+  if (state.entries.length === 0) return completed.entries
+  const cached = completed.withLive.get(state.entries)
+  if (cached !== undefined) return cached
+  const entries = [...completed.entries, ...state.entries]
+  const last = completed.entries.at(-1)
+  const first = state.entries[0]
+  const position = (entry: ExecutionEntry) => {
+    const key = executionEntryIdentity(entry)
+    return executionPosition(
+      state.entryPositions[key] ?? completed.positions[key],
+    )
+  }
+  // Standalone inputs, such as late answers, can sit between completed Turns.
+  if (
+    last !== undefined &&
+    first !== undefined &&
+    position(last) > position(first)
+  )
+    entries.sort((left, right) => position(left) - position(right))
+  completed.withLive.set(state.entries, entries)
+  return entries
+}
+
+export function appendTurnActivityPage(
+  state: ExecutionViewState,
+  turnId: string,
+  events: readonly AppSessionEventEnvelope[],
+  nextBefore: number | undefined,
+): ExecutionViewState {
+  const existing = state.turnActivity[turnId]
+  const turn = prependExecutionHistory(
+    {
+      ...createExecutionViewState(),
+      entries: existing?.entries ?? [],
+      entryPositions: existing?.positions ?? {},
+      turnTimings:
+        state.turnTimings[turnId] === undefined
+          ? {}
+          : { [turnId]: state.turnTimings[turnId] },
+    },
+    events,
+  )
+  return {
+    ...state,
+    turnActivity: {
+      ...state.turnActivity,
+      [turnId]: { entries: turn.entries, positions: turn.entryPositions },
+    },
+    deferredTurnActivity: {
+      ...state.deferredTurnActivity,
+      [turnId]: nextBefore ?? "loaded",
+    },
+  }
+}
+
+function displayEntries(state: ExecutionViewState): readonly ExecutionEntry[] {
+  const base = executionEntries(state)
+  const pages = Object.values(state.turnActivity)
+  if (pages.length === 0) return base
+
+  // Activity is independent of the reducer's canonical transcript. Interleave
+  // its rows only for presentation, leaving the live cursor and timeline intact.
+  const basePositions = {
+    ...completedExecution(state.completedTurns).positions,
+    ...state.entryPositions,
+  }
+  const activity = pages
+    .flatMap(({ entries, positions }) =>
+      entries.flatMap((entry) => {
+        const key = executionEntryIdentity(entry)
+        return Object.hasOwn(basePositions, key)
+          ? []
+          : [{ entry, seq: executionPosition(positions[key]) }]
+      }),
+    )
+    .sort((left, right) => left.seq - right.seq)
+  if (activity.length === 0) return base
+
+  const entries: ExecutionEntry[] = []
+  let next = 0
+  for (const entry of base) {
+    const seq = executionPosition(basePositions[executionEntryIdentity(entry)])
+    while (next < activity.length) {
+      const item = activity[next]
+      if (item === undefined || item.seq >= seq) break
+      entries.push(item.entry)
+      next++
+    }
+    entries.push(entry)
+  }
+  return [...entries, ...activity.slice(next).map(({ entry }) => entry)]
+}
+
 export function projectExecutionView(state: ExecutionViewState): ExecutionView {
   const activeActivity = projectActiveActivity(state)
   return {
-    entries: state.entries,
+    entries: displayEntries(state),
+    ...(state.completedTurns.length === 0
+      ? {}
+      : {
+          finalAnswerItemIds: completedExecution(state.completedTurns)
+            .finalAnswerItemIds,
+        }),
     ...(Object.keys(state.deferredTurnActivity).length === 0
       ? {}
       : { deferredTurnActivity: state.deferredTurnActivity }),
