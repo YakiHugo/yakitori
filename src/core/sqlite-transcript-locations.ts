@@ -8,9 +8,10 @@ type IndexedLocation = RolloutRecordLocation &
 export function createTranscriptLocationTable(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS transcript_locations (
-      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL REFERENCES projection_threads(thread_id) ON DELETE CASCADE,
       seq INTEGER NOT NULL,
       rollout_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
       item_id TEXT NOT NULL,
       start INTEGER NOT NULL,
       length INTEGER NOT NULL,
@@ -28,8 +29,10 @@ export function indexTranscriptLocations(
   locations: ReadonlyMap<number, RolloutRecordLocation>,
 ): void {
   const insert = database.prepare(`
-    INSERT INTO transcript_locations (thread_id, seq, rollout_id, item_id, start, length)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO transcript_locations (thread_id, seq, rollout_id, turn_id, item_id, start, length)
+    VALUES (?, ?, ?, COALESCE(
+      (SELECT turn_id FROM thread_items WHERE thread_id = ? AND seq = ?), ?
+    ), ?, ?, ?)
   `)
   for (const { item, rolloutId, seq } of records) {
     if (item.type !== "response_item" && item.type !== "agent_message") continue
@@ -40,6 +43,9 @@ export function indexTranscriptLocations(
       threadId,
       seq,
       rolloutId,
+      threadId,
+      seq,
+      item.item.turnId,
       item.item.id,
       location.start,
       location.length,

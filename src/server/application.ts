@@ -9,7 +9,6 @@ import {
   sep,
 } from "node:path"
 import packageJson from "../../package.json" with { type: "json" }
-import { ContextManager } from "../core/context-manager.ts"
 import {
   createSqliteAgentGraphStore,
   JsonlThreadStore,
@@ -1653,30 +1652,30 @@ export async function createYakitoriApplication(
               sessionId === undefined || live
                 ? undefined
                 : sideChats.routingContext(sessionId)
+            const runtime = live ?? side
             const stored =
-              sessionId === undefined || live || side
+              sessionId === undefined || runtime !== undefined
                 ? undefined
-                : await threadStore.readThread(sessionId)
-            const context =
-              live?.context ??
-              side?.context ??
-              (stored
-                ? ContextManager.fromStoredThread(stored).snapshot()
-                : undefined)
-            const configuration =
-              live?.configuration ??
-              side?.configuration ??
-              stored?.rollout
-                .flatMap(({ item }) =>
-                  item.type === "turn_context"
-                    ? [item.context.configuration]
-                    : [],
-                )
-                .at(-1)
-            const active = modelRoutingRequirements({
-              history: context?.history.map(({ item }) => item) ?? [],
-              ...(configuration === undefined ? {} : { configuration }),
-            })
+                : await threadStore.readModelRouting(sessionId)
+            const active =
+              runtime === undefined
+                ? {
+                    ...(stored?.hasImage
+                      ? { inputModalities: ["image" as const] }
+                      : {}),
+                    ...(stored?.preferredAccount === undefined
+                      ? {}
+                      : { preferredAccount: stored.preferredAccount }),
+                    ...(stored?.contextWindowTokens === undefined
+                      ? {}
+                      : { contextWindowTokens: stored.contextWindowTokens }),
+                  }
+                : modelRoutingRequirements({
+                    history: runtime.context.history.map(({ item }) => item),
+                    ...(runtime.configuration === undefined
+                      ? {}
+                      : { configuration: runtime.configuration }),
+                  })
             return modelRouter.preview(selection, {
               ...active,
               ...requirements,

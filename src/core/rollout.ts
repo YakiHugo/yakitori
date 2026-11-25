@@ -248,6 +248,13 @@ export type ThreadSummary = ThreadMetadata &
   }>
 
 export type ThreadStatusProjection = Readonly<{
+  activeTurnId?: string
+  displayCounts?: Readonly<{
+    inputs: number
+    turns: number
+    items: number
+    tools: number
+  }>
   latestTurnOutcome?: "completed" | "failed" | "interrupted"
   // Uses the public event sequence (rollout seq + 1), for a local read watermark.
   latestCompletionSeq?: number

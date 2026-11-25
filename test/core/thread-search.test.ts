@@ -508,6 +508,7 @@ it("rebuilds old search text projections from unchanged authoritative rollouts",
     "rollout.jsonl",
   )
   const authoritative = await readFile(rolloutPath)
+  await store.searchThreads({ searchTerm: "foo_bar", limit: 10 })
   const database = new DatabaseSync(join(root, "thread-search.sqlite"))
   try {
     // Version 3 parsed user source as Markdown. Keep the source stamps current:

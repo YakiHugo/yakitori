@@ -1,5 +1,12 @@
 import { appendFileSync } from "node:fs"
-import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises"
+import {
+  access,
+  appendFile,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -10,7 +17,7 @@ import {
 } from "../../src/core/display-window.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { RolloutItem, StoredRolloutItem } from "../../src/core/rollout.ts"
-import { SqliteThreadSearchProjection } from "../../src/core/sqlite-thread-search-projection.ts"
+import { SqliteThreadHistoryProjection } from "../../src/core/sqlite-thread-history-projection.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 
@@ -103,8 +110,8 @@ async function createStore(id = "thread_display") {
   return { root, store, id }
 }
 
-function checkpoint(root: string, id: string) {
-  const database = new DatabaseSync(join(root, "thread-search.sqlite"))
+function checkpoint(root: string, id: string, projection = "history") {
+  const database = new DatabaseSync(join(root, `thread-${projection}.sqlite`))
   try {
     return database
       .prepare(`
@@ -118,6 +125,72 @@ function checkpoint(root: string, id: string) {
 }
 
 describe("persisted display projection", () => {
+  it("opens persisted history before search initializes its database", async () => {
+    const { root, store, id } = await createStore()
+    await store.appendItems(id, turn("independent"))
+    await store.shutdownThread(id)
+
+    // A metadata-only timestamp change does not invalidate a complete
+    // history checkpoint.
+    await utimes(join(root, "threads", `${id}.json`), 0, 0)
+    const restarted = new JsonlThreadStore({ root })
+    const history = await restarted.readDisplayWindow(id, undefined, true)
+    expect(history).toMatchObject({ endSeq: 5, projectionReady: true })
+    await expect(
+      access(join(root, "thread-search.sqlite")),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    await expect(
+      restarted.searchThreads({ searchTerm: "independent", limit: 1 }),
+    ).resolves.toMatchObject({ matches: [{ summary: { id } }] })
+  })
+
+  it("keeps legacy commentary out of the final answer while its trailing activity is deferred", async () => {
+    const { root, store, id } = await createStore()
+    const turnId = "turn_parts"
+    const commentary: RolloutItem = {
+      type: "item_completed",
+      turnId,
+      item: {
+        type: "agent_message",
+        itemId: "commentary",
+        content: [{ type: "text", text: "I will examine this." }],
+      },
+    }
+    const reasoning: RolloutItem = {
+      type: "item_completed",
+      turnId,
+      item: {
+        type: "reasoning",
+        itemId: "reasoning",
+        text: "Checking the context.",
+      },
+    }
+    await store.appendItems(id, [input("parts"), commentary, reasoning])
+    await store.appendItems(id, [
+      { type: "turn_completed", turnId, outcome: "completed" },
+    ])
+    await store.shutdownThread(id)
+
+    const restarted = new JsonlThreadStore({ root })
+    const summary = await restarted.readDisplayWindow(id, undefined, true)
+    expect(summary?.records.map(({ seq }) => seq)).toEqual([1, 2, 4])
+    expect(summary?.records.at(-1)?.item).toMatchObject({
+      completion: { answerItemIds: [] },
+    })
+    expect(summary?.activityTurnIds).toEqual([turnId])
+    const activity = await restarted.readDisplayActivity(
+      id,
+      id,
+      turnId,
+      Number.MAX_SAFE_INTEGER,
+    )
+    expect(activity?.records).toEqual([
+      expect.objectContaining({ seq: 3, item: reasoning }),
+    ])
+  })
+
   it("lists cold summaries without repairing unrelated histories ahead of the selected session", async () => {
     const unrelatedId = "thread_a_unrelated"
     const selectedId = "thread_z_selected"
@@ -128,8 +201,8 @@ describe("persisted display projection", () => {
     await store.persistThread(selectedId, PersistContext.TurnStart)
     await store.appendItems(selectedId, turn("selected"))
     await store.shutdownThread(selectedId)
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads").run()
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database.prepare("DELETE FROM projection_threads").run()
     database.close()
     const restarted = new JsonlThreadStore({ root })
     const listed = await restarted.listThreads()
@@ -144,11 +217,13 @@ describe("persisted display projection", () => {
     expect(selected?.endSeq).toBe(5)
     // The selected read also crosses the projection queue: any unrelated
     // repairs mistakenly queued by listing would have committed by now.
-    const projected = new DatabaseSync(join(root, "thread-search.sqlite"))
+    const projected = new DatabaseSync(join(root, "thread-history.sqlite"))
     try {
       expect(
         projected
-          .prepare("SELECT thread_id FROM search_threads ORDER BY thread_id")
+          .prepare(
+            "SELECT thread_id FROM projection_threads ORDER BY thread_id",
+          )
           .all(),
       ).toEqual([{ thread_id: selectedId }])
     } finally {
@@ -156,7 +231,7 @@ describe("persisted display projection", () => {
     }
   })
 
-  it("searches every unopened durable session on demand after a shared projection schema reset", async () => {
+  it("searches every unopened durable session on demand after a search projection schema reset", async () => {
     const firstId = "thread_first_unopened"
     const secondId = "thread_second_unopened"
     const { root, store } = await createStore(firstId)
@@ -166,6 +241,7 @@ describe("persisted display projection", () => {
     await store.persistThread(secondId, PersistContext.TurnStart)
     await store.appendItems(secondId, turn("match_second"))
     await store.shutdownThread(secondId)
+    await store.searchThreads({ searchTerm: "match_", limit: 10 })
     const database = new DatabaseSync(join(root, "thread-search.sqlite"))
     database.exec("PRAGMA user_version = 0")
     database.close()
@@ -213,11 +289,13 @@ describe("persisted display projection", () => {
     expect(occurrences?.occurrences.map(({ itemId }) => itemId)).toEqual([
       "input_selected",
     ])
-    expect(checkpoint(root, selectedId)).toMatchObject({ next_seq: 6 })
-    expect(checkpoint(root, unrelatedId)).toBeUndefined()
+    expect(checkpoint(root, selectedId, "search")).toMatchObject({
+      next_seq: 6,
+    })
+    expect(checkpoint(root, unrelatedId, "search")).toBeUndefined()
   })
 
-  it("flushes another Session while its cold neighbor is being indexed", async () => {
+  it("opens a Session and flushes another while a search repair is paused", async () => {
     const { root, store, id } = await createStore()
     await store.appendItems(id, turn("warm_writer"))
     await store.flushThread(id)
@@ -234,7 +312,7 @@ describe("persisted display projection", () => {
     await store.searchThreads({ searchTerm: "warm_writer", limit: 10 })
     const database = new DatabaseSync(join(root, "thread-search.sqlite"))
     database
-      .prepare("DELETE FROM search_threads WHERE thread_id = ?")
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
       .run(coldId)
     database.close()
 
@@ -252,9 +330,11 @@ describe("persisted display projection", () => {
       blocked.resolve()
       await release.promise
     }
-    const repairing = store.readInputAdmissions(coldId, [
-      "turn_late_search_result",
-    ])
+    const repairing = store.searchThreadOccurrences({
+      threadId: coldId,
+      searchTerm: "late_search_result",
+      limit: 10,
+    })
     await blocked.promise
 
     let searchFinished = false
@@ -276,13 +356,16 @@ describe("persisted display projection", () => {
     try {
       await vi.waitFor(() => expect(flushed).toBe(true), { timeout: 2_000 })
       expect(searchFinished).toBe(false)
+      const window = await store.readDisplayWindow(coldId)
+      expect(window?.projectionReady).toBe(true)
+      expect(window?.endSeq).toBe(displayPageRecords + 5)
     } finally {
       release.resolve()
       await settled
       await store.shutdownThread(id)
     }
-    expect((await repairing)?.records.map(({ seq }) => seq)).toEqual([
-      displayPageRecords + 3,
+    expect((await repairing)?.occurrences.map(({ itemId }) => itemId)).toEqual([
+      "input_late_search_result",
     ])
     expect((await searching).matches.map(({ summary }) => summary.id)).toEqual([
       coldId,
@@ -297,8 +380,15 @@ describe("persisted display projection", () => {
     await store.appendItems(id, turn("old"))
     await store.flushThread(id)
     await store.searchThreads({ searchTerm: "old", limit: 10 })
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    const database = new DatabaseSync(
+      join(
+        root,
+        trigger === "search" ? "thread-search.sqlite" : "thread-history.sqlite",
+      ),
+    )
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
     database.close()
 
     const log = join(root, "rollouts", id, "rollout.jsonl")
@@ -356,7 +446,7 @@ describe("persisted display projection", () => {
     const settled = Promise.allSettled([repairs, saving, search])
     try {
       await vi.waitFor(() => expect(flushed).toBe(true), { timeout: 2_000 })
-      expect(searchFinished).toBe(false)
+      if (trigger === "search") expect(searchFinished).toBe(false)
       expect(await readFile(log, "utf8")).toContain(
         "input_written_before_repair",
       )
@@ -379,8 +469,10 @@ describe("persisted display projection", () => {
     await store.shutdownThread(id)
     const other = new JsonlThreadStore({ root })
     await other.initialize()
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
     database.close()
     const blocked = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
@@ -428,8 +520,10 @@ describe("persisted display projection", () => {
   it("does not replay a writer append already consumed while its projection update waits", async () => {
     const { root, store, id } = await createStore()
     await store.appendItems(id, turn("first"))
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
     database.close()
     const blocked = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
@@ -441,13 +535,13 @@ describe("persisted display projection", () => {
       blocked.resolve()
       await release.promise
     }
-    const append = SqliteThreadSearchProjection.prototype.append
+    const append = SqliteThreadHistoryProjection.prototype.append
     const projectionErrors: unknown[] = []
     vi.spyOn(
-      SqliteThreadSearchProjection.prototype,
+      SqliteThreadHistoryProjection.prototype,
       "append",
     ).mockImplementation(function (
-      this: SqliteThreadSearchProjection,
+      this: SqliteThreadHistoryProjection,
       ...args
     ) {
       try {
@@ -497,8 +591,10 @@ describe("persisted display projection", () => {
       ),
     ])
     await store.shutdownThread(id)
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
     database.close()
     const release = Promise.withResolvers<void>()
     let reads = 0
@@ -708,15 +804,17 @@ describe("persisted display projection", () => {
       ),
     ])
     await store.shutdownThread(id)
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
     database.close()
-    const append = SqliteThreadSearchProjection.prototype.append
+    const append = SqliteThreadHistoryProjection.prototype.append
     let batches = 0
     const fault = vi
-      .spyOn(SqliteThreadSearchProjection.prototype, "append")
+      .spyOn(SqliteThreadHistoryProjection.prototype, "append")
       .mockImplementation(function (
-        this: SqliteThreadSearchProjection,
+        this: SqliteThreadHistoryProjection,
         ...args
       ) {
         batches += 1
@@ -756,13 +854,13 @@ describe("persisted display projection", () => {
       item: input(name),
     })
     await appendFile(path, `${JSON.stringify(external(6, "before_repair"))}\n`)
-    const append = SqliteThreadSearchProjection.prototype.append
+    const append = SqliteThreadHistoryProjection.prototype.append
     let appended = false
     vi.spyOn(
-      SqliteThreadSearchProjection.prototype,
+      SqliteThreadHistoryProjection.prototype,
       "append",
     ).mockImplementation(function (
-      this: SqliteThreadSearchProjection,
+      this: SqliteThreadHistoryProjection,
       ...args
     ) {
       append.apply(this, args)
@@ -841,12 +939,12 @@ describe("persisted display projection", () => {
     })
     expect(second?.records.map(({ seq }) => seq)).toEqual([3, 4, 5])
     expect(second).toMatchObject({ nextAfter: 7, hasMore: false, endSeq: 7 })
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
     try {
       expect(
         database
           .prepare(
-            "SELECT 1 FROM display_records WHERE record_json LIKE '%provider-only%'",
+            "SELECT 1 FROM thread_items WHERE record_json LIKE '%provider-only%'",
           )
           .get(),
       ).toBeUndefined()
@@ -875,8 +973,10 @@ describe("persisted display projection", () => {
     // Invalidate only this disposable row; JSONL stays intact. The selected
     // read is independent of repair and the next targeted lookup establishes
     // complete coverage through the canonical watermark.
-    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
-    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
     database.close()
     const restarted = new JsonlThreadStore({ root })
     await restarted.initialize()
