@@ -36,7 +36,7 @@ import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { FileGlyph } from "./file-glyph.tsx"
 import { MarkdownCitation } from "./markdown-citation.tsx"
-import { MarkdownImage } from "./markdown-image.tsx"
+import { MarkdownImage, MarkdownImageInLink } from "./markdown-image.tsx"
 import { MermaidDiagram } from "./mermaid-diagram.tsx"
 import { CopyIconButton } from "./response-actions.tsx"
 
@@ -322,14 +322,17 @@ function createMarkdownComponents(
   apiBase: string,
   citations: readonly InlineCitation[],
   citationListId: string | undefined,
+  compactImages: boolean,
 ): Components {
   return {
     a: (props) => (
-      <MarkdownLink
-        {...props}
-        workspaceRoot={workspaceRoot}
-        documentPath={documentPath}
-      />
+      <MarkdownImageInLink value={true}>
+        <MarkdownLink
+          {...props}
+          workspaceRoot={workspaceRoot}
+          documentPath={documentPath}
+        />
+      </MarkdownImageInLink>
     ),
     img: ({ src, alt, title }) => (
       <MarkdownImage
@@ -339,6 +342,7 @@ function createMarkdownComponents(
         workspaceRoot={workspaceRoot}
         documentPath={documentPath}
         apiBase={apiBase}
+        compact={compactImages}
       />
     ),
     pre: MarkdownPre,
@@ -367,6 +371,7 @@ export const MarkdownView = memo(function MarkdownView({
   apiBase: apiBaseOverride,
   streaming = false,
   allowRawHtml = false,
+  compactImages = false,
   sources,
   citationListId,
 }: Readonly<{
@@ -377,6 +382,7 @@ export const MarkdownView = memo(function MarkdownView({
   apiBase?: string | undefined
   streaming?: boolean
   allowRawHtml?: boolean
+  compactImages?: boolean
   sources?: readonly CitationSource[] | undefined
   citationListId?: string
 }>) {
@@ -403,8 +409,16 @@ export const MarkdownView = memo(function MarkdownView({
         apiBase,
         citations,
         citationListId,
+        compactImages,
       ),
-    [workspaceRoot, documentPath, apiBase, citations, citationListId],
+    [
+      workspaceRoot,
+      documentPath,
+      apiBase,
+      citations,
+      citationListId,
+      compactImages,
+    ],
   )
   const useIncrementalParser =
     streaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text)

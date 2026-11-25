@@ -80,6 +80,7 @@ export function ReasoningTrace({
                 {body.trim() ? (
                   <MarkdownView
                     text={body}
+                    compactImages
                     streaming={active && entry.status === "streaming"}
                     className="markdown-compact"
                     workspaceRoot={workspaceRoot}
