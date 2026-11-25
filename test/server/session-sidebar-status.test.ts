@@ -310,7 +310,7 @@ describe("authoritative session sidebar status", () => {
                 }),
                 sessionId,
               )
-            cache.exec("PRAGMA user_version = 6")
+            cache.exec("PRAGMA user_version = 3")
           } finally {
             cache.close()
           }
