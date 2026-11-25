@@ -31,6 +31,7 @@ export default defineConfig({
         "hosted-tools.spec.ts",
         "acp-output.spec.ts",
         "account-financials.spec.ts",
+        "sidebar-account-usage.spec.ts",
         "title-model.spec.ts",
         "app-update-renderer.spec.ts",
         "goal-renderer.spec.ts",

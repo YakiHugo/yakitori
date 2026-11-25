@@ -31,6 +31,7 @@ const latest = {
 const older = { ...emptyUsage, inputTokens: 200, outputTokens: 80, turns: 1 }
 const summary: ThreadUsageSummary = {
   generatedAt: "2026-10-02T18:00:00Z",
+  recentAccountIds: [],
   totals: {
     ...emptyUsage,
     inputTokens: 1300,
@@ -111,6 +112,7 @@ describe("usage dashboard", () => {
         loading: false,
         summary: {
           generatedAt: "2026-10-02T18:00:00Z",
+          recentAccountIds: [],
           totals,
           days: [{ ...totals, date: "2026-10-02" }],
           models: [model],

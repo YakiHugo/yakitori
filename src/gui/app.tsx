@@ -18,6 +18,10 @@ import { Select } from "./components/ui/select.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useChatInterrupt } from "./hooks/use-chat-interrupt.ts"
+import {
+  type ComposerRoute,
+  useComposerRoute,
+} from "./hooks/use-composer-route.ts"
 import { useSessionRead } from "./hooks/use-session-read.ts"
 import { UNCONFIRMED_INPUT_NOTICE } from "./input-recovery-memory.ts"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
@@ -34,6 +38,8 @@ export function App() {
       state.hydratingSessionId === state.selection.sessionId,
   )
   const hasSession = useAppStore((state) => state.selectedSession !== undefined)
+  const archived = useAppStore((state) => state.selectedSession?.archived)
+  const route = useComposerRoute(externalSession === undefined && !archived)
   const emptySession = useAppStore((state) => {
     if (
       state.execution.entries.length > 0 ||
@@ -90,6 +96,7 @@ export function App() {
       <PreferencesEffects />
       <HistoryMatchDialog />
       <WorkspaceFrame
+        usageAccountId={route.preview?.target?.provider}
         heading={
           settingsOpen ? (
             <span>Settings</span>
@@ -140,7 +147,7 @@ export function App() {
                   {hydrating ? null : <ApprovalBar />}
                   {hydrating ? null : <QueuedInputs />}
                   {hydrating ? null : <GoalBar />}
-                  <SessionComposer />
+                  <SessionComposer route={route} />
                 </Transcript>
               </div>
               {hasSession && !hydrating ? <GoalEditor /> : null}
@@ -152,7 +159,7 @@ export function App() {
   )
 }
 
-function SessionComposer() {
+function SessionComposer({ route }: Readonly<{ route: ComposerRoute }>) {
   const session = useAppStore((state) => state.selectedSession)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
@@ -166,7 +173,7 @@ function SessionComposer() {
       state.hydratingSessionId !== undefined &&
       state.hydratingSessionId === state.selection.sessionId,
   )
-  if (!session?.archived) return <Composer />
+  if (!session?.archived) return <Composer route={route} />
   if (hydrating) return null
   const stopping =
     activeTurnId !== undefined && inFlightActions.has(`cancel:${activeTurnId}`)

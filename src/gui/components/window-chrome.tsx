@@ -10,6 +10,7 @@ import { type ReactNode, type RefObject, useEffect } from "react"
 import { useNavigationHistory } from "../hooks/use-navigation-history.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { AppUpdate } from "./app-update.tsx"
+import { SidebarAccountUsage } from "./sidebar-account-usage.tsx"
 
 export function WindowChrome({
   sidebarOpen,
@@ -19,6 +20,7 @@ export function WindowChrome({
   onToggleWorkspace,
   workspaceToggleRef,
   actions,
+  usageAccountId,
 }: Readonly<{
   sidebarOpen: boolean
   onToggleSidebar(): void
@@ -27,6 +29,7 @@ export function WindowChrome({
   onToggleWorkspace(): void
   workspaceToggleRef?: RefObject<HTMLButtonElement | null>
   actions?: ReactNode
+  usageAccountId?: string | undefined
 }>) {
   const settingsOpen = useAppStore(
     (state) => state.settingsSection !== undefined,
@@ -39,7 +42,9 @@ export function WindowChrome({
       if (
         event.isComposing ||
         event.shiftKey ||
-        document.querySelector("dialog[open], [role=dialog]")
+        document.querySelector(
+          "dialog[open], [role=dialog]:not([popover]), [popover]:popover-open",
+        )
       )
         return
       const command = (event.metaKey || event.ctrlKey) && !event.altKey
@@ -141,6 +146,7 @@ export function WindowChrome({
         </button>
         <div className="window-rail-settings app-update-rail">
           <AppUpdate />
+          <SidebarAccountUsage currentAccountId={usageAccountId} />
           <button
             type="button"
             className="window-rail-button"

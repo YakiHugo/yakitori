@@ -19,6 +19,7 @@ vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
 }))
 const summary: ThreadUsageSummary = {
   generatedAt: "2026-10-22T00:00:00Z",
+  recentAccountIds: [],
   totals: {
     inputTokens: 1007,
     outputTokens: 13,

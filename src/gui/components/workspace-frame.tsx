@@ -75,7 +75,12 @@ function tabLabel(tab: WorkspaceTab): string {
 export function WorkspaceFrame({
   children,
   heading,
-}: Readonly<{ children: ReactNode; heading?: ReactNode }>) {
+  usageAccountId,
+}: Readonly<{
+  children: ReactNode
+  heading?: ReactNode
+  usageAccountId?: string | undefined
+}>) {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("yakitori.sidebarOpen") !== "false",
   )
@@ -436,6 +441,7 @@ export function WorkspaceFrame({
   return (
     <div className="window-shell">
       <WindowChrome
+        usageAccountId={usageAccountId}
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         heading={heading}
