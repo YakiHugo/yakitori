@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Plus } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type {
@@ -30,6 +31,7 @@ export function ProviderSettings() {
 }
 
 function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
+  const { t } = useTranslation()
   const loadProviders = useAppStore((state) => state.loadProviders)
   const chatGPT = useChatGPTConnections(apiBase, true)
   const [providers, setProviders] = useState<readonly ApiConfiguredProvider[]>()
@@ -116,7 +118,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
             setError(
               cause instanceof Error
                 ? cause.message
-                : "Could not load provider connections.",
+                : t("Could not load provider connections."),
             )
         },
       )
@@ -139,7 +141,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
           models: [],
         }
       : {
-          name: "Custom provider",
+          name: t("Custom provider"),
           service: "generic",
           wireApi: "openai_chat_completions",
           baseURL: "",
@@ -201,7 +203,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
           pendingRequest.current === request &&
           revision === draftRevision.current
         )
-          setTestStatus("Connection test succeeded.")
+          setTestStatus(t("Connection test succeeded."))
       } else {
         const response = await client.request(
           "provider/configuration/write",
@@ -225,7 +227,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
         revision === draftRevision.current
       )
         setError(
-          cause instanceof Error ? cause.message : "Provider action failed.",
+          cause instanceof Error ? cause.message : t("Provider action failed."),
         )
     } finally {
       if (mounted.current && pendingRequest.current === request) {
@@ -263,7 +265,9 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
         revision === draftRevision.current
       )
         setError(
-          cause instanceof Error ? cause.message : "Could not remove provider.",
+          cause instanceof Error
+            ? cause.message
+            : t("Could not remove provider."),
         )
     } finally {
       if (mounted.current && pendingRequest.current === request) {
@@ -304,7 +308,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
         setError(
           cause instanceof Error
             ? cause.message
-            : "Could not update the connection.",
+            : t("Could not update the connection."),
         )
     } finally {
       if (mounted.current && pendingRequest.current === request) {
@@ -374,7 +378,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
         revision === draftRevision.current
       )
         setError(
-          cause instanceof Error ? cause.message : "Could not fetch models.",
+          cause instanceof Error ? cause.message : t("Could not fetch models."),
         )
     } finally {
       if (mounted.current && pendingRequest.current === request) {
@@ -410,7 +414,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
         }
       : undefined
   return (
-    <section className="provider-workspace" aria-label="Provider settings">
+    <section className="provider-workspace" aria-label={t("Provider settings")}>
       <div
         className="provider-workspace-body"
         key={detail?.id ?? "account-list"}
@@ -439,7 +443,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                   variant="outline"
                   onClick={() => edit(selectedProvider)}
                 >
-                  Edit connection
+                  {t("Edit connection")}
                 </Button>
               ) : selectedChatGPT ? (
                 <ChatGPTAccountActions
@@ -454,7 +458,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
             {!showCatalog ? (
               <div className="provider-page-heading">
                 <div>
-                  <h2>Accounts</h2>
+                  <h2>{t("Accounts")}</h2>
                 </div>
                 <Button
                   type="button"
@@ -462,14 +466,16 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                   onClick={() => setAdding(true)}
                 >
                   <Plus data-icon="inline-start" />
-                  Add account
+                  {t("Add account")}
                 </Button>
               </div>
             ) : null}
             {providers === undefined ? (
               <div className="provider-loading">
                 <p>
-                  {error ? "Connections unavailable." : "Loading connections…"}
+                  {error
+                    ? t("Connections unavailable.")
+                    : t("Loading connections…")}
                 </p>
                 {error ? (
                   <Button
@@ -481,7 +487,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                       setReadRevision((revision) => revision + 1)
                     }}
                   >
-                    Retry
+                    {t("Retry")}
                   </Button>
                 ) : null}
               </div>
@@ -518,7 +524,9 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                 />
               </ProviderConnectionList>
             ) : !adding ? (
-              <p className="provider-message">No accounts connected yet.</p>
+              <p className="provider-message">
+                {t("No accounts connected yet.")}
+              </p>
             ) : null}
             {showCatalog ? (
               <ProviderCatalog
@@ -548,7 +556,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
         )}
         {undoId ? (
           <div className="provider-undo" role="status">
-            <span>Connection updated.</span>
+            <span>{t("Connection updated.")}</span>
             <Button
               type="button"
               variant="ghost"
@@ -563,7 +571,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                 )
               }
             >
-              Undo
+              {t("Undo")}
             </Button>
           </div>
         ) : null}
@@ -586,13 +594,14 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
             />
           ))}
         {importing ? (
-          <SidebarDialog title="Import provider" onClose={closeImport}>
+          <SidebarDialog title={t("Import provider")} onClose={closeImport}>
             <p className="provider-field-hint">
-              Paste a Yakitori provider connection as JSON: configuration plus
-              an optional apiKey. Empty models fetch the service's catalog.
+              {t(
+                "Paste a Yakitori provider connection as JSON: configuration plus an optional apiKey. Empty models fetch the service's catalog.",
+              )}
             </p>
             <textarea
-              aria-label="Provider configuration JSON"
+              aria-label={t("Provider configuration JSON")}
               className="provider-import-input"
               value={importText}
               onChange={(event) => setImportText(event.target.value)}
@@ -603,7 +612,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
             {error ? <p role="alert">{error}</p> : null}
             <div className="provider-editor-footer">
               <Button type="button" variant="ghost" onClick={closeImport}>
-                Cancel
+                {t("Cancel")}
               </Button>
               <Button
                 type="button"
@@ -613,7 +622,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                   try {
                     value = JSON.parse(importText)
                   } catch {
-                    setError("Enter valid JSON.")
+                    setError(t("Enter valid JSON."))
                     return
                   }
                   if (
@@ -622,7 +631,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                     Array.isArray(value) ||
                     !("configuration" in value)
                   ) {
-                    setError("A connection must include configuration.")
+                    setError(t("A connection must include configuration."))
                     return
                   }
                   const request = Symbol()
@@ -660,7 +669,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                           setError(
                             cause instanceof Error
                               ? cause.message
-                              : "Import failed.",
+                              : t("Import failed."),
                           )
                       },
                     )
@@ -675,7 +684,7 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
                     })
                 }}
               >
-                Import
+                {t("Import")}
               </Button>
             </div>
           </SidebarDialog>

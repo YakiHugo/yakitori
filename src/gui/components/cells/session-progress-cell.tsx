@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import {
   Check,
   ChevronRight,
@@ -31,6 +32,7 @@ export function UserQuestionsCell({
   toolCallId: string
   itemId: string
 }>) {
+  const { t } = useTranslation()
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const apiBase = useAppStore((state) => state.apiBase)
   const answered = useAppStore((state) =>
@@ -79,10 +81,10 @@ export function UserQuestionsCell({
               kind: "message",
               sessionId,
               messageId: itemId,
-              label: "Question",
+              label: t("Question"),
             },
       )}
-      aria-label="Questions from your Mate"
+      aria-label={t("Questions from your Mate")}
       className="flex flex-col gap-4 rounded-lg border p-4"
       onSubmit={(event) => {
         event.preventDefault()
@@ -111,7 +113,7 @@ export function UserQuestionsCell({
             setError(
               reason instanceof Error
                 ? reason.message
-                : "Could not send answers.",
+                : t("Could not send answers."),
             )
           })
           .finally(() => setSubmitting(false))
@@ -119,12 +121,12 @@ export function UserQuestionsCell({
     >
       <p className="text-body font-medium">
         {answered
-          ? "Questions answered"
+          ? t("Questions answered")
           : done
             ? request.questions.length === 1
-              ? "Question closed"
-              : "Questions closed"
-            : "Your input"}
+              ? t("Question closed")
+              : t("Questions closed")
+            : t("Your input")}
       </p>
       <FieldGroup>
         {request.questions.map((question, index) => (
@@ -152,8 +154,8 @@ export function UserQuestionsCell({
                   disabled={submitting || pending || sessionId === undefined}
                   placeholder={
                     question.options
-                      ? "Choose a suggestion or type your answer"
-                      : "Your answer"
+                      ? t("Choose a suggestion or type your answer")
+                      : t("Your answer")
                   }
                   autoComplete="off"
                   required
@@ -186,8 +188,10 @@ export function UserQuestionsCell({
       {!answered && pending ? (
         <p role="status" className="text-detail text-muted-foreground">
           {received
-            ? "Answers received; waiting for confirmation."
-            : "Answer delivery is unconfirmed. Retry sends the same answers, not a new submission."}
+            ? t("Answers received; waiting for confirmation.")
+            : t(
+                "Answer delivery is unconfirmed. Retry sends the same answers, not a new submission.",
+              )}
         </p>
       ) : null}
       {!answered && error ? (
@@ -207,10 +211,10 @@ export function UserQuestionsCell({
             }
           >
             {submitting
-              ? "Sending…"
+              ? t("Sending…")
               : pending
-                ? "Retry same answers"
-                : "Send answers"}
+                ? t("Retry same answers")
+                : t("Send answers")}
           </Button>
           {!done ? (
             <Button
@@ -222,7 +226,7 @@ export function UserQuestionsCell({
                 useAppStore.getState().dismissQuestions(toolCallId)
               }
             >
-              Skip questions
+              {t("Skip questions")}
             </Button>
           ) : null}
         </div>
@@ -234,6 +238,7 @@ export function UserQuestionsCell({
 export function CompactionCell({
   entry,
 }: Readonly<{ entry: Extract<ExecutionEntry, { kind: "compaction" }> }>) {
+  const { t } = useTranslation()
   return (
     <div
       className={cn(
@@ -246,14 +251,15 @@ export function CompactionCell({
     >
       <span aria-hidden="true" className="grow border-t" />
       {entry.status === "completed"
-        ? "Context compacted"
-        : "Context compaction failed"}
+        ? t("Context compacted")
+        : t("Context compaction failed")}
       <span aria-hidden="true" className="grow border-t" />
     </div>
   )
 }
 
 export function PlanCell({ plan }: Readonly<{ plan: SessionPlan }>) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const contentId = useId()
   const completed = plan.plan.filter(
@@ -267,7 +273,7 @@ export function PlanCell({ plan }: Readonly<{ plan: SessionPlan }>) {
       >
         <ListChecks aria-hidden="true" className="size-4 shrink-0" />
         <span>
-          Updated plan · {completed}/{plan.plan.length} completed
+          {t("Updated plan ·")} {completed}/{plan.plan.length} completed
         </span>
         <ChevronRight
           aria-hidden="true"

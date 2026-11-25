@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Check, ChevronDown, ChevronLeft, Zap } from "lucide-react"
 import {
   type CSSProperties,
@@ -10,6 +11,7 @@ import type { ApiProviderModel } from "../../protocol/application.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
 import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
 import type { ModelRoutePreview } from "../../protocol/model-routing.ts"
+import type { Message, Translate } from "../i18n/messages.ts"
 import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { cn } from "../lib/utils.ts"
@@ -17,7 +19,20 @@ import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import "./ui/select.css"
 
-function displayEffort(effort: string): string {
+const effortLabels = new Map<string, Message>([
+  ["none", "None"],
+  ["minimal", "Minimal"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+  ["xhigh", "Xhigh"],
+  ["max", "Max"],
+  ["ultra", "Ultra"],
+])
+
+function displayEffort(effort: string, t: Translate): string {
+  const label = effortLabels.get(effort)
+  if (label !== undefined) return t(label)
   return effort
     .split(/[-_]/)
     .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
@@ -43,6 +58,7 @@ export function ModelSelector({
   selection?: ModelSelection | undefined
   onChange?: (selection: ModelSelection | undefined) => void
 }> = {}) {
+  const { t } = useTranslation()
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const providers = useAppStore((state) => state.providers)
   const defaultProvider = useAppStore((state) => state.defaultProvider)
@@ -75,13 +91,11 @@ export function ModelSelector({
     if (menu === "effort") {
       const target =
         panel?.querySelector<HTMLElement>('[role="slider"]') ??
-        panel?.querySelector<HTMLElement>(
-          '[title="Fast speed"], [title="Standard speed"]',
-        )
+        panel?.querySelector<HTMLElement>("[data-speed-toggle]")
       target?.focus()
     } else {
       const target =
-        panel?.querySelector<HTMLElement>('[aria-label="Back to effort"]') ??
+        panel?.querySelector<HTMLElement>("[data-effort-back]") ??
         panel?.querySelector<HTMLElement>("[aria-pressed]")
       target?.focus()
     }
@@ -173,7 +187,7 @@ export function ModelSelector({
       ? effectiveEntry?.toolPolicy
       : preview.toolPolicy) === "chat_only"
   const modelLabel =
-    effectiveEntry?.displayName ?? effectiveEntry?.id ?? "Select model"
+    effectiveEntry?.displayName ?? effectiveEntry?.id ?? t("Select model")
   const hasAvailableModels = availableProviders.some(
     (provider) => provider.models.length > 0,
   )
@@ -281,7 +295,7 @@ export function ModelSelector({
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       {chatOnly ? (
         <span role="status" className="text-xs text-muted-foreground">
-          Text/image chat only — no tools or file access
+          {t("Text/image chat only — no tools or file access")}
         </span>
       ) : null}
       <div ref={selectorRef} className="relative flex min-w-0 items-center">
@@ -295,7 +309,7 @@ export function ModelSelector({
 
         <button
           type="button"
-          aria-label="Select model and effort"
+          aria-label={t("Select model and effort")}
           aria-expanded={menu !== undefined}
           data-size="sm"
           data-variant="ghost"
@@ -311,7 +325,7 @@ export function ModelSelector({
             <>
               <span aria-hidden="true" />
               <span className="min-w-0 truncate text-muted-foreground">
-                {menu === "effort" ? "Select effort" : "Select model"}
+                {menu === "effort" ? t("Select effort") : t("Select model")}
               </span>
             </>
           ) : (
@@ -322,7 +336,7 @@ export function ModelSelector({
               <span className="min-w-0 truncate">{modelLabel}</span>
               {currentEffort === undefined ? null : (
                 <span className="shrink-0 text-muted-foreground">
-                  {displayEffort(currentEffort)}
+                  {displayEffort(currentEffort, t)}
                 </span>
               )}
             </>
@@ -346,9 +360,10 @@ export function ModelSelector({
                     <button
                       type="button"
                       aria-label={
-                        fast ? "Use standard speed" : "Use fast speed"
+                        fast ? t("Use standard speed") : t("Use fast speed")
                       }
-                      title={fast ? "Fast speed" : "Standard speed"}
+                      title={fast ? t("Fast speed") : t("Standard speed")}
+                      data-speed-toggle=""
                       onClick={toggleSpeed}
                       className="grid size-8 place-items-center rounded-full transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
@@ -366,7 +381,7 @@ export function ModelSelector({
                   )}
                   <button
                     type="button"
-                    aria-label="Select model"
+                    aria-label={t("Select model")}
                     onClick={() => setMenu("model")}
                     className="mx-auto flex max-w-full flex-col items-center rounded-lg px-2 py-0.5 text-center transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
@@ -377,8 +392,8 @@ export function ModelSelector({
                       )}
                     >
                       {currentEffort === undefined
-                        ? "Automatic"
-                        : displayEffort(currentEffort)}
+                        ? t("Automatic")
+                        : displayEffort(currentEffort, t)}
                     </span>
                     <span className="mt-0.5 block max-w-full truncate text-center text-[13px] font-normal text-muted-foreground">
                       {modelLabel}
@@ -396,7 +411,7 @@ export function ModelSelector({
                   />
                 ) : (
                   <p className="px-2 pt-4 pb-2 text-center text-xs text-muted-foreground">
-                    This model has no reasoning effort levels.
+                    {t("This model has no reasoning effort levels.")}
                   </p>
                 )}
               </div>
@@ -406,7 +421,8 @@ export function ModelSelector({
                   {effortMenuAvailable ? (
                     <button
                       type="button"
-                      aria-label="Back to effort"
+                      aria-label={t("Back to effort")}
+                      data-effort-back=""
                       onClick={() => setMenu("effort")}
                       className="grid size-7 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
@@ -414,7 +430,7 @@ export function ModelSelector({
                     </button>
                   ) : null}
                   <span className="px-1 text-xs font-medium text-muted-foreground">
-                    Select model
+                    {t("Select model")}
                   </span>
                 </div>
                 <div className="space-y-2">
@@ -442,7 +458,7 @@ export function ModelSelector({
                             <span className="min-w-0 flex-1 truncate">
                               {model.displayName ?? model.id}
                               {model.toolPolicy === "chat_only"
-                                ? " · Chat only (no tools)"
+                                ? ` ${t("· Chat only (no tools)")}`
                                 : ""}
                             </span>
                             {effective?.provider === provider.name &&
@@ -460,7 +476,7 @@ export function ModelSelector({
                 {!hasAvailableModels ? (
                   <div className="px-2.5 py-2">
                     <p className="mb-2 text-xs text-muted-foreground">
-                      No models available to choose.
+                      {t("No models available to choose.")}
                     </p>
                     <button
                       type="button"
@@ -470,7 +486,7 @@ export function ModelSelector({
                         useAppStore.getState().openSettings("providers")
                       }}
                     >
-                      Manage accounts
+                      {t("Manage accounts")}
                     </button>
                   </div>
                 ) : null}
@@ -485,7 +501,7 @@ export function ModelSelector({
                       useAppStore.getState().openSettings("providers")
                     }}
                   >
-                    Some accounts need attention
+                    {t("Some accounts need attention")}
                   </button>
                 ) : null}
               </div>
@@ -513,6 +529,7 @@ function EffortSlider({
   fast: boolean
   onChange(effort: string): void
 }>) {
+  const { locale, t } = useTranslation()
   const track = useRef<HTMLDivElement>(null)
   const index = current === undefined ? -1 : efforts.indexOf(current)
   const last = efforts.length - 1
@@ -535,11 +552,17 @@ function EffortSlider({
       <div
         ref={track}
         role="slider"
-        aria-label="Reasoning effort"
+        aria-label={t("Reasoning effort")}
         aria-valuemin={0}
         aria-valuemax={last}
         aria-valuenow={index < 0 ? undefined : index}
-        aria-valuetext={current ?? "Automatic (provider default)"}
+        aria-valuetext={
+          current === undefined
+            ? t("Automatic (provider default)")
+            : locale === "en"
+              ? current
+              : displayEffort(current, t)
+        }
         data-peak={peak}
         tabIndex={0}
         onKeyDown={(event) => {
@@ -611,7 +634,7 @@ function EffortSlider({
           <button
             key={effort}
             type="button"
-            aria-label={effort}
+            aria-label={locale === "en" ? effort : displayEffort(effort, t)}
             aria-pressed={stop === index}
             tabIndex={-1}
             onClick={() => onChange(effort)}

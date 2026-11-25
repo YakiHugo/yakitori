@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   Files,
   FolderOpen,
@@ -68,6 +69,7 @@ export function WorkspaceFrame({
   sessionActions?: ReactNode
   usageAccountId?: string | undefined
 }>) {
+  const { t } = useTranslation()
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("yakitori.sidebarOpen") !== "false",
   )
@@ -252,11 +254,13 @@ export function WorkspaceFrame({
       type="button"
       className="sidebar-icon workspace-overview-trigger"
       aria-label={
-        overviewOpen ? "Hide project overview" : "Show project overview"
+        overviewOpen ? t("Hide project overview") : t("Show project overview")
       }
       aria-expanded={overviewOpen}
       aria-controls={overviewOpen ? "workspace-project-overview" : undefined}
-      title={overviewOpen ? "Hide project overview" : "Show project overview"}
+      title={
+        overviewOpen ? t("Hide project overview") : t("Show project overview")
+      }
       onClick={() => {
         if (!overviewOpen && open && window.innerWidth < 960) setOpen(false)
         setOverviewOpen(!overviewOpen)
@@ -481,12 +485,14 @@ export function WorkspaceFrame({
                     type="button"
                     className="sidebar-icon"
                     aria-label={
-                      expanded ? "Restore workspace size" : "Expand workspace"
+                      expanded
+                        ? t("Restore workspace size")
+                        : t("Expand workspace")
                     }
                     title={
                       expanded
-                        ? "Restore split"
-                        : "Fill view with content · Option-click for Chat"
+                        ? t("Restore split")
+                        : t("Fill view with content · Option-click for Chat")
                     }
                     onClick={(event) => {
                       if (event.altKey) {
@@ -507,10 +513,12 @@ export function WorkspaceFrame({
                 ref={workspaceToggle}
                 type="button"
                 className="sidebar-icon workspace-toggle"
-                aria-label={open ? "Hide workspace" : "Show workspace"}
+                aria-label={open ? t("Hide workspace") : t("Show workspace")}
                 aria-expanded={open}
                 aria-controls="workspace-panel"
-                title={open ? "Hide workspace (⌘⇧B)" : "Show workspace (⌘⇧B)"}
+                title={
+                  open ? t("Hide workspace (⌘⇧B)") : t("Show workspace (⌘⇧B)")
+                }
                 onClick={() => setOpen(!open)}
               >
                 <PanelRight size={16} />
@@ -534,7 +542,7 @@ export function WorkspaceFrame({
               id="workspace-project-overview"
               className="workspace-overview"
               role="dialog"
-              aria-label="Project overview"
+              aria-label={t("Project overview")}
               tabIndex={-1}
             >
               <div className="workspace-project-card">
@@ -547,8 +555,8 @@ export function WorkspaceFrame({
                   <button
                     type="button"
                     className="sidebar-icon"
-                    aria-label="Open project files"
-                    title="Open project files"
+                    aria-label={t("Open project files")}
+                    title={t("Open project files")}
                     onClick={() => {
                       setOverviewOpen(false)
                       addTab("files", sessionId)
@@ -567,7 +575,7 @@ export function WorkspaceFrame({
                     }}
                   >
                     <GitCompareArrows size={18} />
-                    <span>Changes</span>
+                    <span>{t("Changes")}</span>
                   </button>
                   {overviewGit.status?.branch ? (
                     <p className="workspace-project-branch">
@@ -578,12 +586,12 @@ export function WorkspaceFrame({
                     <div className="workspace-project-status" role="alert">
                       <p>{overviewGit.error}</p>
                       <button type="button" onClick={overviewGit.refresh}>
-                        Retry
+                        {t("Retry")}
                       </button>
                     </div>
                   ) : overviewGit.loading && !overviewGit.status ? (
                     <p className="workspace-project-status" role="status">
-                      Loading changes…
+                      {t("Loading changes…")}
                     </p>
                   ) : overviewGit.status ? (
                     <WorkspaceChangeSummary
@@ -601,7 +609,7 @@ export function WorkspaceFrame({
         </div>
         <aside
           id="workspace-panel"
-          aria-label="Workspace"
+          aria-label={t("Workspace")}
           aria-hidden={!open}
           inert={!open}
           className="workspace-frame"
@@ -611,7 +619,7 @@ export function WorkspaceFrame({
         >
           <hr
             tabIndex={0}
-            aria-label="Workspace width"
+            aria-label={t("Workspace width")}
             aria-orientation="vertical"
             aria-valuemin={320}
             aria-valuemax={maximumWidth}
@@ -768,10 +776,13 @@ export function WorkspaceFrame({
                 ) : (
                   <div className="workspace-empty">
                     <Files size={28} strokeWidth={1.25} />
-                    <strong>Your workspace, alongside your conversation</strong>
+                    <strong>
+                      {t("Your workspace, alongside your conversation")}
+                    </strong>
                     <p>
-                      Select a project or open a conversation to browse files
-                      and review changes.
+                      {t(
+                        "Select a project or open a conversation to browse files and review changes.",
+                      )}
                     </p>
                   </div>
                 )}
@@ -810,7 +821,7 @@ export function WorkspaceFrame({
             {activeFile && expanded ? (
               <aside
                 className="workspace-file-explorer"
-                aria-label="Project files"
+                aria-label={t("Project files")}
               >
                 <WorkspaceFiles
                   cwd={activeFile.cwd}
@@ -823,7 +834,7 @@ export function WorkspaceFrame({
         </aside>
         {closingFile ? (
           <DiscardFileDialog
-            name={workspaceTabPresentation(closingFile).label}
+            name={workspaceTabPresentation(closingFile, t).label}
             onCancel={() => setClosingFile(undefined)}
             onDiscard={() => {
               closeTab(closingFile.id)
@@ -839,7 +850,7 @@ export function WorkspaceFrame({
                   excerpt,
                   number: index + 1,
                   ownerId: `main:${nativeThreadId}`,
-                  conversation: "main conversation",
+                  conversation: t("main conversation"),
                 })),
                 ...visibleTabs.flatMap((tab) =>
                   tab.kind === "chat" &&
@@ -850,7 +861,7 @@ export function WorkspaceFrame({
                         excerpt,
                         number: index + 1,
                         ownerId: `side:${tab.id}`,
-                        conversation: workspaceTabPresentation(tab).label,
+                        conversation: workspaceTabPresentation(tab, t).label,
                       }))
                     : [],
                 ),
@@ -898,7 +909,7 @@ export function WorkspaceFrame({
         )}
         {closing && (
           <CloseSideChatDialog
-            title={workspaceTabPresentation(closing).label}
+            title={workspaceTabPresentation(closing, t).label}
             onCancel={() => setClosing(undefined)}
             onConfirm={() => {
               closeTab(closing.id)

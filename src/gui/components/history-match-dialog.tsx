@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import {
   useCallback,
   useEffect,
@@ -35,6 +36,7 @@ function HistoryMatchPage({
   match,
   apiBase,
 }: Readonly<{ match: HistoryMatch; apiBase: string }>) {
+  const { t } = useTranslation()
   const { sessionId, location } = match
   const [position, setPosition] = useState<
     Readonly<{ before?: number; after?: number }>
@@ -72,7 +74,7 @@ function HistoryMatchPage({
           setError(
             cause instanceof Error
               ? cause.message
-              : "Could not load this part of the conversation.",
+              : translate("Could not load this part of the conversation."),
           )
         },
       )
@@ -139,7 +141,7 @@ function HistoryMatchPage({
   const later = page?.historyAfter
   return (
     <SidebarDialog
-      title={match.title ?? "Conversation history"}
+      title={match.title ?? t("Conversation history")}
       onClose={close}
       className="!w-[min(54rem,92vw)]"
     >
@@ -147,7 +149,7 @@ function HistoryMatchPage({
         {error === undefined ? (
           execution === undefined ? (
             <p role="status" className="py-5 text-sm text-muted-foreground">
-              Loading conversation history…
+              {t("Loading conversation history…")}
             </p>
           ) : (
             <ConversationScopeContext.Provider
@@ -184,7 +186,7 @@ function HistoryMatchPage({
             if (earlier !== undefined) setPosition({ before: earlier })
           }}
         >
-          Earlier
+          {t("Earlier")}
         </button>
         <button
           type="button"
@@ -194,7 +196,7 @@ function HistoryMatchPage({
             if (later !== undefined) setPosition({ after: later })
           }}
         >
-          Later
+          {t("Later")}
         </button>
         <button
           type="button"
@@ -204,7 +206,7 @@ function HistoryMatchPage({
             void useAppStore.getState().selectSession(sessionId, match.summary)
           }}
         >
-          Open conversation
+          {t("Open conversation")}
         </button>
       </div>
     </SidebarDialog>

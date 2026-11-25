@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useCallback, useContext, useRef, useState } from "react"
 import { GOAL_DIRECTIVE } from "../../protocol/directives.ts"
 import { canResumeTurn } from "../../protocol/turn-recovery.ts"
@@ -35,6 +36,7 @@ import { ModelSelector } from "./model-selector.tsx"
 import { SessionCommandPanel } from "./session-command-panel.tsx"
 
 export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
+  const { t } = useTranslation()
   const ownRoute = useComposerRoute(route === undefined)
   const { effectiveModel, preview } = route ?? ownRoute
   const conversationScroll = useContext(ConversationScrollContext)
@@ -137,7 +139,7 @@ export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
   const routeError =
     preview?.available === false
       ? (preview.rejections[0]?.message ??
-        "No connected account can run this model selection.")
+        t("No connected account can run this model selection."))
       : undefined
   const modelEntry = providers
     .find((provider) => provider.name === effectiveModel?.provider)
@@ -203,7 +205,7 @@ export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
         setAttachmentError(
           error instanceof Error
             ? error.message
-            : "Images could not be attached.",
+            : t("Images could not be attached."),
         )
       }
     } finally {
@@ -214,7 +216,7 @@ export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
           setAttachmentError(
             error instanceof Error
               ? error.message
-              : "Image selection could not be released.",
+              : t("Image selection could not be released."),
           )
         }
       }
@@ -350,7 +352,7 @@ export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
                 )?.roots[0]
             if (!cwd) {
               useAppStore.setState({
-                message: "Select a project before creating AGENTS.md.",
+                message: t("Select a project before creating AGENTS.md."),
               })
               return
             }
@@ -430,12 +432,12 @@ export function Composer({ route }: Readonly<{ route?: ComposerRoute }> = {}) {
       fileSearchRoot={fileSearchCwd}
       placeholder={
         sessionId === undefined
-          ? "Describe what you want to work on"
+          ? t("Describe what you want to work on")
           : activeTurnId !== undefined
             ? sendShortcut === "enter"
-              ? "Steer this turn · ⌘ / Ctrl + Enter queues for the next"
-              : "⌘ / Ctrl + Enter steers · Shift + ⌘ / Ctrl + Enter queues"
-            : "Ask anything"
+              ? t("Steer this turn · ⌘ / Ctrl + Enter queues for the next")
+              : t("⌘ / Ctrl + Enter steers · Shift + ⌘ / Ctrl + Enter queues")
+            : t("Ask anything")
       }
     />
   )

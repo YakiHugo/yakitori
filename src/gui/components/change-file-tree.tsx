@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ChevronRight, FileCode2 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type { WorkspaceGitEntry } from "../../protocol/workspace.ts"
@@ -23,6 +24,7 @@ type Directory = {
 }
 
 export function ChangeFileTree(props: ChangeFileTreeProps) {
+  const { t } = useTranslation()
   const navigation = useRef<HTMLElement>(null)
   useEffect(() => {
     if (!props.selectedKey) return
@@ -76,7 +78,11 @@ export function ChangeFileTree(props: ChangeFileTreeProps) {
   }
 
   return (
-    <nav ref={navigation} className="change-tree" aria-label="Changed files">
+    <nav
+      ref={navigation}
+      className="change-tree"
+      aria-label={t("Changed files")}
+    >
       <DirectoryContents
         directory={root}
         sidesByPath={sidesByPath}
@@ -95,6 +101,7 @@ type DirectoryContentsProps = Readonly<{
 }>
 
 function DirectoryContents(props: DirectoryContentsProps) {
+  const { t } = useTranslation()
   return (
     <ul className="change-tree-list">
       {[...props.directory.directories.values()]
@@ -130,7 +137,7 @@ function DirectoryContents(props: DirectoryContentsProps) {
                 </span>
                 {props.sidesByPath.get(item.entry.path)?.size === 2 ? (
                   <span className="change-tree-scope">
-                    {item.staged ? "Staged" : "Unstaged"}
+                    {item.staged ? t("Staged") : t("Unstaged")}
                   </span>
                 ) : null}
                 <ChangeStats

@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import "./html-preview.css"
 
 export type HtmlPreviewProps = Readonly<{
@@ -11,6 +12,7 @@ const previewCsp =
   "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 
 export function HtmlPreview({ content, truncated }: HtmlPreviewProps) {
+  const { t } = useTranslation()
   // An iframe sandbox still allows its own document to navigate. Parsing in a
   // detached template keeps resources inert while removing automatic refresh
   // navigation; ordinary links remain available for deliberate clicks.
@@ -26,19 +28,20 @@ export function HtmlPreview({ content, truncated }: HtmlPreviewProps) {
     <div className="html-preview">
       {truncated ? (
         <p className="html-preview-notice" role="status">
-          Preview is incomplete. Missing markup may affect the layout.
+          {t("Preview is incomplete. Missing markup may affect the layout.")}
         </p>
       ) : null}
       <iframe
         className="html-preview-frame"
-        title="HTML file preview"
+        title={t("HTML file preview")}
         sandbox=""
         referrerPolicy="no-referrer"
         srcDoc={srcDoc}
       />
       <p className="html-preview-limits">
-        Scripts and external resources are blocked. Links may navigate inside
-        the preview.
+        {t(
+          "Scripts and external resources are blocked. Links may navigate inside the preview.",
+        )}
       </p>
     </div>
   )

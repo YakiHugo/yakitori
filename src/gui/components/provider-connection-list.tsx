@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import type { ReactNode } from "react"
 import { ChevronRight } from "lucide-react"
 import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
@@ -20,9 +21,13 @@ export function ProviderConnectionList({
   onEnabled(provider: ApiConfiguredProvider, enabled: boolean): void
   onMove(id: string, beforeId?: string): void
 }>) {
+  const { t } = useTranslation()
   const accounts = useAppStore((state) => state.accounts)
   return (
-    <section className="provider-connections" aria-label="Configured providers">
+    <section
+      className="provider-connections"
+      aria-label={t("Configured providers")}
+    >
       {children}
       {providers.map((provider, index) => {
         const config = provider.configuration
@@ -65,8 +70,8 @@ export function ProviderConnectionList({
             <button
               type="button"
               className="provider-move"
-              aria-label={`Move ${config.name}`}
-              title="Drag to reorder · Alt + Up/Down"
+              aria-label={t("Move {0}", config.name)}
+              title={t("Drag to reorder · Alt + Up/Down")}
               draggable={!pending}
               onDragStart={(event) => {
                 event.dataTransfer.setData(
@@ -110,14 +115,14 @@ export function ProviderConnectionList({
                 data-missing="true"
                 title={error}
               >
-                {error ? "Needs attention" : "Key required"}
+                {error ? t("Needs attention") : t("Key required")}
               </Badge>
             ) : null}
             <button
               type="button"
               role="switch"
               className="provider-switch"
-              aria-label={`Enable ${config.name}`}
+              aria-label={t("Enable {0}", config.name)}
               aria-checked={config.enabled !== false}
               disabled={pending}
               onClick={() => onEnabled(provider, config.enabled === false)}
@@ -127,7 +132,7 @@ export function ProviderConnectionList({
             <button
               type="button"
               className="provider-connection-open"
-              aria-label={`Open ${config.name} details`}
+              aria-label={t("Open {0} details", config.name)}
               onClick={() => onOpen(provider)}
             >
               <ChevronRight size={14} className="provider-connection-chevron" />

@@ -1,10 +1,12 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { ChevronRight, Cloud, LoaderCircle } from "lucide-react"
 import type { ReactNode } from "react"
 import type { HostedToolBlock } from "../../../protocol/hosted-tool.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
+import type { Message } from "../../i18n/messages.ts"
 import { openUrlTarget } from "../../lib/open-resource.ts"
 
-const toolLabels: Record<HostedToolBlock["kind"], string> = {
+const toolLabels: Record<HostedToolBlock["kind"], Message> = {
   web_search: "Search web",
   web_fetch: "Fetch page",
   file_search: "Search files",
@@ -21,6 +23,7 @@ export function HostedToolCell({
   entry: Extract<ExecutionEntry, { kind: "hosted_tool" }>
   code?: ReactNode
 }>) {
+  const { t } = useTranslation()
   const { tool, provider } = entry
   const web = tool.kind === "web_search" || tool.kind === "web_fetch"
   const resultLines = web
@@ -50,10 +53,10 @@ export function HostedToolCell({
         }
       />
       <span className="min-w-0 truncate">
-        {toolLabels[tool.kind]}
+        {t(toolLabels[tool.kind])}
         {tool.label ? ` · ${tool.label}` : ""}
       </span>
-      <span className="shrink-0 text-caption">Hosted</span>
+      <span className="shrink-0 text-caption">{t("Hosted")}</span>
       {provider === undefined ? null : (
         <span className="min-w-0 truncate text-caption">{provider}</span>
       )}
@@ -85,7 +88,7 @@ export function HostedToolCell({
       {resultLines.length > 0 ? (
         <ul
           className="mt-2 max-h-64 space-y-1 overflow-auto text-detail"
-          aria-label="Hosted web results"
+          aria-label={t("Hosted web results")}
         >
           {resultLines.map((line) => {
             const url = webUrl(line)

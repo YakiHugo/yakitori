@@ -1,3 +1,5 @@
+import { useTranslation } from "../i18n/use-translation.ts"
+import type { Message, Translate } from "../i18n/messages.ts"
 import { PanelRight, Pause, Play, Target, Trash2, Undo2, X } from "lucide-react"
 import { type ReactNode, useEffect, useState } from "react"
 import {
@@ -8,6 +10,7 @@ import { useAppStore } from "../store/app-store.ts"
 import { Button } from "./ui/button.tsx"
 
 export function GoalBar() {
+  const { locale, t } = useTranslation()
   const session = useAppStore((state) => state.selectedSession)
   const setGoal = useAppStore((state) => state.setGoal)
   const openGoalEditor = useAppStore((state) => state.openGoalDialog)
@@ -25,21 +28,25 @@ export function GoalBar() {
   const nextStatus = goalToggleStatus(status)
   return (
     <section
-      aria-label="Session goal"
+      aria-label={t("Session goal")}
       className="conversation-goal mx-auto w-full max-w-3xl px-4"
     >
       <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-muted px-3 py-2 text-xs text-muted-foreground">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <Target className="size-3.5 shrink-0" />
-          <span className="text-foreground">{goalStatusLabel(status)}</span>
-          <span title="Goal execution usage">
+          <span className="text-foreground">{t(goalStatusLabel(status))}</span>
+          <span title={t("Goal execution usage")}>
             {goal.tokenBudget === undefined
-              ? `${formatGoalElapsed(goal.timeUsedSeconds)} active`
-              : `${goal.tokensUsed.toLocaleString()} / ${goal.tokenBudget.toLocaleString()} tokens`}
+              ? t("{0} active", formatGoalElapsed(goal.timeUsedSeconds, t))
+              : t(
+                  "{0} / {1} tokens",
+                  goal.tokensUsed.toLocaleString(locale),
+                  goal.tokenBudget.toLocaleString(locale),
+                )}
           </span>
           <div className="ml-auto flex shrink-0 items-center">
             <GoalIconButton
-              label="Clear goal"
+              label={t("Clear goal")}
               disabled={saving}
               onClick={() => void clearGoal(session.id)}
             >
@@ -50,8 +57,8 @@ export function GoalBar() {
                 disabled={saving}
                 label={
                   nextStatus === GoalStatus.Paused
-                    ? "Pause goal"
-                    : "Resume goal"
+                    ? t("Pause goal")
+                    : t("Resume goal")
                 }
                 onClick={() =>
                   void setGoal({ sessionId: session.id, status: nextStatus })
@@ -64,7 +71,7 @@ export function GoalBar() {
                 )}
               </GoalIconButton>
             )}
-            <GoalIconButton label="Edit goal" onClick={openGoalEditor}>
+            <GoalIconButton label={t("Edit goal")} onClick={openGoalEditor}>
               <PanelRight className="size-3.5" />
             </GoalIconButton>
           </div>
@@ -78,6 +85,7 @@ export function GoalBar() {
 }
 
 export function GoalEditor() {
+  const { t } = useTranslation()
   const session = useAppStore((state) => state.selectedSession)
   const setGoal = useAppStore((state) => state.setGoal)
   const goalDialogRevision = useAppStore((state) => state.goalDialogRevision)
@@ -145,17 +153,17 @@ export function GoalEditor() {
     session.goal?.status === GoalStatus.BudgetLimited
   return (
     <aside
-      aria-label="Goal editor"
+      aria-label={t("Goal editor")}
       className="goal-editor flex w-[22rem] shrink-0 flex-col border-l bg-background"
     >
       <div className="goal-editor-header flex h-12 items-center justify-between gap-2 border-b px-3">
         <span className="truncate text-sm text-muted-foreground">
-          {updatedAgoLabel(session.goal?.updatedAt, now)}
+          {updatedAgoLabel(session.goal?.updatedAt, now, t)}
         </span>
         <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
-            aria-label="Close goal editor"
+            aria-label={t("Close goal editor")}
             onClick={() => setOpen(false)}
             className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
           >
@@ -172,7 +180,7 @@ export function GoalEditor() {
             }}
           >
             <Undo2 />
-            Revert
+            {t("Revert")}
           </Button>
           <Button
             type="button"
@@ -207,20 +215,20 @@ export function GoalEditor() {
               })
             }}
           >
-            Save
+            {t("Save")}
           </Button>
         </div>
       </div>
       <textarea
-        aria-label="Goal"
+        aria-label={t("Goal")}
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
-        placeholder="What should this conversation accomplish?"
+        placeholder={t("What should this conversation accomplish?")}
         className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none"
       />
       <div className="flex flex-col gap-2 border-t p-4">
         <label htmlFor="goal-token-budget" className="text-sm">
-          Token budget (optional)
+          {t("Token budget (optional)")}
         </label>
         <input
           id="goal-token-budget"
@@ -231,7 +239,7 @@ export function GoalEditor() {
           onChange={(event) => setBudgetDraft(event.target.value)}
           aria-invalid={!validBudget}
           aria-describedby="goal-token-budget-help"
-          placeholder="No token budget"
+          placeholder={t("No token budget")}
           className="h-9 rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <p
@@ -239,8 +247,8 @@ export function GoalEditor() {
           className="text-xs text-muted-foreground"
         >
           {validBudget
-            ? "Leave blank to run without a token budget."
-            : "Enter a positive whole number of tokens."}
+            ? t("Leave blank to run without a token budget.")
+            : t("Enter a positive whole number of tokens.")}
         </p>
       </div>
     </aside>
@@ -272,7 +280,7 @@ function GoalIconButton({
   )
 }
 
-function goalStatusLabel(status: GoalStatusValue): string {
+function goalStatusLabel(status: GoalStatusValue): Message {
   switch (status) {
     case GoalStatus.Paused:
       return "Paused goal"
@@ -304,23 +312,27 @@ function goalToggleStatus(
   }
 }
 
-function formatGoalElapsed(seconds: number): string {
+function formatGoalElapsed(seconds: number, t: Translate): string {
   const whole = Math.max(0, Math.floor(seconds))
-  if (whole < 60) return `${whole}s`
+  if (whole < 60) return t("{0}s", whole)
   const minutes = Math.floor(whole / 60)
-  if (minutes < 60) return `${minutes}m`
+  if (minutes < 60) return t("{0}m", minutes)
   const hours = Math.floor(minutes / 60)
   const rest = minutes % 60
-  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`
+  return rest === 0 ? t("{0}h", hours) : t("{0}h {1}m", hours, rest)
 }
 
-function updatedAgoLabel(updatedAt: string | undefined, now: number): string {
-  if (updatedAt === undefined) return "Not saved yet"
+function updatedAgoLabel(
+  updatedAt: string | undefined,
+  now: number,
+  t: Translate,
+): string {
+  if (updatedAt === undefined) return t("Not saved yet")
   const updated = Date.parse(updatedAt)
-  if (!Number.isFinite(updated)) return "Updated"
+  if (!Number.isFinite(updated)) return t("Updated")
   const minutes = Math.max(0, Math.floor((now - updated) / 60_000))
-  if (minutes === 0) return "Just updated"
+  if (minutes === 0) return t("Just updated")
   return minutes === 1
-    ? "Updated 1 minute ago"
-    : `Updated ${minutes} minutes ago`
+    ? t("Updated 1 minute ago")
+    : t("Updated {0} minutes ago", minutes)
 }

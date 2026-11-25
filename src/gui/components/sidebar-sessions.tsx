@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   Archive,
   ArchiveRestore,
@@ -28,6 +29,7 @@ export function SessionItems({
   onSelect,
 }: Readonly<{ projectId?: string | undefined; onSelect?(): void }> &
   SidebarListFilter) {
+  const { t } = useTranslation()
   const filter = {
     ...(sectionId === undefined ? {} : { sectionId }),
     ...(archived === undefined ? {} : { archived }),
@@ -67,16 +69,19 @@ export function SessionItems({
           data-sidebar-drop={archived ? undefined : "session"}
           data-drop-id={session.id}
           data-drop-section={sectionId}
-          data-drop-label={session.title ?? "Untitled session"}
+          data-drop-label={session.title ?? t("Untitled session")}
           data-selected={session.id === selectedId}
         >
           <SidebarMenu
-            label={`Session actions for ${session.title ?? "Untitled session"}`}
+            label={t(
+              "Session actions for {0}",
+              session.title ?? t("Untitled session"),
+            )}
             items={[
               ...(sectionId && index > 0
                 ? [
                     {
-                      label: "Move up",
+                      label: t("Move up"),
                       icon: <ArrowUp size={15} />,
                       action: () =>
                         void changeSidebar({
@@ -93,7 +98,7 @@ export function SessionItems({
               (index < sessions.length - 2 || !list?.nextCursor)
                 ? [
                     {
-                      label: "Move down",
+                      label: t("Move down"),
                       icon: <ArrowDown size={15} />,
                       action: () =>
                         void changeSidebar({
@@ -111,7 +116,7 @@ export function SessionItems({
                   ]
                 : []),
               {
-                label: session.sectionId === "pinned" ? "Unpin" : "Pin",
+                label: session.sectionId === "pinned" ? t("Unpin") : t("Pin"),
                 icon: <Pin size={15} />,
                 action: () =>
                   void changeSidebar({
@@ -121,16 +126,16 @@ export function SessionItems({
                   }),
               },
               {
-                label: "Rename",
+                label: t("Rename"),
                 icon: <Pencil size={15} />,
                 action: () => setRenaming(session),
               },
               {
-                label: "Move to section",
+                label: t("Move to section"),
                 icon: <FolderInput size={15} />,
                 items: [
-                  { id: "", name: "Projects / All sessions" },
-                  { id: "pinned", name: "Pinned" },
+                  { id: "", name: t("Projects / All sessions") },
+                  { id: "pinned", name: t("Pinned") },
                   ...sections,
                 ].map((section) => ({
                   id: section.id,
@@ -147,8 +152,8 @@ export function SessionItems({
               {
                 separatorBefore: true,
                 label: session.archived
-                  ? "Restore conversation"
-                  : "Archive conversation",
+                  ? t("Restore conversation")
+                  : t("Archive conversation"),
                 icon: session.archived ? (
                   <ArchiveRestore size={15} />
                 ) : (
@@ -162,7 +167,7 @@ export function SessionItems({
                   }),
               },
               {
-                label: "Delete conversation",
+                label: t("Delete conversation"),
                 icon: <Trash2 size={15} />,
                 destructive: true,
                 action: () => setPendingDeleteId(session.id),
@@ -176,8 +181,8 @@ export function SessionItems({
               data-drag-label={session.title ?? "Untitled session"}
               data-drag-project={session.projectId}
               aria-current={session.id === selectedId}
-              aria-label={session.title ?? "Untitled session"}
-              title={session.title ?? "Untitled session"}
+              aria-label={session.title ?? t("Untitled session")}
+              title={session.title ?? t("Untitled session")}
               onClick={() => {
                 onSelect?.()
                 void selectSession(session.id, session)
@@ -186,7 +191,7 @@ export function SessionItems({
             >
               <SessionStatus session={session} />
               <span className="min-w-0 flex-1 truncate text-left">
-                {session.title ?? "Untitled session"}
+                {session.title ?? t("Untitled session")}
               </span>
               {session.sectionId === "pinned" && (
                 <Pin size={12} className="shrink-0 text-muted-foreground" />
@@ -200,7 +205,7 @@ export function SessionItems({
       ))}
       {list?.loading && sessions.length === 0 && (
         <p role="status" className="sidebar-list-note">
-          Loading sessions…
+          {t("Loading sessions…")}
         </p>
       )}
       {list?.error ? (
@@ -210,13 +215,13 @@ export function SessionItems({
             type="button"
             onClick={() => void loadSessions(projectId, filter)}
           >
-            Retry
+            {t("Retry")}
           </button>
         </div>
       ) : (
         !list?.loading &&
         sessions.length === 0 && (
-          <p className="sidebar-list-note">No sessions yet</p>
+          <p className="sidebar-list-note">{t("No sessions yet")}</p>
         )
       )}
       {(hasHiddenRows || list?.nextCursor) && (
@@ -230,12 +235,12 @@ export function SessionItems({
               void loadSessions(projectId, { ...filter, append: true })
           }}
         >
-          Show more
+          {t("Show more")}
         </button>
       )}
       {renaming && (
         <SidebarNameDialog
-          title="Rename conversation"
+          title={t("Rename conversation")}
           initialName={renaming.title ?? ""}
           onClose={() => setRenaming(undefined)}
           onSave={(title) =>
@@ -245,19 +250,20 @@ export function SessionItems({
       )}
       {pendingDeleteId && (
         <SidebarDialog
-          title="Delete conversation?"
+          title={t("Delete conversation?")}
           onClose={() => setPendingDeleteId(undefined)}
         >
           <p className="text-sm text-muted-foreground">
-            This cannot be undone. Side chats and unsaved file drafts belonging
-            to this conversation will also close.
+            {t(
+              "This cannot be undone. Side chats and unsaved file drafts belonging to this conversation will also close.",
+            )}
           </p>
           <div className="mt-5 flex justify-end gap-2">
             <Button
               variant="ghost"
               onClick={() => setPendingDeleteId(undefined)}
             >
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -268,7 +274,7 @@ export function SessionItems({
                 )
               }}
             >
-              Confirm
+              {t("Confirm")}
             </Button>
           </div>
         </SidebarDialog>

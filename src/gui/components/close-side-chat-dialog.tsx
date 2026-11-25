@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useRef } from "react"
 
 export function CloseSideChatDialog({
@@ -9,6 +10,7 @@ export function CloseSideChatDialog({
   onConfirm(): void
   onCancel(): void
 }>) {
+  const { t } = useTranslation()
   const dialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     dialog.current?.showModal()
@@ -24,10 +26,10 @@ export function CloseSideChatDialog({
       }}
     >
       <h2 id="close-chat-title" className="text-base font-semibold">
-        Close {title}?
+        {t("Close")} {title}?
       </h2>
       <p className="mt-2 text-sm leading-6 text-muted-foreground">
-        This temporary chat will be deleted and cannot be recovered.
+        {t("This temporary chat will be deleted and cannot be recovered.")}
       </p>
       <div className="mt-5 flex justify-end gap-2">
         <button
@@ -35,14 +37,14 @@ export function CloseSideChatDialog({
           className="rounded-lg border px-3 py-2 text-sm"
           onClick={onCancel}
         >
-          Cancel
+          {t("Cancel")}
         </button>
         <button
           type="button"
           className="rounded-lg bg-destructive px-3 py-2 text-sm text-white"
           onClick={onConfirm}
         >
-          Close side chat
+          {t("Close side chat")}
         </button>
       </div>
     </dialog>

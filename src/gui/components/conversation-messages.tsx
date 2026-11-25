@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { ChevronRight, Info } from "lucide-react"
 import {
   memo,
@@ -406,6 +407,7 @@ const TurnBlock = memo(
     canPreviewUnmarkedAnswer: boolean
     retry: ActiveModelRetry | undefined
   }>) {
+    const { t } = useTranslation()
     const { threadId, sessionId, apiBase, loadTurnActivity } =
       useConversationScope()
     const [liveActivityCollapsed, setLiveActivityCollapsed] =
@@ -632,7 +634,9 @@ const TurnBlock = memo(
         )
       } catch (error) {
         setActivityError(
-          error instanceof Error ? error.message : "Could not load activity.",
+          error instanceof Error
+            ? error.message
+            : translate("Could not load activity."),
         )
       } finally {
         setLoadingActivity(false)
@@ -658,7 +662,7 @@ const TurnBlock = memo(
     return (
       <section
         className="conversation-response"
-        aria-label={active ? "Current response" : "Response"}
+        aria-label={active ? t("Current response") : t("Response")}
       >
         {entries.length > 0 || active || hasDisclosure ? (
           <div>
@@ -695,16 +699,16 @@ const TurnBlock = memo(
               {!expanded && hasEncryptedReasoning ? (
                 <span
                   className="min-w-0 truncate"
-                  title={encryptedReasoningLabel}
+                  title={t(encryptedReasoningLabel)}
                 >
-                  · {encryptedReasoningLabel}
+                  · {t(encryptedReasoningLabel)}
                 </span>
               ) : null}
               {retry ? (
                 <Tooltip>
                   <TooltipTrigger
                     type="button"
-                    aria-label="Retry details"
+                    aria-label={t("Retry details")}
                     className="inline-flex items-center hover:text-foreground"
                   >
                     <Info className="size-3.5" />
@@ -723,7 +727,7 @@ const TurnBlock = memo(
             return entry.kind === "tool_media" ? (
               <ToolResultParts
                 key={run.id}
-                label="Tool attachments"
+                label={t("Tool attachments")}
                 parts={entry.parts}
                 toolCallId={entry.toolCallId}
                 apiBase={apiBase}
@@ -744,7 +748,7 @@ const TurnBlock = memo(
             >
               <div className="conversation-activity-content">
                 {firstDisclosure && loadingActivity ? (
-                  <p role="status">Loading activity…</p>
+                  <p role="status">{t("Loading activity…")}</p>
                 ) : null}
                 {firstDisclosure && activityError ? (
                   <p role="alert">{activityError}</p>
@@ -759,8 +763,8 @@ const TurnBlock = memo(
                     onClick={() => void loadActivity()}
                   >
                     {activityError === undefined
-                      ? "Load earlier activity"
-                      : "Retry"}
+                      ? t("Load earlier activity")
+                      : t("Retry")}
                   </button>
                 ) : null}
                 <TranscriptPresenterSlot
@@ -770,7 +774,7 @@ const TurnBlock = memo(
                     activity.length === 0 ? null : (
                       <ol
                         className="agent-timeline"
-                        aria-label="Agent activity"
+                        aria-label={t("Agent activity")}
                       >
                         {activity.map((item) => (
                           <li

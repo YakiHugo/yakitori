@@ -1,7 +1,9 @@
 import { create } from "zustand"
+import { type Language, languages } from "../i18n/locale.ts"
 
 export type NotificationMode = "off" | "unfocused" | "always"
 export type Preferences = Readonly<{
+  language: Language
   appearance: "light" | "dark" | "system"
   sendShortcut: "enter" | "mod-enter"
   notificationMode: NotificationMode
@@ -9,6 +11,7 @@ export type Preferences = Readonly<{
 }>
 
 export const defaultPreferences: Preferences = {
+  language: "system",
   appearance: "light",
   sendShortcut: "enter",
   // Follow Codex's notification condition: only interrupt when unfocused.
@@ -29,7 +32,11 @@ export function readPreferences(): Preferences {
     return defaultPreferences
   }
   if (typeof value !== "object" || value === null) return defaultPreferences
+  const language = "language" in value ? value.language : undefined
   return {
+    language:
+      languages.find((option) => option === language) ??
+      defaultPreferences.language,
     appearance:
       "appearance" in value &&
       (value.appearance === "dark" || value.appearance === "system")

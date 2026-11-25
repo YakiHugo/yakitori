@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { FileCode2, X } from "lucide-react"
 import {
   lazy,
@@ -38,6 +39,7 @@ export function ModelConfigurationPanel({
   onChange(settings: ModelSettings): void
   onClose(): void
 }>) {
+  const { t } = useTranslation()
   const [path, setPath] = useState<string>()
   const [error, setError] = useState<string>()
   const applied = useRef(settings)
@@ -86,7 +88,8 @@ export function ModelConfigurationPanel({
       .then((snapshot) => {
         if (!active) return
         const user = snapshot.layers.find((layer) => layer.source === "user")
-        if (!user) throw new Error("User configuration file is unavailable.")
+        if (!user)
+          throw new Error(translate("User configuration file is unavailable."))
         setPath(user.path)
       })
       .catch((cause: unknown) => {
@@ -94,7 +97,7 @@ export function ModelConfigurationPanel({
           setError(
             cause instanceof Error
               ? cause.message
-              : "Could not locate configuration file.",
+              : translate("Could not locate configuration file."),
           )
       })
     return () => {
@@ -104,17 +107,17 @@ export function ModelConfigurationPanel({
   return (
     <aside
       className="model-configuration-panel"
-      aria-label="Model configuration"
+      aria-label={t("Model configuration")}
     >
       <header>
         <FileCode2 size={17} />
         <div className="model-configuration-identity">
           <strong>config.toml</strong>
-          <span title={path}>{path ?? "Locating configuration…"}</span>
+          <span title={path}>{path ?? t("Locating configuration…")}</span>
         </div>
         <button
           type="button"
-          aria-label="Close model configuration"
+          aria-label={t("Close model configuration")}
           onClick={onClose}
         >
           <X size={17} />
@@ -123,8 +126,9 @@ export function ModelConfigurationPanel({
       <div className="model-configuration-description">
         <strong>{model.displayName ?? model.id}</strong>
         <p>
-          Editing this model’s overrides in the configuration file. Changes
-          apply automatically; omitted values use the account’s defaults.
+          {t(
+            "Editing this model’s overrides in the configuration file. Changes apply automatically; omitted values use the account’s defaults.",
+          )}
         </p>
       </div>
       {error ? (
@@ -133,7 +137,7 @@ export function ModelConfigurationPanel({
         </p>
       ) : null}
       {path ? (
-        <Suspense fallback={<p role="status">Loading editor…</p>}>
+        <Suspense fallback={<p role="status">{t("Loading editor…")}</p>}>
           <CodeEditor
             value={value}
             path={path}
@@ -168,7 +172,9 @@ export function ModelConfigurationPanel({
                   Object.keys(account ?? {}).some((key) => key !== model.id)
                 ) {
                   setError(
-                    "Keep only this model’s configuration table in this editor.",
+                    t(
+                      "Keep only this model’s configuration table in this editor.",
+                    ),
                   )
                   return
                 }

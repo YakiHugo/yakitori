@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Plus, Search } from "lucide-react"
 import { useState } from "react"
 import type {
@@ -32,26 +33,27 @@ export function ProviderCatalog({
   onClose?(): void
   onImport(): void
 }>) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState("")
   const match = (name: string) =>
     name.toLowerCase().includes(query.trim().toLowerCase())
   const groups = [
-    ["subscription", "Subscriptions"],
-    ["vendor", "Vendors"],
-    ["relay", "Relays"],
-    ["local", "On this machine"],
+    ["subscription", t("Subscriptions")],
+    ["vendor", t("Vendors")],
+    ["relay", t("Relays")],
+    ["local", t("On this machine")],
   ] as const
   let count = 0
   return (
-    <section className="provider-catalog" aria-label="Add account">
+    <section className="provider-catalog" aria-label={t("Add account")}>
       <div className="provider-catalog-toolbar">
-        <h2>Add account</h2>
+        <h2>{t("Add account")}</h2>
         <div className="provider-search">
           <Search size={16} aria-hidden="true" />
           <Input
             type="search"
-            aria-label="Find a provider"
-            placeholder="Find a provider…"
+            aria-label={t("Find a provider")}
+            placeholder={t("Find a provider…")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -65,11 +67,11 @@ export function ProviderCatalog({
           />
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={onImport}>
-          Import…
+          {t("Import…")}
         </Button>
         {onClose ? (
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>
-            Back to accounts
+            {t("Back to accounts")}
           </Button>
         ) : null}
       </div>
@@ -105,7 +107,10 @@ export function ProviderCatalog({
                   <ProviderLogo preset="openai" />
                   <span>ChatGPT</span>
                   {chatGPTAvailable ? (
-                    <span className="provider-added" title="Account connected">
+                    <span
+                      className="provider-added"
+                      title={t("Account connected")}
+                    >
                       <span className="provider-status-dot" />
                     </span>
                   ) : null}
@@ -122,7 +127,10 @@ export function ProviderCatalog({
                   />
                   <span>{entry.name}</span>
                   {entry.available ? (
-                    <span className="provider-added" title="Account connected">
+                    <span
+                      className="provider-added"
+                      title={t("Account connected")}
+                    >
                       <span className="provider-status-dot" />
                     </span>
                   ) : null}
@@ -143,7 +151,7 @@ export function ProviderCatalog({
                     {added ? (
                       <span
                         className="provider-added"
-                        title="Already configured"
+                        title={t("Already configured")}
                       >
                         <span className="provider-status-dot" />
                         {added > 1 ? added : null}
@@ -172,9 +180,9 @@ export function ProviderCatalog({
           <Plus size={18} />
         </span>
         <span className="provider-custom-info">
-          <strong id="provider-custom-name">Custom provider</strong>
+          <strong id="provider-custom-name">{t("Custom provider")}</strong>
           <span id="provider-custom-description">
-            Connect any OpenAI or Anthropic compatible API.
+            {t("Connect any OpenAI or Anthropic compatible API.")}
           </span>
         </span>
       </button>

@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Minus, Plus, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 
@@ -17,6 +18,7 @@ export function ImageLightbox({
   name: string
   onClose(): void
 }>) {
+  const { t } = useTranslation()
   const [zoom, setZoom] = useState<number | "actual">(1)
   const [fittedWidth, setFittedWidth] = useState<number>()
   const [naturalWidth, setNaturalWidth] = useState<number>()
@@ -77,7 +79,7 @@ export function ImageLightbox({
     // biome-ignore lint/a11y/useKeyWithClickEvents: Native cancel and the close button handle keyboard dismissal.
     <dialog
       ref={dialogRef}
-      aria-label={`Preview ${name}`}
+      aria-label={t("Preview {0}", name)}
       className="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none border-0 bg-black/85 p-0 open:flex open:flex-col"
       onCancel={(event) => {
         event.preventDefault()
@@ -94,7 +96,7 @@ export function ImageLightbox({
       <div data-backdrop className="flex justify-end p-4">
         <button
           type="button"
-          aria-label="Close preview"
+          aria-label={t("Close preview")}
           onClick={onClose}
           className="grid size-10 place-items-center rounded-full bg-white/10 text-white transition-colors hover:bg-white/20"
         >
@@ -126,7 +128,7 @@ export function ImageLightbox({
         <div className="flex items-center gap-1 rounded-full bg-white/95 px-2 py-1.5 text-sm text-black shadow-lg">
           <button
             type="button"
-            aria-label="Zoom out"
+            aria-label={t("Zoom out")}
             disabled={zoomFactor <= ZOOM_MIN}
             onClick={() => setZoom(Math.max(ZOOM_MIN, zoomFactor - ZOOM_STEP))}
             className="grid size-8 place-items-center rounded-full transition-colors hover:bg-black/10 disabled:opacity-40"
@@ -135,8 +137,8 @@ export function ImageLightbox({
           </button>
           <button
             type="button"
-            aria-label="Reset zoom"
-            title="Reset zoom"
+            aria-label={t("Reset zoom")}
+            title={t("Reset zoom")}
             onClick={() => {
               measure()
               setZoom(1)
@@ -147,8 +149,8 @@ export function ImageLightbox({
           </button>
           <button
             type="button"
-            aria-label="Actual size"
-            title="Actual size"
+            aria-label={t("Actual size")}
+            title={t("Actual size")}
             disabled={naturalWidth === undefined || fittedWidth === undefined}
             onClick={() => setZoom("actual")}
             className="rounded-full px-2 py-1 text-[13px] font-medium transition-colors hover:bg-black/10 disabled:opacity-40"
@@ -157,7 +159,7 @@ export function ImageLightbox({
           </button>
           <button
             type="button"
-            aria-label="Zoom in"
+            aria-label={t("Zoom in")}
             disabled={zoomFactor >= ZOOM_MAX}
             onClick={() => setZoom(Math.min(ZOOM_MAX, zoomFactor + ZOOM_STEP))}
             className="grid size-8 place-items-center rounded-full transition-colors hover:bg-black/10 disabled:opacity-40"

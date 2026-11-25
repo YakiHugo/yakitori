@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ChevronRight, RefreshCw, Users } from "lucide-react"
 import {
   agentStatusLabel,
@@ -19,6 +20,7 @@ export function SubagentsWorkspace({
   active: boolean
   onSelect(agentId?: string): void
 }>) {
+  const { t } = useTranslation()
   const { agents, loading, error, refresh } = useSessionAgents(
     apiBase,
     sourceSessionId,
@@ -39,17 +41,17 @@ export function SubagentsWorkspace({
       />
     )
   return (
-    <section className="subagents-workspace" aria-label="Subagents">
+    <section className="subagents-workspace" aria-label={t("Subagents")}>
       <header className="subagents-list-heading">
         <div>
           <Users size={17} />
-          <h2>Subagents</h2>
+          <h2>{t("Subagents")}</h2>
           {agents.length > 0 ? <span>{agents.length}</span> : null}
         </div>
         <button
           type="button"
           className="sidebar-icon"
-          aria-label="Refresh subagents"
+          aria-label={t("Refresh subagents")}
           disabled={loading || !sourceSessionId}
           onClick={refresh}
         >
@@ -61,7 +63,7 @@ export function SubagentsWorkspace({
       </header>
       {!sourceSessionId ? (
         <p className="subagents-list-empty">
-          Open a conversation to view its subagents.
+          {t("Open a conversation to view its subagents.")}
         </p>
       ) : (
         <>
@@ -72,15 +74,16 @@ export function SubagentsWorkspace({
           )}
           {loading && agents.length === 0 ? (
             <p role="status" className="subagents-list-empty">
-              Loading subagents…
+              {t("Loading subagents…")}
             </p>
           ) : agents.length === 0 && !error ? (
             <div className="subagents-list-empty">
               <Users size={26} strokeWidth={1.25} />
-              <p>No delegated tasks yet.</p>
+              <p>{t("No delegated tasks yet.")}</p>
               <p>
-                Subagents will appear here when this conversation delegates
-                work.
+                {t(
+                  "Subagents will appear here when this conversation delegates work.",
+                )}
               </p>
             </div>
           ) : (
@@ -88,10 +91,10 @@ export function SubagentsWorkspace({
               <p className="subagents-list-caption">
                 {workingCount > 0
                   ? `${workingCount} ${workingCount === 1 ? "agent" : "agents"} working`
-                  : "Delegated work"}
-                <span>Open an agent to follow its progress.</span>
+                  : t("Delegated work")}
+                <span>{t("Open an agent to follow its progress.")}</span>
               </p>
-              <ul className="subagents-list" aria-label="Delegated agents">
+              <ul className="subagents-list" aria-label={t("Delegated agents")}>
                 {agents.map((agent) => {
                   const status = agentStatusLabel(agent.status)
                   return (
@@ -99,7 +102,7 @@ export function SubagentsWorkspace({
                       <button
                         type="button"
                         onClick={() => onSelect(agent.agentId)}
-                        aria-label={`View ${agent.taskName} trace`}
+                        aria-label={t("View {0} trace", agent.taskName)}
                       >
                         <span
                           className="subagent-status-dot"

@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { useState } from "react"
 import type { ModelToolContentBlock } from "../../../protocol/conversation.ts"
 import { openUrlTarget } from "../../lib/open-resource.ts"
@@ -15,6 +16,7 @@ export function ToolResultParts({
   apiBase: string
   label?: string
 }>) {
+  const { t } = useTranslation()
   const [openError, setOpenError] = useState<string>()
   return (
     <section className="space-y-2" aria-label={label}>
@@ -36,8 +38,8 @@ export function ToolResultParts({
               apiBase={apiBase}
               label={
                 part.file && !("url" in part.file)
-                  ? (part.file.path.split("/").at(-1) ?? "Tool image")
-                  : "Tool image"
+                  ? (part.file.path.split("/").at(-1) ?? t("Tool image"))
+                  : t("Tool image")
               }
             />
           )
@@ -45,7 +47,7 @@ export function ToolResultParts({
         if (url === undefined)
           return (
             <p key={key} className="text-caption text-muted-foreground">
-              PDF preview unavailable
+              {t("PDF preview unavailable")}
             </p>
           )
         return (
@@ -62,14 +64,14 @@ export function ToolResultParts({
                   setOpenError(
                     error instanceof Error
                       ? error.message
-                      : "Could not open PDF",
+                      : t("Could not open PDF"),
                   )
                 },
               )
             }}
             className="block text-caption underline underline-offset-2"
           >
-            Open PDF: {part.name}
+            {t("Open PDF:")} {part.name}
           </a>
         )
       })}

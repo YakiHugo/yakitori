@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import {
   Archive,
   ArrowUp,
@@ -35,6 +36,7 @@ import { assetSourceKey } from "../../protocol/asset-types.ts"
 import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../protocol/directives.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
+import type { Message } from "../i18n/messages.ts"
 import {
   inputContentAttachments,
   inputContentText,
@@ -74,7 +76,7 @@ import { Button } from "./ui/button.tsx"
 
 type SlashCommand = Readonly<{
   name: string
-  description: string
+  description: Message
   icon: LucideIcon
 }>
 
@@ -174,14 +176,14 @@ export function ComposerSurface({
   onAttachmentError,
   searchFiles,
   fileSearchRoot,
-  label = "Message the Mate",
-  placeholder = "Ask anything",
+  label,
+  placeholder,
   className = "conversation-composer-footer pt-3 pb-3",
   allowCommands = true,
   engineCommands = [],
   allowAttachments = true,
-  sendLabel = "Send",
-  stopLabel = "Interrupt",
+  sendLabel,
+  stopLabel,
 }: Readonly<{
   sessionId?: string | undefined
   editorKey?: string | number | undefined
@@ -234,6 +236,7 @@ export function ComposerSurface({
   sendLabel?: string
   stopLabel?: string
 }>) {
+  const { t } = useTranslation()
   const suggestionsId = useId()
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const draft = promptPartsText(parts)
@@ -292,7 +295,7 @@ export function ComposerSurface({
           currentOwner.current.onAttachmentError(
             error instanceof Error
               ? error.message
-              : "Unused attachments could not be released.",
+              : translate("Unused attachments could not be released."),
           ),
         )
     },
@@ -520,7 +523,7 @@ export function ComposerSurface({
           onAttachmentError(
             error instanceof Error
               ? error.message
-              : "Attachments could not be imported.",
+              : t("Attachments could not be imported."),
           )
       } finally {
         insertion.cancel()
@@ -792,19 +795,21 @@ export function ComposerSurface({
               <div
                 id={`${suggestionsId}-add`}
                 role="listbox"
-                aria-label="Add context"
+                aria-label={t("Add context")}
                 className="p-2 text-sm"
               >
                 <div className="px-2 pt-1 pb-1.5 text-[13px] text-muted-foreground">
-                  Add
+                  {t("Add")}
                 </div>
                 <button
                   type="button"
                   role="option"
-                  aria-label="Files and folders"
+                  aria-label={t("Files and folders")}
                   aria-selected={addHighlight === 0}
                   disabled={!searchFiles}
-                  title={searchFiles ? undefined : "Select a project to browse"}
+                  title={
+                    searchFiles ? undefined : t("Select a project to browse")
+                  }
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => {
                     if (searchFiles) setAddHighlight(0)
@@ -813,17 +818,17 @@ export function ComposerSurface({
                   className={`flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left text-[14px] leading-5 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${addHighlight === 0 ? "bg-accent text-foreground" : "text-foreground/80 hover:bg-accent/60"}`}
                 >
                   <FolderSearch className="size-4 shrink-0 text-muted-foreground" />
-                  <span>Files and folders</span>
+                  <span>{t("Files and folders")}</span>
                   {!searchFiles ? (
                     <span className="truncate text-muted-foreground">
-                      Select a project to browse
+                      {t("Select a project to browse")}
                     </span>
                   ) : null}
                 </button>
                 <button
                   type="button"
                   role="option"
-                  aria-label="Add images or PDFs"
+                  aria-label={t("Add images or PDFs")}
                   aria-selected={addHighlight === 1}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setAddHighlight(1)}
@@ -831,7 +836,7 @@ export function ComposerSurface({
                   className={`flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left text-[14px] leading-5 transition-colors ${addHighlight === 1 ? "bg-accent text-foreground" : "text-foreground/80 hover:bg-accent/60"}`}
                 >
                   <ImagePlus className="size-4 shrink-0 text-muted-foreground" />
-                  <span>Images or PDFs</span>
+                  <span>{t("Images or PDFs")}</span>
                 </button>
               </div>
             ) : menuOpen ? (
@@ -851,8 +856,8 @@ export function ComposerSurface({
                 emptyLabel={
                   trigger === "@"
                     ? query === ""
-                      ? "Type to search for files"
-                      : "No matching files"
+                      ? t("Type to search for files")
+                      : t("No matching files")
                     : undefined
                 }
                 onHighlight={(index) =>
@@ -891,7 +896,7 @@ export function ComposerSurface({
                   ) : (
                     <button
                       type="button"
-                      aria-label={`Preview ${attachment.name}`}
+                      aria-label={t("Preview {0}", attachment.name)}
                       onClick={() => setPreviewIndex(index)}
                       className="block size-full cursor-zoom-in overflow-hidden rounded-[calc(var(--radius-xl)-1px)]"
                     >
@@ -905,7 +910,7 @@ export function ComposerSurface({
                   <button
                     type="button"
                     disabled={sending}
-                    aria-label={`Remove ${attachment.name}`}
+                    aria-label={t("Remove {0}", attachment.name)}
                     onClick={() => editorRef.current?.removeAttachment(index)}
                     className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full border border-white/80 bg-black/75 text-white shadow-sm transition-[transform,background-color] hover:scale-105 hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
@@ -920,8 +925,12 @@ export function ComposerSurface({
           ) && !supportsImages ? (
             <p className="px-3 pt-2 text-xs text-amber-700 dark:text-amber-300">
               {submissionBlocked
-                ? "No connected account supports these images with the current model options. Change the model options or remove the images."
-                : "The selected model does not support images. Attachments will be omitted and the model will receive a notice."}
+                ? t(
+                    "No connected account supports these images with the current model options. Change the model options or remove the images.",
+                  )
+                : t(
+                    "The selected model does not support images. Attachments will be omitted and the model will receive a notice.",
+                  )}
             </p>
           ) : null}
 
@@ -929,11 +938,11 @@ export function ComposerSurface({
             key={editorKey ?? sessionId}
             scopeKey={composerScopeId}
             ref={editorRef}
-            label={label}
+            label={label ?? t("Message the Mate")}
             value={parts}
             parkedParts={historyNavigation?.savedDraft}
             apiBase={apiBase}
-            placeholder={placeholder}
+            placeholder={placeholder ?? t("Ask anything")}
             disabled={sending}
             onChange={(text) => {
               dismissCommandPanel?.()
@@ -963,7 +972,7 @@ export function ComposerSurface({
                   onAttachmentError(
                     error instanceof Error
                       ? error.message
-                      : "Could not open PDF.",
+                      : t("Could not open PDF."),
                   ),
               )
             }}
@@ -974,7 +983,7 @@ export function ComposerSurface({
                   onAttachmentError(
                     error instanceof Error
                       ? error.message
-                      : "Unused attachments could not be released.",
+                      : t("Unused attachments could not be released."),
                   ),
               )
             }}
@@ -990,10 +999,10 @@ export function ComposerSurface({
                   variant="ghost"
                   size="icon-sm"
                   disabled={readingAttachments || sending}
-                  aria-label="Add context"
+                  aria-label={t("Add context")}
                   aria-expanded={addMenuOpen}
                   aria-controls={`${suggestionsId}-add`}
-                  title="Add context"
+                  title={t("Add context")}
                   className={`relative rounded-full text-muted-foreground hover:text-foreground ${addMenuOpen ? "z-20" : ""}`}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
@@ -1022,8 +1031,8 @@ export function ComposerSurface({
                   size="icon-sm"
                   disabled={busy || sending || readingAttachments}
                   aria-busy={sending}
-                  aria-label={sending ? "Resuming" : "Resume"}
-                  title="Resume the interrupted turn"
+                  aria-label={sending ? t("Resuming") : t("Resume")}
+                  title={t("Resume the interrupted turn")}
                   className="rounded-full"
                   onClick={onResume}
                 >
@@ -1032,7 +1041,7 @@ export function ComposerSurface({
                   ) : (
                     <ArrowUp />
                   )}
-                  <span className="sr-only">Resume</span>
+                  <span className="sr-only">{t("Resume")}</span>
                 </Button>
               ) : activeTurnId === undefined ? (
                 <Button
@@ -1040,13 +1049,13 @@ export function ComposerSurface({
                   size="icon-sm"
                   disabled={!canSend}
                   aria-busy={sending}
-                  aria-label={sending ? "Sending" : sendLabel}
+                  aria-label={sending ? t("Sending") : (sendLabel ?? t("Send"))}
                   title={
                     sending
-                      ? "Sending…"
+                      ? t("Sending…")
                       : compactBlocked
-                        ? "Remove attachments and excerpts before compacting"
-                        : "Send message"
+                        ? t("Remove attachments and excerpts before compacting")
+                        : t("Send message")
                   }
                   className="rounded-full"
                 >
@@ -1056,7 +1065,7 @@ export function ComposerSurface({
                     <ArrowUp />
                   )}
                   <span className="sr-only">
-                    {sending ? "Sending" : "Send"}
+                    {sending ? t("Sending") : t("Send")}
                   </span>
                 </Button>
               ) : (
@@ -1067,8 +1076,10 @@ export function ComposerSurface({
                   size="icon-sm"
                   disabled={stopping}
                   aria-busy={stopping}
-                  aria-label={stopping ? "Stopping" : stopLabel}
-                  title={stopping ? "Stopping" : "Interrupt (Esc)"}
+                  aria-label={
+                    stopping ? t("Stopping") : (stopLabel ?? t("Interrupt"))
+                  }
+                  title={stopping ? t("Stopping") : t("Interrupt (Esc)")}
                   className="rounded-full"
                   onClick={onCancel}
                 >
@@ -1078,7 +1089,7 @@ export function ComposerSurface({
                     <Square />
                   )}
                   <span className="sr-only">
-                    {stopping ? "Stopping" : "Interrupt"}
+                    {stopping ? t("Stopping") : t("Interrupt")}
                   </span>
                 </Button>
               )}

@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   FileText,
   Folder,
@@ -7,12 +8,13 @@ import {
 } from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
 import type { ApiSkillSummary } from "../../protocol/application.ts"
+import type { Message } from "../i18n/messages.ts"
 
 export type ComposerSuggestion =
   | Readonly<{
       kind: "command"
       name: string
-      description: string
+      description: Message
       icon: LucideIcon
     }>
   | Readonly<{ kind: "engine_command"; name: string; description: string }>
@@ -51,20 +53,21 @@ export function ComposerSuggestions({
   listLabel,
   showHeaders = true,
   error,
-  emptyLabel = "No matching commands or skills",
+  emptyLabel,
   onHighlight,
   onPick,
 }: Readonly<{
   id: string
   items: readonly ComposerSuggestion[]
   activeIndex: number
-  listLabel: string
+  listLabel: "Files and folders" | "Skills" | "Slash commands"
   showHeaders?: boolean
   error: string | undefined
   emptyLabel?: string | undefined
   onHighlight(index: number): void
   onPick(item: ComposerSuggestion): void
 }>) {
+  const { t } = useTranslation()
   const listRef = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
     const list = listRef.current
@@ -86,14 +89,14 @@ export function ComposerSuggestions({
       ref={listRef}
       id={id}
       role="listbox"
-      aria-label={listLabel}
+      aria-label={t(listLabel)}
       className="composer-suggestions overflow-y-auto p-2 text-[14px]"
     >
       {showHeaders ? (
         <div
           className={`pb-1.5 text-[13px] text-muted-foreground/75 ${listLabel === "Skills" ? "sticky top-0 z-10 -mx-2 bg-popover px-3 pt-2" : "px-2 pt-1"}`}
         >
-          {listLabel === "Slash commands" ? "Commands" : listLabel}
+          {t(listLabel === "Slash commands" ? "Commands" : listLabel)}
         </div>
       ) : null}
       {items.map((item, index) => (
@@ -103,7 +106,7 @@ export function ComposerSuggestions({
           listLabel !== "Skills" &&
           showHeaders ? (
             <div className="px-2 pt-2 pb-1.5 text-[13px] text-muted-foreground/75">
-              Skills
+              {t("Skills")}
             </div>
           ) : null}
           <button
@@ -120,7 +123,9 @@ export function ComposerSuggestions({
                 ? `${item.description}\n${item.skill.path}`
                 : item.kind === "file"
                   ? item.file.path
-                  : item.description
+                  : item.kind === "command"
+                    ? t(item.description)
+                    : item.description
             }
             className={`flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left transition-colors ${index === activeIndex ? "bg-foreground/[0.055] text-foreground" : "text-foreground/70"}`}
           >
@@ -153,12 +158,14 @@ export function ComposerSuggestions({
                     : item.name}
               </span>
               <span className="composer-suggestion-description min-w-0 flex-1 truncate leading-5 text-muted-foreground/65">
-                {item.description}
+                {item.kind === "command"
+                  ? t(item.description)
+                  : item.description}
               </span>
             </span>
             {item.kind === "skill" ? (
               <span className="min-w-[3.25rem] shrink-0 text-right text-[13px] leading-5 text-muted-foreground/70">
-                {item.skill.scope === "repo" ? "Project" : "Personal"}
+                {item.skill.scope === "repo" ? t("Project") : t("Personal")}
               </span>
             ) : null}
           </button>
@@ -166,7 +173,7 @@ export function ComposerSuggestions({
       ))}
       {items.length === 0 ? (
         <p className="px-3 py-4 text-sm text-muted-foreground">
-          {error ?? emptyLabel}
+          {error ?? emptyLabel ?? t("No matching commands or skills")}
         </p>
       ) : null}
       {error && items.length > 0 ? (

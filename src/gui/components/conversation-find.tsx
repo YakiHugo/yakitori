@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react"
 import {
   type RefObject,
@@ -33,6 +34,7 @@ export function ConversationFind({
   contentRef: RefObject<HTMLDivElement | null>
   onJump(range: Range | HTMLElement): void
 }>) {
+  const { t } = useTranslation()
   const apiBase = useAppStore((state) => state.apiBase)
   const inputCount = useAppStore(
     (state) => state.selectedSession?.counts.inputs,
@@ -200,7 +202,7 @@ export function ConversationFind({
             error:
               cause instanceof Error
                 ? cause.message
-                : "Could not search this conversation.",
+                : t("Could not search this conversation."),
           })
       }
     }, 160)
@@ -394,7 +396,7 @@ export function ConversationFind({
     <form
       className="conversation-find"
       role="search"
-      aria-label="Find in conversation"
+      aria-label={t("Find in conversation")}
       onSubmit={(event) => event.preventDefault()}
     >
       <div className="conversation-find-row">
@@ -402,8 +404,8 @@ export function ConversationFind({
         <input
           ref={inputRef}
           type="search"
-          aria-label="Find in conversation"
-          placeholder="Find in conversation"
+          aria-label={t("Find in conversation")}
+          placeholder={t("Find in conversation")}
           value={query}
           onChange={(event) => {
             setQuery(event.target.value)
@@ -423,17 +425,17 @@ export function ConversationFind({
           {term === ""
             ? ""
             : current?.error
-              ? "Search failed"
+              ? t("Search failed")
               : matches.length > 0
                 ? `${index + 1} of ${matches.length}${current?.loading ? "+" : ""}`
                 : current?.loading || current === undefined
-                  ? "Searching…"
-                  : "No results"}
+                  ? t("Searching…")
+                  : t("No results")}
         </span>
         <button
           type="button"
-          aria-label="Previous match"
-          title="Previous match (Shift+Enter)"
+          aria-label={t("Previous match")}
+          title={t("Previous match (Shift+Enter)")}
           disabled={matches.length === 0}
           onClick={() => navigate(-1)}
         >
@@ -441,8 +443,8 @@ export function ConversationFind({
         </button>
         <button
           type="button"
-          aria-label="Next match"
-          title="Next match (Enter)"
+          aria-label={t("Next match")}
+          title={t("Next match (Enter)")}
           disabled={matches.length === 0}
           onClick={() => navigate(1)}
         >
@@ -450,8 +452,8 @@ export function ConversationFind({
         </button>
         <button
           type="button"
-          aria-label="Close find"
-          title="Close (Escape)"
+          aria-label={t("Close find")}
+          title={t("Close (Escape)")}
           onClick={close}
         >
           <X size={15} />
@@ -464,7 +466,7 @@ export function ConversationFind({
             type="button"
             onClick={() => setRevision((value) => value + 1)}
           >
-            Retry
+            {t("Retry")}
           </button>
         </div>
       ) : unlocated && selected ? (

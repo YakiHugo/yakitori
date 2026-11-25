@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ChevronDown,
   FileText,
@@ -62,6 +63,7 @@ function SummaryPopover({
   gitInfo: import("../../protocol/session-metadata.ts").GitInfo | undefined
   cacheExpiry: SessionCacheExpiry | undefined
 }>) {
+  const { locale, t } = useTranslation()
   const id = useId()
   const trigger = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
@@ -218,7 +220,7 @@ function SummaryPopover({
         ref={trigger}
         type="button"
         className="session-summary-trigger"
-        aria-label="Session context"
+        aria-label={t("Session context")}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
@@ -244,7 +246,7 @@ function SummaryPopover({
               ref={panel}
               id={id}
               role="dialog"
-              aria-label="Session context"
+              aria-label={t("Session context")}
               tabIndex={-1}
               className="session-summary-popover"
               style={{
@@ -257,10 +259,10 @@ function SummaryPopover({
                 <TelemetryRail />
               </section>
               <section className="session-summary-section">
-                <h3>KV cache</h3>
+                <h3>{t("KV cache")}</h3>
                 {cacheReadFailed ? (
                   <p className="session-summary-empty">
-                    Could not refresh cache status.
+                    {t("Could not refresh cache status.")}
                   </p>
                 ) : latestCacheExpiry ? (
                   <div className="session-summary-cache">
@@ -268,91 +270,93 @@ function SummaryPopover({
                     <div>
                       <strong>
                         {expiresAt === undefined
-                          ? "Expiry unknown"
+                          ? t("Expiry unknown")
                           : latestCacheExpiry.status === "minimum"
                             ? expired
-                              ? "Retention uncertain"
-                              : "Within estimated retention window"
+                              ? t("Retention uncertain")
+                              : t("Within estimated retention window")
                             : expired
-                              ? "Likely expired"
-                              : "Possibly cached"}
+                              ? t("Likely expired")
+                              : t("Possibly cached")}
                       </strong>
                       <span>
-                        Last turn: {latestCacheExpiry.provider} ·{" "}
+                        {t("Last turn:")} {latestCacheExpiry.provider} ·{" "}
                         {new Date(
                           latestCacheExpiry.lastTurnCompletedAt,
-                        ).toLocaleString()}
+                        ).toLocaleString(locale)}
                       </span>
                       {latestCacheExpiry.lastRequestStartedAt ? (
                         <span>
-                          Last model request started:{" "}
+                          {t("Last model request started:")}{" "}
                           {new Date(
                             latestCacheExpiry.lastRequestStartedAt,
-                          ).toLocaleString()}
+                          ).toLocaleString(locale)}
                         </span>
                       ) : null}
                       <span>
                         {latestCacheExpiry.ttlDescription}
                         {expiresAt === undefined
                           ? ""
-                          : ` · ${latestCacheExpiry.status === "minimum" ? "Estimated earliest expiry" : "Estimated expiry"} ${new Date(expiresAt).toLocaleString()}`}
+                          : ` · ${latestCacheExpiry.status === "minimum" ? "Estimated earliest expiry" : "Estimated expiry"} ${new Date(expiresAt).toLocaleString(locale)}`}
                       </span>
                     </div>
                   </div>
                 ) : (
                   <p className="session-summary-empty">
-                    No completed provider turn in this session yet.
+                    {t("No completed provider turn in this session yet.")}
                   </p>
                 )}
               </section>
               <section className="session-summary-section">
-                <h3>Environment</h3>
+                <h3>{t("Environment")}</h3>
                 <div className="session-summary-environment">
                   <Monitor size={16} aria-hidden="true" />
-                  <span>{local ? "Local" : "Server"}</span>
+                  <span>{local ? t("Local") : t("Server")}</span>
                   <span className="session-summary-environment-status">
-                    {local ? "On this computer" : new URL(apiBase).host}
+                    {local ? t("On this computer") : new URL(apiBase).host}
                   </span>
                 </div>
                 <p className="session-summary-path">
-                  {cwd ?? "Working directory unavailable"}
+                  {cwd ?? t("Working directory unavailable")}
                 </p>
                 <div className="session-summary-branch">
                   <GitBranch size={13} aria-hidden="true" />
                   <span>
                     {gitInfo?.branch ??
                       (status?.repository
-                        ? (status.branch ?? "Branch unavailable")
+                        ? (status.branch ?? t("Branch unavailable"))
                         : status
-                          ? "Not a Git repository"
+                          ? t("Not a Git repository")
                           : loading
-                            ? "Loading branch…"
-                            : "Branch unavailable")}
+                            ? t("Loading branch…")
+                            : t("Branch unavailable"))}
                   </span>
                 </div>
                 {gitInfo?.branch &&
                 status?.branch &&
                 gitInfo.branch !== status.branch ? (
                   <p className="session-summary-workspace-branch">
-                    Workspace is currently on {status.branch}
+                    {t("Workspace is currently on")} {status.branch}
                   </p>
                 ) : null}
               </section>
               <section className="session-summary-section">
                 <h3>
-                  Pull requests{" "}
+                  {t("Pull requests")}{" "}
                   {pullRequests?.available ? (
                     <span>{pullRequests.pullRequests.length}</span>
                   ) : null}
                 </h3>
                 {pullRequestsLoading ? (
                   <p role="status" className="session-summary-empty">
-                    Loading pull requests…
+                    {t("Loading pull requests…")}
                   </p>
                 ) : pullRequests?.available ? (
                   pullRequests.pullRequests.length === 0 ? (
                     <p className="session-summary-empty">
-                      No current or historical PRs for this session branch.
+                      {t(
+                        "No current or historical PRs for this session branch.",
+                      )}
                     </p>
                   ) : (
                     <div className="session-summary-pull-requests">
@@ -381,30 +385,31 @@ function SummaryPopover({
                   )
                 ) : (
                   <p className="session-summary-empty">
-                    PR status is unavailable. Install and sign in to GitHub CLI
-                    to load current and historical PRs.
+                    {t(
+                      "PR status is unavailable. Install and sign in to GitHub CLI to load current and historical PRs.",
+                    )}
                   </p>
                 )}
               </section>
               <section className="session-summary-section">
-                <h3>Changes</h3>
+                <h3>{t("Changes")}</h3>
                 {loading && !status ? (
                   <p role="status" className="session-summary-empty">
-                    Loading changes…
+                    {t("Loading changes…")}
                   </p>
                 ) : error ? (
                   <div className="session-summary-error">
                     <p role="alert">{error}</p>
                     <button type="button" onClick={refresh}>
-                      Retry
+                      {t("Retry")}
                     </button>
                   </div>
                 ) : status?.repository ? (
                   <>
                     {status.entries.length > 0 ? (
                       <p className="session-summary-change-scopes">
-                        {staged} staged · {unstaged} unstaged · {untracked}{" "}
-                        untracked
+                        {staged} {t("staged ·")} {unstaged} {t("unstaged ·")}{" "}
+                        {untracked} untracked
                       </p>
                     ) : null}
                     <WorkspaceChangeSummary
@@ -419,13 +424,13 @@ function SummaryPopover({
                 ) : (
                   <p className="session-summary-empty">
                     {status
-                      ? "No Git changes available."
-                      : "Changes unavailable."}
+                      ? t("No Git changes available.")
+                      : t("Changes unavailable.")}
                   </p>
                 )}
               </section>
               <section className="session-summary-section">
-                <h3>Subagents</h3>
+                <h3>{t("Subagents")}</h3>
                 <button
                   type="button"
                   className="session-summary-changes"
@@ -439,28 +444,29 @@ function SummaryPopover({
                   <Users size={16} />
                   <span>
                     {agents.loading && agents.agents.length === 0
-                      ? "Loading subagents…"
+                      ? t("Loading subagents…")
                       : agents.error
-                        ? "View subagents"
+                        ? t("View subagents")
                         : agents.agents.length === 0
-                          ? "No subagents yet"
+                          ? t("No subagents yet")
                           : `${agents.agents.length} ${agents.agents.length === 1 ? "subagent" : "subagents"}`}
                     {agents.agents.length > 0 && (
                       <small>
-                        {runningAgents} working · {completedAgents} completed
+                        {runningAgents} {t("working ·")} {completedAgents}{" "}
+                        completed
                       </small>
                     )}
                   </span>
-                  <span className="session-summary-view">View</span>
+                  <span className="session-summary-view">{t("View")}</span>
                 </button>
               </section>
               <section className="session-summary-section">
                 <h3>
-                  Sources <span>{sourceCount}</span>
+                  {t("Sources")} <span>{sourceCount}</span>
                 </h3>
                 {sourceCount === 0 ? (
                   <p className="session-summary-empty">
-                    No attachments or excerpts in this session.
+                    {t("No attachments or excerpts in this session.")}
                   </p>
                 ) : (
                   <div className="session-summary-sources">

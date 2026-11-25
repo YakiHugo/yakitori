@@ -1,5 +1,6 @@
 import type { FileChange, ToolExecutionItem } from "../protocol/events.ts"
 import type { ExecutionEntry, ToolDiff } from "./execution-view.ts"
+import { type Translate, translators } from "./i18n/messages.ts"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 type ExecutionOf<Type extends ToolExecutionItem["type"]> = Extract<
@@ -100,28 +101,31 @@ export type ToolPresentation = {
   readonly detail?: ToolDetail
 }
 
-export function presentTool(tool: ToolEntry): ToolPresentation {
+export function presentTool(
+  tool: ToolEntry,
+  t: Translate = translators.en,
+): ToolPresentation {
   const entry =
     tool.streamOutput === undefined
       ? tool
       : { ...tool, resultText: tool.streamOutput }
   switch (entry.execution.type) {
     case "command_execution":
-      return presentRunCommand(entry, entry.execution)
+      return presentRunCommand(entry, entry.execution, t)
     case "file_change":
-      return presentDiff(entry, entry.execution)
+      return presentDiff(entry, entry.execution, t)
     case "file_read":
-      return presentReadFile(entry, entry.execution)
+      return presentReadFile(entry, entry.execution, t)
     case "file_search":
       return entry.execution.operation === "glob"
-        ? presentGlob(entry, entry.execution)
-        : presentGrep(entry, entry.execution)
+        ? presentGlob(entry, entry.execution, t)
+        : presentGrep(entry, entry.execution, t)
     case "web_fetch":
-      return presentWebFetch(entry, entry.execution)
+      return presentWebFetch(entry, entry.execution, t)
     case "web_search":
-      return presentWebSearch(entry, entry.execution)
+      return presentWebSearch(entry, entry.execution, t)
     case "collaboration_tool_call":
-      return presentCollaboration(entry, entry.execution)
+      return presentCollaboration(entry, entry.execution, t)
     case "mcp_tool_call":
       return presentMcpToolCall(entry, entry.execution)
     case "dynamic_tool_call":
@@ -132,6 +136,7 @@ export function presentTool(tool: ToolEntry): ToolPresentation {
 function presentReadFile(
   entry: ToolEntry,
   execution: ExecutionOf<"file_read">,
+  t: Translate,
 ): ToolPresentation {
   const result = execution.result
   const path = result?.path ?? execution.path
@@ -147,14 +152,18 @@ function presentReadFile(
   const length = result?.range?.limit ?? execution.limit
   const meta = [
     offset !== undefined && length !== undefined && length > 0
-      ? `${isDirectory ? "entries" : "lines"} ${offset}–${offset + length - 1}`
+      ? t(
+          isDirectory ? "entries {0}–{1}" : "lines {0}–{1}",
+          offset,
+          offset + length - 1,
+        )
       : undefined,
-    result?.empty === true ? "empty" : undefined,
-    result?.truncated === true ? "partial" : undefined,
+    result?.empty === true ? t("empty") : undefined,
+    result?.truncated === true ? t("partial") : undefined,
   ].filter(isString)
   return {
-    verb: isDirectory ? "List" : "Read",
-    activeVerb: isDirectory ? "Listing" : "Reading",
+    verb: t(isDirectory ? "List" : "Read"),
+    activeVerb: t(isDirectory ? "Listing" : "Reading"),
     subject: path,
     subjectTone: "code",
     meta,
@@ -190,6 +199,7 @@ function presentReadFile(
 function presentGrep(
   entry: ToolEntry,
   execution: ExecutionOf<"file_search">,
+  t: Translate,
 ): ToolPresentation {
   const result = execution.result
   const pattern = execution.pattern || "pattern"
@@ -203,19 +213,19 @@ function presentGrep(
     count === undefined
       ? undefined
       : mode === "content"
-        ? `${count} ${count === 1 ? "match" : "matches"}`
-        : `${count} ${count === 1 ? "file" : "files"}`,
+        ? t(count === 1 ? "{0} match" : "{0} matches", count)
+        : t(count === 1 ? "{0} file" : "{0} files", count),
     mode === "content" && fileCount > 0
-      ? `${fileCount} ${fileCount === 1 ? "file" : "files"}`
+      ? t(fileCount === 1 ? "{0} file" : "{0} files", fileCount)
       : undefined,
-    result?.timedOut === true ? "timed out" : undefined,
-    result?.truncated === true ? "partial" : undefined,
+    result?.timedOut === true ? t("timed out") : undefined,
+    result?.truncated === true ? t("partial") : undefined,
   ].filter(isString)
 
   return {
-    verb: "Search",
-    activeVerb: "Searching",
-    subject: `“${truncateLine(pattern, 96)}” in ${path}`,
+    verb: t("Search"),
+    activeVerb: t("Searching"),
+    subject: t("“{0}” in {1}", truncateLine(pattern, 96), path),
     subjectTone: "code",
     meta,
     ...grepDetail(entry, parsed, result?.truncated === true),
@@ -225,6 +235,7 @@ function presentGrep(
 function presentGlob(
   entry: ToolEntry,
   execution: ExecutionOf<"file_search">,
+  t: Translate,
 ): ToolPresentation {
   const result = execution.result
   const pattern = execution.pattern || "files"
@@ -232,15 +243,18 @@ function presentGlob(
   const count = result?.count
   const paths = result?.paths ?? []
   return {
-    verb: "Find",
-    activeVerb: "Finding",
-    subject: `“${truncateLine(pattern, 96)}”${path === undefined || path === "." ? "" : ` in ${path}`}`,
+    verb: t("Find"),
+    activeVerb: t("Finding"),
+    subject:
+      path === undefined || path === "."
+        ? `“${truncateLine(pattern, 96)}”`
+        : t("“{0}” in {1}", truncateLine(pattern, 96), path),
     subjectTone: "code",
     meta: [
       count === undefined
         ? undefined
-        : `${count} ${count === 1 ? "file" : "files"}`,
-      result?.truncated === true ? "partial" : undefined,
+        : t(count === 1 ? "{0} file" : "{0} files", count),
+      result?.truncated === true ? t("partial") : undefined,
     ].filter(isString),
     ...(entry.resultText === undefined
       ? {}
@@ -259,6 +273,7 @@ function presentGlob(
 function presentDiff(
   entry: ToolEntry,
   execution: ExecutionOf<"file_change">,
+  t: Translate,
 ): ToolPresentation {
   const change = execution.changes[0]
   const sourcePath = change?.path ?? execution.request.paths[0] ?? "file"
@@ -291,10 +306,10 @@ function presentDiff(
   const showChanges =
     execution.changes.length > 0 && (multiple || errorText !== undefined)
   return {
-    verb: multiple ? "Change" : created ? "Create" : verb,
-    activeVerb: multiple ? "Changing" : created ? "Creating" : activeVerb,
+    verb: t(multiple ? "Change" : created ? "Create" : verb),
+    activeVerb: t(multiple ? "Changing" : created ? "Creating" : activeVerb),
     subject: multiple
-      ? `${fileCount} files`
+      ? t("{0} files", fileCount)
       : movePath === undefined
         ? sourcePath
         : `${sourcePath} → ${movePath}`,
@@ -303,7 +318,7 @@ function presentDiff(
       hasDiff ? `+${counts.added} −${counts.deleted}` : undefined,
       execution.exact === false ||
       execution.changes.some((current) => current.diff?.truncated === true)
-        ? "partial"
+        ? t("partial")
         : undefined,
     ].filter(isString),
     ...(multiple
@@ -328,13 +343,15 @@ function presentDiff(
 function presentRunCommand(
   entry: ToolEntry,
   execution: ExecutionOf<"command_execution">,
+  t: Translate,
 ): ToolPresentation {
   const command = execution.command
   const description = execution.description?.trim() || undefined
-  const intent = description === undefined ? commandIntent(command) : undefined
+  const intent =
+    description === undefined ? commandIntent(command, t) : undefined
   return {
-    verb: intent?.verb ?? "Run",
-    activeVerb: intent?.activeVerb ?? "Running",
+    verb: intent?.verb ?? t("Run"),
+    activeVerb: intent?.activeVerb ?? t("Running"),
     subject: truncateLine(description ?? intent?.subject ?? command, 120),
     subjectTone:
       description === undefined && intent === undefined ? "code" : "text",
@@ -354,20 +371,23 @@ function presentRunCommand(
 
 type CommandIntent = Pick<ToolPresentation, "verb" | "activeVerb" | "subject">
 
-function commandIntent(command: string): CommandIntent | undefined {
+function commandIntent(
+  command: string,
+  t: Translate,
+): CommandIntent | undefined {
   if (/[;&|\n\r<>`$]/u.test(command)) return undefined
   const [program, action, argument] = command.trim().split(/\s+/u)
   if (program === "git") {
     const subject =
       action === "diff"
-        ? "Git changes"
+        ? t("Git changes")
         : action === "status"
-          ? "Git status"
+          ? t("Git status")
           : action === "log"
-            ? "Git history"
+            ? t("Git history")
             : undefined
     if (subject !== undefined)
-      return { verb: "View", activeVerb: "Viewing", subject }
+      return { verb: t("View"), activeVerb: t("Viewing"), subject }
   }
   let task: string | undefined
   if (
@@ -376,9 +396,9 @@ function commandIntent(command: string): CommandIntent | undefined {
   ) {
     if (action === "install")
       return {
-        verb: "Install",
-        activeVerb: "Installing",
-        subject: "dependencies",
+        verb: t("Install"),
+        activeVerb: t("Installing"),
+        subject: t("dependencies"),
       }
     task = action === "run" ? argument : action
   } else if (program === "pytest" || (program === "go" && action === "test")) {
@@ -388,13 +408,25 @@ function commandIntent(command: string): CommandIntent | undefined {
   }
   switch (task?.split(":", 1)[0]) {
     case "test":
-      return { verb: "Run", activeVerb: "Running", subject: "tests" }
+      return { verb: t("Run"), activeVerb: t("Running"), subject: t("tests") }
     case "build":
-      return { verb: "Build", activeVerb: "Building", subject: "project" }
+      return {
+        verb: t("Build"),
+        activeVerb: t("Building"),
+        subject: t("project"),
+      }
     case "lint":
-      return { verb: "Lint", activeVerb: "Linting", subject: "project" }
+      return {
+        verb: t("Lint"),
+        activeVerb: t("Linting"),
+        subject: t("project"),
+      }
     case "typecheck":
-      return { verb: "Check", activeVerb: "Checking", subject: "types" }
+      return {
+        verb: t("Check"),
+        activeVerb: t("Checking"),
+        subject: t("types"),
+      }
     default:
       return undefined
   }
@@ -403,17 +435,18 @@ function commandIntent(command: string): CommandIntent | undefined {
 function presentWebFetch(
   entry: ToolEntry,
   execution: ExecutionOf<"web_fetch">,
+  t: Translate,
 ): ToolPresentation {
   const result = execution.result
   const url = result?.url ?? execution.url
   return {
-    verb: "Fetch",
-    activeVerb: "Fetching",
+    verb: t("Fetch"),
+    activeVerb: t("Fetching"),
     subject: displayUrl(url),
     subjectTone: "code",
     meta: [
       result?.status.toString(),
-      result?.truncated === true ? "partial" : undefined,
+      result?.truncated === true ? t("partial") : undefined,
     ].filter(isString),
     ...(isHttpUrl(url) ? { target: { kind: "url" as const, url } } : {}),
     ...(entry.resultText === undefined
@@ -425,18 +458,19 @@ function presentWebFetch(
 function presentWebSearch(
   entry: ToolEntry,
   execution: ExecutionOf<"web_search">,
+  t: Translate,
 ): ToolPresentation {
   const query = execution.query
   const links = execution.result?.links ?? []
   return {
-    verb: "Search web",
-    activeVerb: "Searching web",
+    verb: t("Search web"),
+    activeVerb: t("Searching web"),
     subject: `“${truncateLine(query, 110)}”`,
     subjectTone: "text",
     meta:
       links.length === 0
         ? []
-        : [`${links.length} ${links.length === 1 ? "result" : "results"}`],
+        : [t(links.length === 1 ? "{0} result" : "{0} results", links.length)],
     ...(entry.resultText === undefined
       ? {}
       : {
@@ -452,6 +486,7 @@ function presentWebSearch(
 function presentCollaboration(
   entry: ToolEntry,
   execution: ExecutionOf<"collaboration_tool_call">,
+  t: Translate,
 ): ToolPresentation {
   const input = recordOf(execution.input)
   const [verb, activeVerb] = (
@@ -477,11 +512,11 @@ function presentCollaboration(
       ? undefined
       : execution.description)
   return {
-    verb,
-    activeVerb,
+    verb: t(verb),
+    activeVerb: t(activeVerb),
     subject:
       execution.receivers.length > 1
-        ? `${execution.receivers.length} agents`
+        ? t("{0} agents", execution.receivers.length)
         : target === undefined
           ? ""
           : truncateLine(
@@ -494,7 +529,7 @@ function presentCollaboration(
         ? []
         : execution.receivers.length === 1
           ? [execution.receivers[0]?.path ?? ""]
-          : [`${execution.receivers.length} agents`],
+          : [t("{0} agents", execution.receivers.length)],
     ...(receiver === undefined
       ? {}
       : {

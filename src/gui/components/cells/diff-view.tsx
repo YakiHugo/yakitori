@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { FileCode2, WrapText } from "lucide-react"
 import { memo, useMemo, useState } from "react"
 import type { ToolDiff } from "../../execution-view.ts"
@@ -18,16 +19,21 @@ export const DiffView = memo(function DiffView({
   path?: string | undefined
   embedded?: boolean
 }>) {
+  const { t } = useTranslation()
   const model = useMemo(() => parseDiff(diff.text), [diff.text])
   const [wrap, setWrap] = useState(embedded)
   const [raw, setRaw] = useState(false)
   const showRaw = raw || model.kind === "raw"
   return (
-    <section className="review-diff" data-wrap={wrap} aria-label="File diff">
+    <section
+      className="review-diff"
+      data-wrap={wrap}
+      aria-label={t("File diff")}
+    >
       <div className="review-diff-toolbar">
-        <span>{showRaw ? "Patch" : "Unified diff"}</span>
+        <span>{showRaw ? t("Patch") : t("Unified diff")}</span>
         {diff.truncated ? (
-          <span className="review-diff-notice">Partial diff</span>
+          <span className="review-diff-notice">{t("Partial diff")}</span>
         ) : null}
         <div className="review-diff-controls">
           {model.kind === "unified" ? (
@@ -36,35 +42,39 @@ export const DiffView = memo(function DiffView({
               aria-pressed={raw}
               onClick={() => setRaw(!raw)}
             >
-              Raw
+              {t("Raw")}
             </button>
           ) : null}
           <button
             type="button"
-            aria-label="Wrap diff lines"
+            aria-label={t("Wrap diff lines")}
             aria-pressed={wrap}
             onClick={() => setWrap(!wrap)}
           >
             <WrapText size={14} />
-            Wrap
+            {t("Wrap")}
           </button>
         </div>
       </div>
       {model.kind === "raw" && diff.text !== "" ? (
         <p className="review-diff-explanation">
           {model.reason === "incomplete"
-            ? "Incomplete patch · original text shown"
-            : "Original patch"}
+            ? t("Incomplete patch · original text shown")
+            : t("Original patch")}
         </p>
       ) : null}
       {showRaw ? (
-        <pre className="review-diff-raw">{diff.text || "No diff content."}</pre>
+        <pre className="review-diff-raw">
+          {diff.text || t("No diff content.")}
+        </pre>
       ) : model.kind === "unified" ? (
         model.files.map((file) => {
           const added = file.oldPath === "/dev/null"
           const deleted = file.newPath === "/dev/null"
           const path =
-            (deleted ? file.oldPath : file.newPath) || fallbackPath || "Changes"
+            (deleted ? file.oldPath : file.newPath) ||
+            fallbackPath ||
+            t("Changes")
           const renamed = !added && !deleted && file.oldPath !== file.newPath
           return (
             <div key={file.index} className="review-diff-file">
@@ -79,7 +89,7 @@ export const DiffView = memo(function DiffView({
                   </span>
                   {added || deleted ? (
                     <span className="review-diff-file-status">
-                      {added ? "Added" : "Deleted"}
+                      {added ? t("Added") : t("Deleted")}
                     </span>
                   ) : null}
                   <span
@@ -96,7 +106,7 @@ export const DiffView = memo(function DiffView({
                 className="review-diff-scroll"
                 // biome-ignore lint/a11y/noNoninteractiveTabindex: The bounded code viewport needs keyboard scrolling.
                 tabIndex={0}
-                aria-label={`Changes in ${path}`}
+                aria-label={t("Changes in {0}", path)}
               >
                 <table className="review-diff-table">
                   <colgroup>
@@ -106,9 +116,9 @@ export const DiffView = memo(function DiffView({
                   </colgroup>
                   <thead className="sr-only">
                     <tr>
-                      <th>Old line</th>
-                      <th>New line</th>
-                      <th>Change</th>
+                      <th>{t("Old line")}</th>
+                      <th>{t("New line")}</th>
+                      <th>{t("Change")}</th>
                     </tr>
                   </thead>
                   <DiffFileRows file={file} path={path} />

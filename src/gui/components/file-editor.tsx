@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { FileCode2, Save, WrapText } from "lucide-react"
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
 import type { WorkspaceReadForEditResponse } from "../../protocol/workspace.ts"
@@ -24,6 +25,7 @@ export function FileEditor({
   onClose(): void
   onDirtyChange?(dirty: boolean): void
 }>) {
+  const { t } = useTranslation()
   const [loaded, setLoaded] = useState<WorkspaceReadForEditResponse>()
   const [value, setValue] = useState("")
   const [error, setError] = useState<string>()
@@ -75,7 +77,7 @@ export function FileEditor({
             setError(
               cause instanceof Error
                 ? cause.message
-                : "Could not open file for editing.",
+                : t("Could not open file for editing."),
             )
         },
       )
@@ -109,10 +111,12 @@ export function FileEditor({
       setConflict(changed)
       setError(
         changed
-          ? "This file changed on disk. Your edits are kept here. Copy them or reload the latest file before saving."
+          ? t(
+              "This file changed on disk. Your edits are kept here. Copy them or reload the latest file before saving.",
+            )
           : cause instanceof Error
             ? cause.message
-            : "Could not save file.",
+            : t("Could not save file."),
       )
     } finally {
       inFlight.current = false
@@ -136,7 +140,7 @@ export function FileEditor({
           disabled={!dirty || saving || conflict}
           onClick={() => void save()}
         >
-          <Save size={13} /> {saving ? "Saving…" : "Save"}
+          <Save size={13} /> {saving ? t("Saving…") : t("Save")}
         </button>
       </div>
       <div className="file-preview-toolbar">
@@ -146,12 +150,12 @@ export function FileEditor({
           className="file-editor-back"
           onClick={() => (dirty ? setDiscarding(true) : onClose())}
         >
-          Back to preview
+          {t("Back to preview")}
         </button>
         <div className="file-preview-actions">
           <button
             type="button"
-            aria-label="Wrap lines"
+            aria-label={t("Wrap lines")}
             aria-pressed={wrap}
             className="file-editor-icon"
             onClick={() => setWrap(!wrap)}
@@ -166,7 +170,7 @@ export function FileEditor({
           <p>{error}</p>
           {conflict ? (
             <button type="button" onClick={() => setRevision(revision + 1)}>
-              Reload and discard edits
+              {t("Reload and discard edits")}
             </button>
           ) : null}
         </div>
@@ -175,7 +179,7 @@ export function FileEditor({
         <Suspense
           fallback={
             <p role="status" className="p-4 text-xs text-muted-foreground">
-              Loading editor…
+              {t("Loading editor…")}
             </p>
           }
         >
@@ -193,18 +197,18 @@ export function FileEditor({
         </Suspense>
       ) : !error ? (
         <p role="status" className="p-4 text-xs text-muted-foreground">
-          Loading complete file…
+          {t("Loading complete file…")}
         </p>
       ) : null}
       <div className="file-preview-status">
         <span>
           {dirty
-            ? "Unsaved changes"
+            ? t("Unsaved changes")
             : loaded
               ? saved
-                ? "Saved"
-                : "Editing"
-              : "Opening file"}
+                ? t("Saved")
+                : t("Editing")
+              : t("Opening file")}
         </span>
         <span>⌘S / Ctrl+S</span>
       </div>
@@ -228,6 +232,7 @@ export function DiscardFileDialog({
   onCancel(): void
   onDiscard(): void
 }>) {
+  const { t } = useTranslation()
   const dialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     dialog.current?.showModal()
@@ -246,7 +251,7 @@ export function DiscardFileDialog({
         Discard changes to {name}?
       </h2>
       <p className="mt-2 text-sm text-muted-foreground">
-        Your unsaved edits will be lost.
+        {t("Your unsaved edits will be lost.")}
       </p>
       <div className="mt-5 flex justify-end gap-2">
         <button
@@ -254,14 +259,14 @@ export function DiscardFileDialog({
           className="rounded-lg border px-3 py-2 text-sm"
           onClick={onCancel}
         >
-          Keep editing
+          {t("Keep editing")}
         </button>
         <button
           type="button"
           className="rounded-lg bg-destructive px-3 py-2 text-sm text-white"
           onClick={onDiscard}
         >
-          Discard changes
+          {t("Discard changes")}
         </button>
       </div>
     </dialog>

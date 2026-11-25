@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { LoaderCircle } from "lucide-react"
 import { useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
@@ -16,33 +17,36 @@ const compact = new Intl.NumberFormat("en", {
 const exact = new Intl.NumberFormat("en")
 
 export function UsageSection() {
+  const { locale, t } = useTranslation()
   const usage = useAppStore((state) => state.usage)
   const loadUsage = useAppStore((state) => state.loadUsage)
   const [range, setRange] = useState<UsageRange>(30)
   const [selectedDate, setSelectedDate] = useState<string>()
   const [breakdown, setBreakdown] = useState<"model" | "day">("model")
   const summary = usage.summary
+  const unavailableThreads = summary?.unavailableThreads ?? 0
   const view = summary && usageView(summary, range, selectedDate)
   const calendar = summary ? usageCalendar(summary, 366) : []
   const total = view ? totalTokens(view.totals) : 0
   const breakdownDays =
     view?.days.filter((day) => !selectedDate || day.date === selectedDate) ?? []
   const period =
-    selectedDate ?? (range === "all" ? "All time" : `Last ${range} days`)
+    selectedDate ??
+    (range === "all" ? t("All time") : t("Last {0} days", range))
   return (
     <div className="usage-dashboard" aria-busy={usage.loading}>
-      {usage.error || (summary?.unavailableThreads ?? 0) > 0 ? (
+      {usage.error || unavailableThreads > 0 ? (
         <div className="usage-retry">
           <button
             type="button"
-            aria-label="Retry usage"
+            aria-label={t("Retry usage")}
             disabled={usage.loading}
             onClick={() => void loadUsage()}
           >
             {usage.loading ? (
               <LoaderCircle size={16} className="animate-spin" />
             ) : (
-              "Retry"
+              t("Retry")
             )}
           </button>
         </div>
@@ -50,28 +54,33 @@ export function UsageSection() {
       {usage.error && (
         <p role="alert">
           {usage.error}
-          {summary ? " Showing the previous result." : ""}
+          {summary ? t("Showing the previous result.") : ""}
         </p>
       )}
-      {(summary?.unavailableThreads ?? 0) > 0 && (
+      {unavailableThreads > 0 && (
         <p role="alert">
-          Usage is incomplete: {summary?.unavailableThreads} conversation{" "}
-          {summary?.unavailableThreads === 1 ? "history" : "histories"} could
-          not be read. You can retry loading them.
+          {unavailableThreads === 1
+            ? t(
+                "Usage is incomplete: 1 conversation history could not be read. You can retry loading it.",
+              )
+            : t(
+                "Usage is incomplete: {0} conversation histories could not be read. You can retry loading them.",
+                unavailableThreads,
+              )}
         </p>
       )}
       {!summary || !view ? (
         <p role="status">
           {usage.loading
-            ? "Loading usage…"
+            ? t("Loading usage…")
             : usage.error
-              ? "Retry to load usage."
-              : "Usage has not been loaded."}
+              ? t("Retry to load usage.")
+              : t("Usage has not been loaded.")}
         </p>
       ) : (
         <>
           <div className="usage-toolbar">
-            <fieldset className="usage-range" aria-label="Usage period">
+            <fieldset className="usage-range" aria-label={t("Usage period")}>
               {([7, 30, 90, 366, "all"] as const).map((value) => (
                 <button
                   type="button"
@@ -83,33 +92,35 @@ export function UsageSection() {
                   }}
                 >
                   {value === "all"
-                    ? "All time"
+                    ? t("All time")
                     : value === 366
-                      ? "Year"
+                      ? t("Year")
                       : `${value}D`}
                 </button>
               ))}
             </fieldset>
-            <span className="usage-muted">UTC · Local records</span>
+            <span className="usage-muted">{t("UTC · Local records")}</span>
           </div>
           {selectedDate && (
             <div className="usage-period-heading">
               <button type="button" onClick={() => setSelectedDate(undefined)}>
-                Clear day filter
+                {t("Clear day filter")}
               </button>
             </div>
           )}
           <div className="usage-overview">
-            <section className="usage-headline" aria-label="Period total">
-              <span className="usage-muted">{period} · Tokens</span>
+            <section className="usage-headline" aria-label={t("Period total")}>
+              <span className="usage-muted">
+                {period} {t("· Tokens")}
+              </span>
               <strong className="usage-total" title={exact.format(total)}>
                 <span aria-hidden="true">{compact.format(total)}</span>
                 <span className="sr-only">
-                  {exact.format(total)} total tokens
+                  {exact.format(total)} {t("total tokens")}
                 </span>
               </strong>
               <p className="usage-muted">
-                {exact.format(view.totals.turns)} recorded turns
+                {exact.format(view.totals.turns)} {t("recorded turns")}
               </p>
             </section>
             <DailyTrend
@@ -121,29 +132,34 @@ export function UsageSection() {
           </div>
           {view.totals.turns === 0 && total === 0 && (
             <p className="usage-empty">
-              No recorded usage in this period. Usage appears after model
-              requests report it.
+              {t(
+                "No recorded usage in this period. Usage appears after model requests report it.",
+              )}
             </p>
           )}
           <section
             className="usage-card usage-comparison"
-            aria-label="Usage by model"
+            aria-label={t("Usage by model")}
           >
             <div className="usage-card-heading">
-              <h4>Models</h4>
+              <h4>{t("Models")}</h4>
               {view.models.length > 5 && (
-                <span>Top 5 of {view.models.length}</span>
+                <span>
+                  {t("Top 5 of")} {view.models.length}
+                </span>
               )}
             </div>
             {view.models.length === 0 ? (
-              <p className="usage-muted">No models recorded in this period.</p>
+              <p className="usage-muted">
+                {t("No models recorded in this period.")}
+              </p>
             ) : (
               <ul className="usage-model-comparison">
                 {view.models.slice(0, 5).map((model) => (
                   <li key={JSON.stringify([model.provider, model.model])}>
                     <div className="usage-model-label">
-                      <strong>{model.model || "Unknown model"}</strong>
-                      <small>{model.provider || "Unknown provider"}</small>
+                      <strong>{model.model || t("Unknown model")}</strong>
+                      <small>{model.provider || t("Unknown provider")}</small>
                     </div>
                     <div className="usage-share-track" aria-hidden="true">
                       <span
@@ -176,59 +192,61 @@ export function UsageSection() {
             }}
           />
           <details className="usage-details">
-            <summary>Usage details</summary>
-            <section className="usage-totals" aria-label="Token totals">
-              <h4>Totals</h4>
+            <summary>{t("Usage details")}</summary>
+            <section className="usage-totals" aria-label={t("Token totals")}>
+              <h4>{t("Totals")}</h4>
               <div className="usage-stat-grid">
                 <Stat
-                  label="Input tokens"
+                  label={t("Input tokens")}
                   value={view.totals.inputTokens}
                   detail="Includes cached input"
                 />
                 <Stat
-                  label="Output tokens"
+                  label={t("Output tokens")}
                   value={view.totals.outputTokens}
                   detail="Recorded model output"
                 />
                 <Stat
-                  label="Cache read"
+                  label={t("Cache read")}
                   value={view.totals.cacheReadInputTokens}
                   detail="Included in input"
                 />
                 <Stat
-                  label="Cache write"
+                  label={t("Cache write")}
                   value={view.totals.cacheWriteInputTokens}
                   detail="Included in input"
                 />
                 <div className="usage-stat">
-                  <span>Input cache hit</span>
+                  <span>{t("Input cache hit")}</span>
                   <strong>
                     {view.totals.inputTokens > 0
                       ? `${((view.totals.cacheReadInputTokens / view.totals.inputTokens) * 100).toFixed(1)}%`
                       : "—"}
                   </strong>
-                  <small>Cache read / input</small>
+                  <small>{t("Cache read / input")}</small>
                 </div>
               </div>
             </section>
             <section
               className="usage-card"
               aria-label={
-                breakdown === "model" ? "Detailed model usage" : "Usage by day"
+                breakdown === "model"
+                  ? t("Detailed model usage")
+                  : t("Usage by day")
               }
             >
               <div className="usage-card-heading">
                 <div>
-                  <h4>Breakdown</h4>
+                  <h4>{t("Breakdown")}</h4>
                   <span className="usage-muted">
                     {breakdown === "day" && range === "all" && !selectedDate
-                      ? "Last 30 days · UTC"
+                      ? t("Last 30 days · UTC")
                       : period}
                   </span>
                 </div>
                 <fieldset
                   className="usage-range"
-                  aria-label="Breakdown grouping"
+                  aria-label={t("Breakdown grouping")}
                 >
                   {(["model", "day"] as const).map((value) => (
                     <button
@@ -237,7 +255,7 @@ export function UsageSection() {
                       aria-pressed={breakdown === value}
                       onClick={() => setBreakdown(value)}
                     >
-                      {value === "model" ? "Model" : "Day"}
+                      {value === "model" ? t("Model") : t("Day")}
                     </button>
                   ))}
                 </fieldset>
@@ -247,12 +265,12 @@ export function UsageSection() {
                   <table className="usage-threads usage-models">
                     <thead>
                       <tr>
-                        <th>Day · UTC</th>
-                        <th>Turns</th>
-                        <th>Input</th>
-                        <th>Output</th>
-                        <th>Cache read</th>
-                        <th>Total tokens</th>
+                        <th>{t("Day · UTC")}</th>
+                        <th>{t("Turns")}</th>
+                        <th>{t("Input")}</th>
+                        <th>{t("Output")}</th>
+                        <th>{t("Cache read")}</th>
+                        <th>{t("Total tokens")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -285,28 +303,28 @@ export function UsageSection() {
                 </div>
               ) : view.models.length === 0 ? (
                 <p className="usage-muted">
-                  No models recorded in this period.
+                  {t("No models recorded in this period.")}
                 </p>
               ) : (
                 <div className="usage-table-scroll">
                   <table className="usage-threads usage-models">
                     <thead>
                       <tr>
-                        <th>Model / provider</th>
-                        <th>Turns</th>
-                        <th>Input</th>
-                        <th>Output</th>
-                        <th>Cache read</th>
-                        <th>Total / share</th>
+                        <th>{t("Model / provider")}</th>
+                        <th>{t("Turns")}</th>
+                        <th>{t("Input")}</th>
+                        <th>{t("Output")}</th>
+                        <th>{t("Cache read")}</th>
+                        <th>{t("Total / share")}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {view.models.map((model) => (
                         <tr key={JSON.stringify([model.provider, model.model])}>
                           <td>
-                            <strong>{model.model || "Unknown model"}</strong>
+                            <strong>{model.model || t("Unknown model")}</strong>
                             <small>
-                              {model.provider || "Unknown provider"}
+                              {model.provider || t("Unknown provider")}
                             </small>
                           </td>
                           <td>{exact.format(model.turns)}</td>
@@ -336,21 +354,23 @@ export function UsageSection() {
                 </div>
               )}
             </section>
-            <section className="usage-card" aria-label="Top conversations">
+            <section className="usage-card" aria-label={t("Top conversations")}>
               <div className="usage-card-heading">
-                <h4>Top conversations</h4>
-                <span>All-time totals · Top 20</span>
+                <h4>{t("Top conversations")}</h4>
+                <span>{t("All-time totals · Top 20")}</span>
               </div>
               {summary.threads.length === 0 ? (
-                <p className="usage-muted">No conversations recorded yet.</p>
+                <p className="usage-muted">
+                  {t("No conversations recorded yet.")}
+                </p>
               ) : (
                 <div className="usage-table-scroll">
                   <table className="usage-threads">
                     <thead>
                       <tr>
-                        <th>Conversation</th>
-                        <th>Turns</th>
-                        <th>Total tokens</th>
+                        <th>{t("Conversation")}</th>
+                        <th>{t("Turns")}</th>
+                        <th>{t("Total tokens")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -371,14 +391,14 @@ export function UsageSection() {
               )}
             </section>
             <p className="usage-footnote">
-              Provider-reported usage in this Yakitori data store, including
-              saved usage from running turns. Cache reads and writes are
-              included in input, not added again. Missing usage is excluded.
-              This is not account-wide billing or subscription quota.
+              {t(
+                "Provider-reported usage in this Yakitori data store, including saved usage from running turns. Cache reads and writes are included in input, not added again. Missing usage is excluded. This is not account-wide billing or subscription quota.",
+              )}
             </p>
             <p className="usage-footnote">
-              Updated {new Date(summary.generatedAt).toLocaleString()} ·
-              Calendar dates use UTC
+              {t("Updated")}{" "}
+              {new Date(summary.generatedAt).toLocaleString(locale)}{" "}
+              {t("· Calendar dates use UTC")}
             </p>
           </details>
         </>
@@ -412,6 +432,7 @@ function DailyTrend({
   selectedDate: string | undefined
   onSelect: (date: string | undefined) => void
 }>) {
+  const { t } = useTranslation()
   const [focusedDate, setFocusedDate] = useState<string>()
   const tabStopDate = days.some((day) => day.date === focusedDate)
     ? focusedDate
@@ -423,11 +444,13 @@ function DailyTrend({
     .map((day, index) => `${x(index)},${y(totalTokens(day))}`)
     .join(" ")
   return (
-    <section className="usage-daily" aria-label="Daily usage">
+    <section className="usage-daily" aria-label={t("Daily usage")}>
       <div className="usage-card-heading">
-        <h4>Daily tokens</h4>
+        <h4>{t("Daily tokens")}</h4>
         {(range === "all" || selectedDate) && (
-          <span>{range === "all" ? "Last 30 days" : `Last ${range} days`}</span>
+          <span>
+            {range === "all" ? t("Last 30 days") : t("Last {0} days", range)}
+          </span>
         )}
       </div>
       <div className="usage-chart">
@@ -460,7 +483,9 @@ function DailyTrend({
           </svg>
           <fieldset
             className="usage-trend"
-            aria-label="Daily trend, left and right arrow keys move between days"
+            aria-label={t(
+              "Daily trend, left and right arrow keys move between days",
+            )}
           >
             {days.map((day, index) => (
               <button
@@ -485,8 +510,17 @@ function DailyTrend({
                     event.currentTarget.parentElement?.children[targetIndex]
                   if (target instanceof HTMLButtonElement) target.focus()
                 }}
-                title={`${day.date}: ${exact.format(totalTokens(day))} tokens, ${day.turns} turns`}
-                aria-label={`${day.date}: ${exact.format(totalTokens(day))} tokens`}
+                title={t(
+                  "{0}: {1} tokens, {2} turns",
+                  day.date,
+                  exact.format(totalTokens(day)),
+                  day.turns,
+                )}
+                aria-label={t(
+                  "{0}: {1} tokens",
+                  day.date,
+                  exact.format(totalTokens(day)),
+                )}
                 aria-pressed={selectedDate === day.date}
                 onClick={() =>
                   onSelect(selectedDate === day.date ? undefined : day.date)

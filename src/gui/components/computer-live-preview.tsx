@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { Circle, Maximize2, Pause, Play, RefreshCw, Square } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
 import type {
@@ -28,6 +29,7 @@ export function ComputerLivePreview({
   active: boolean
   enabled: boolean
 }) {
+  const { locale, t } = useTranslation()
   const labelId = useId()
   const [visible, setVisible] = useState(document.visibilityState === "visible")
   const [targets, setTargets] = useState<ComputerPreviewCatalog["targets"]>([])
@@ -95,7 +97,9 @@ export function ComputerLivePreview({
           setSelectedId("")
           setRunning(false)
           setError(
-            "The preview target closed or restarted. Choose a target again.",
+            translate(
+              "The preview target closed or restarted. Choose a target again.",
+            ),
           )
         } else {
           const next = previous || catalog.targets[0]?.id || ""
@@ -173,12 +177,15 @@ export function ComputerLivePreview({
     pointer.x < image.frame.x + image.frame.width &&
     pointer.y < image.frame.y + image.frame.height
   return (
-    <section aria-label="Live computer preview" className="flex flex-col gap-3">
-      <p className="text-xs font-medium">Live preview</p>
+    <section
+      aria-label={t("Live computer preview")}
+      className="flex flex-col gap-3"
+    >
+      <p className="text-xs font-medium">{t("Live preview")}</p>
       {enabled ? (
         <FieldGroup>
           <Field data-invalid={error !== undefined}>
-            <FieldLabel htmlFor={labelId}>Preview target</FieldLabel>
+            <FieldLabel htmlFor={labelId}>{t("Preview target")}</FieldLabel>
             <Select
               id={labelId}
               aria-invalid={error !== undefined}
@@ -188,7 +195,9 @@ export function ComputerLivePreview({
                 value: entry.id,
                 label: entry.label,
               }))}
-              placeholder={loading ? "Finding windows…" : "Choose a target"}
+              placeholder={
+                loading ? t("Finding windows…") : t("Choose a target")
+              }
               onValueChange={(id) => {
                 generation.current++
                 selected.current = id
@@ -219,12 +228,12 @@ export function ComputerLivePreview({
               ) : (
                 <Play data-icon="inline-start" />
               )}
-              {running ? "Stop preview" : "Start preview"}
+              {running ? t("Stop preview") : t("Start preview")}
             </Button>
             <Button
               variant="ghost"
               size="icon-sm"
-              aria-label="Refresh preview targets"
+              aria-label={t("Refresh preview targets")}
               disabled={running || loading}
               onClick={() => setRefresh((value) => value + 1)}
             >
@@ -233,17 +242,17 @@ export function ComputerLivePreview({
             <span role="status" className="text-xs text-muted-foreground">
               {running && available
                 ? pending
-                  ? "Updating…"
-                  : "Live"
+                  ? t("Updating…")
+                  : t("Live")
                 : image
-                  ? "Paused"
-                  : "Stopped"}
+                  ? t("Paused")
+                  : t("Stopped")}
             </span>
           </div>
         </FieldGroup>
       ) : (
         <p className="text-xs text-muted-foreground">
-          Allow Screen Recording to preview apps.
+          {t("Allow Screen Recording to preview apps.")}
         </p>
       )}
       {image && (
@@ -258,19 +267,19 @@ export function ComputerLivePreview({
             <Button
               variant="ghost"
               className="block h-full w-full p-0"
-              aria-label="Enlarge live computer preview"
+              aria-label={t("Enlarge live computer preview")}
               onClick={() => setEnlarged(true)}
             >
               <img
                 src={image.dataUrl}
-                alt="Live computer preview"
+                alt={t("Live computer preview")}
                 className="size-full rounded border object-contain"
               />
             </Button>
             {pointerVisible && (
               <span
                 role="img"
-                aria-label="Pointer position"
+                aria-label={t("Pointer position")}
                 className="pointer-events-none absolute size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background shadow"
                 style={{
                   left: `${((pointer.x - image.frame.x) / image.frame.width) * 100}%`,
@@ -281,7 +290,8 @@ export function ComputerLivePreview({
           </div>
           <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
             <time dateTime={image.receivedAt}>
-              Updated {new Date(image.receivedAt).toLocaleTimeString()}
+              {t("Updated")}{" "}
+              {new Date(image.receivedAt).toLocaleTimeString(locale)}
             </time>
             <Maximize2 size={12} aria-hidden="true" />
           </div>
@@ -306,11 +316,12 @@ export function ComputerLivePreview({
           ) : (
             <Circle data-icon="inline-start" />
           )}
-          {recording.recording ? "Stop recording" : "Record preview"}
+          {recording.recording ? t("Stop recording") : t("Record preview")}
         </Button>
         <p className="text-xs text-muted-foreground">
-          Record received preview frames and pointer positions without audio.
-          Recording stops when this preview stops, hides, or changes target.
+          {t(
+            "Record received preview frames and pointer positions without audio. Recording stops when this preview stops, hides, or changes target.",
+          )}
         </p>
         {recording.error && (
           <p role="alert" className="text-xs text-destructive">
@@ -325,7 +336,7 @@ export function ComputerLivePreview({
         {recording.clip && (
           <>
             <video
-              aria-label="Recorded computer preview"
+              aria-label={t("Recorded computer preview")}
               src={recording.clip.url}
               controls
               muted
@@ -334,7 +345,7 @@ export function ComputerLivePreview({
             />
             <Button variant="outline" size="sm" asChild>
               <a href={recording.clip.url} download={recording.clip.name}>
-                Save recording
+                {t("Save recording")}
               </a>
             </Button>
           </>

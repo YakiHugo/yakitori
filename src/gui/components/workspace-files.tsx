@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import {
   File,
   FileCode2,
@@ -133,6 +134,7 @@ function FilePreview({
   skillProjectId?: string
   onEdit(): void
 }>) {
+  const { t } = useTranslation()
   const [preview, setPreview] = useState<WorkspaceReadResponse>()
   const [media, setMedia] = useState<WorkspaceReadMediaResponse>()
   const [office, setOffice] = useState<WorkspaceReadOfficeResponse>()
@@ -153,7 +155,9 @@ function FilePreview({
   useEffect(() => {
     const id = ++request.current
     if (skill && !skillSessionId && !skillProjectId) {
-      setError("Select a project or conversation to view this skill.")
+      setError(
+        translate("Select a project or conversation to view this skill."),
+      )
       setLoading(false)
       return
     }
@@ -189,7 +193,9 @@ function FilePreview({
         (cause: unknown) => {
           if (request.current === id) {
             setError(
-              cause instanceof Error ? cause.message : "Could not read file.",
+              cause instanceof Error
+                ? cause.message
+                : translate("Could not read file."),
             )
             setLoading(false)
           }
@@ -239,7 +245,9 @@ function FilePreview({
     } catch (cause) {
       if (request.current === id)
         setError(
-          cause instanceof Error ? cause.message : "Could not load more lines.",
+          cause instanceof Error
+            ? cause.message
+            : t("Could not load more lines."),
         )
     } finally {
       if (request.current === id) setLoading(false)
@@ -261,7 +269,7 @@ function FilePreview({
     } catch (cause) {
       if (request.current === id)
         setError(
-          cause instanceof Error ? cause.message : "Could not read file.",
+          cause instanceof Error ? cause.message : t("Could not read file."),
         )
     } finally {
       if (request.current === id) setLoading(false)
@@ -275,7 +283,7 @@ function FilePreview({
     } catch (cause) {
       if (request.current === id)
         setError(
-          cause instanceof Error ? cause.message : "Could not open file.",
+          cause instanceof Error ? cause.message : t("Could not open file."),
         )
     }
   }
@@ -329,8 +337,8 @@ function FilePreview({
           <button
             type="button"
             className={iconButton}
-            title="Edit file"
-            aria-label="Edit file"
+            title={t("Edit file")}
+            aria-label={t("Edit file")}
             onClick={onEdit}
           >
             <Pencil size={14} />
@@ -351,25 +359,28 @@ function FilePreview({
       {(preview && !preview.binary && lines.length > 0) || (isSvg && media) ? (
         <div className="file-preview-toolbar">
           {hasRenderedView ? (
-            <fieldset className="file-preview-modes" aria-label="File view">
+            <fieldset
+              className="file-preview-modes"
+              aria-label={t("File view")}
+            >
               <button
                 type="button"
                 aria-pressed={rendered}
                 onClick={() => setMode("preview")}
               >
-                Preview
+                {t("Preview")}
               </button>
               <button
                 type="button"
                 aria-pressed={!rendered}
                 onClick={() => void showSource()}
               >
-                Source
+                {t("Source")}
               </button>
             </fieldset>
           ) : (
             <span className="file-preview-language">
-              {language ?? "Plain text"}
+              {language ?? t("Plain text")}
             </span>
           )}
           <div className="file-preview-actions">
@@ -377,9 +388,9 @@ function FilePreview({
               <button
                 type="button"
                 className={iconButton}
-                aria-label="Wrap lines"
+                aria-label={t("Wrap lines")}
                 aria-pressed={wrap}
-                title="Wrap lines"
+                title={t("Wrap lines")}
                 onClick={() => setWrap((value) => !value)}
               >
                 <WrapText size={15} />
@@ -400,15 +411,18 @@ function FilePreview({
         {preview?.binary && (!isSvg || !rendered) ? (
           <div className="file-preview-empty">
             <File size={28} aria-hidden="true" />
-            <strong>No text preview</strong>
-            <p>Binary file · {fileActionLabel().toLowerCase()} to view.</p>
+            <strong>{t("No text preview")}</strong>
+            <p>
+              {t("Binary file ·")} {fileActionLabel().toLowerCase()}{" "}
+              {t("to view.")}
+            </p>
           </div>
         ) : null}
         {office ? (
           <Suspense
             fallback={
               <p role="status" className="px-4 py-3 text-muted-foreground">
-                Loading document viewer…
+                {t("Loading document viewer…")}
               </p>
             }
           >
@@ -418,7 +432,7 @@ function FilePreview({
           <div className="file-preview-image" data-vector={isSvg || undefined}>
             <button
               type="button"
-              aria-label={`Zoom ${path}`}
+              aria-label={t("Zoom {0}", path)}
               onClick={() => setLightbox(true)}
             >
               <img src={mediaUrl} alt={path.split("/").at(-1) ?? path} />
@@ -428,7 +442,7 @@ function FilePreview({
           <Suspense
             fallback={
               <p role="status" className="px-4 py-3 text-muted-foreground">
-                Loading PDF viewer…
+                {t("Loading PDF viewer…")}
               </p>
             }
           >
@@ -437,7 +451,7 @@ function FilePreview({
         ) : null}
         {preview && !preview.binary && (!isSvg || !rendered) ? (
           lines.length === 0 ? (
-            <p className="file-preview-empty">This file is empty.</p>
+            <p className="file-preview-empty">{t("This file is empty.")}</p>
           ) : (
             <div {...source}>
               {rendered && markdown ? (
@@ -478,7 +492,7 @@ function FilePreview({
         ) : null}
         {loading ? (
           <p role="status" className="px-4 py-3 text-muted-foreground">
-            Loading file…
+            {t("Loading file…")}
           </p>
         ) : null}
         {preview?.nextOffset !== undefined && (!isSvg || !rendered) ? (
@@ -488,11 +502,12 @@ function FilePreview({
             className="file-preview-load-more"
             onClick={() => void loadMore()}
           >
-            Load more lines
+            {t("Load more lines")}
           </button>
         ) : preview?.truncated && !preview.binary && (!isSvg || !rendered) ? (
           <p className="px-4 py-3 text-muted-foreground">
-            Preview truncated. {fileActionLabel()} to view the full file.
+            {t("Preview truncated.")} {fileActionLabel()}{" "}
+            {t("to view the full file.")}
           </p>
         ) : null}
       </div>
@@ -501,9 +516,9 @@ function FilePreview({
           <span>
             {lines.length.toLocaleString()}{" "}
             {lines.length === 1 ? "line" : "lines"}
-            {preview.truncated ? " loaded · Partial file" : ""}
+            {preview.truncated ? ` ${t("loaded · Partial file")}` : ""}
           </span>
-          <span>Read only</span>
+          <span>{t("Read only")}</span>
         </div>
       ) : null}
       {lightbox && mediaUrl ? (

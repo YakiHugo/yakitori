@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { ChevronRight } from "lucide-react"
 import { useId } from "react"
 import type { ExecutionEntry } from "../../execution-view.ts"
@@ -23,6 +24,7 @@ export function ReasoningCell({
   apiBase?: string | undefined
   onExpandedChange?: (open: boolean) => void
 }>) {
+  const { t } = useTranslation()
   const { threadId } = useConversationScope()
   const [open, setOpen] = useThreadScopeState(
     threadId,
@@ -33,7 +35,7 @@ export function ReasoningCell({
   if (entry.format === "redacted")
     return (
       <p className="py-1 text-detail text-muted-foreground">
-        {encryptedReasoningLabel}
+        {t(encryptedReasoningLabel)}
       </p>
     )
   if (!entry.incomplete && !entry.text.trim()) return null
@@ -58,17 +60,17 @@ export function ReasoningCell({
     entry.durationMs === undefined
       ? undefined
       : entry.durationMs < 1000
-        ? "<1s"
-        : formatElapsed(Math.floor(entry.durationMs / 1000))
+        ? t("<1s")
+        : formatElapsed(Math.floor(entry.durationMs / 1000), t)
   const label = summary
     ? streaming
-      ? "Reasoning summary…"
-      : "Reasoning summary"
+      ? t("Reasoning summary…")
+      : t("Reasoning summary")
     : streaming
-      ? "Reasoning…"
+      ? t("Reasoning…")
       : elapsed !== undefined
-        ? `Thought for ${elapsed}`
-        : "Reasoning"
+        ? t("Thought for {0}", elapsed)
+        : t("Reasoning")
   return (
     <Collapsible
       open={open}

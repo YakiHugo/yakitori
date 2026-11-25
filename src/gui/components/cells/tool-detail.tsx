@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { Copy, ExternalLink } from "lucide-react"
 import { useState } from "react"
 import {
@@ -18,10 +19,11 @@ export function ToolDetailView({
   workspaceRoot?: string | undefined
   pending?: boolean
 }>) {
+  const { t } = useTranslation()
   if (detail === undefined) {
     return (
       <p className="text-caption text-muted-foreground">
-        {pending ? "Waiting for a result…" : "No output returned."}
+        {pending ? t("Waiting for a result…") : t("No output returned.")}
       </p>
     )
   }
@@ -41,7 +43,7 @@ export function ToolDetailView({
           />
           {detail.truncated ? (
             <p className="text-caption text-muted-foreground">
-              Partial file view
+              {t("Partial file view")}
             </p>
           ) : null}
           <pre className="tool-output max-h-96">{detail.content}</pre>
@@ -71,7 +73,7 @@ export function ToolDetailView({
           ))}
           {detail.truncated ? (
             <p className="text-caption text-muted-foreground">
-              Partial results
+              {t("Partial results")}
             </p>
           ) : null}
         </div>
@@ -88,7 +90,7 @@ export function ToolDetailView({
           ))}
           {detail.truncated ? (
             <p className="pt-1 text-caption text-muted-foreground">
-              Partial results
+              {t("Partial results")}
             </p>
           ) : null}
         </div>
@@ -152,7 +154,7 @@ export function ToolDetailView({
       )
     case "links":
       return detail.links.length === 0 ? (
-        <TextOutput text={detail.fallbackText ?? "No links returned."} />
+        <TextOutput text={detail.fallbackText ?? t("No links returned.")} />
       ) : (
         <div className="space-y-2">
           {detail.links.map((link) => (
@@ -163,7 +165,7 @@ export function ToolDetailView({
     case "collaboration":
       return detail.text === undefined ? (
         <p className="text-caption text-muted-foreground">
-          {pending ? "Waiting for a result…" : "No output returned."}
+          {pending ? t("Waiting for a result…") : t("No output returned.")}
         </p>
       ) : (
         <TextOutput text={detail.text} />
@@ -180,9 +182,10 @@ export function ToolFileLocations({
   locations: readonly Readonly<Omit<FileTarget, "kind">>[] | undefined
   workspaceRoot?: string | undefined
 }>) {
+  const { t } = useTranslation()
   if (!locations?.length) return null
   return (
-    <section aria-label="Tool file locations" className="space-y-0.5">
+    <section aria-label={t("Tool file locations")} className="space-y-0.5">
       {locations.map((location) => (
         <FileLink
           key={JSON.stringify(location)}
@@ -252,11 +255,12 @@ function UrlLink({
   readonly title: string
   readonly url: string
 }) {
+  const { t } = useTranslation()
   return (
     <ActionButton
       label={title}
       secondary={displayUrl(url)}
-      title="Open in browser"
+      title={t("Open in browser")}
       action={() => openUrlTarget({ kind: "url", url })}
     />
   )
@@ -277,6 +281,7 @@ function ActionButton({
   readonly mutedPrefix?: string | undefined
   readonly action: () => Promise<void>
 }) {
+  const { t } = useTranslation()
   const [error, setError] = useState<string>()
   const Icon = title === "Copy path" ? Copy : ExternalLink
   return (
@@ -291,7 +296,9 @@ function ActionButton({
       onClick={() => {
         setError(undefined)
         void action().catch((reason: unknown) => {
-          setError(reason instanceof Error ? reason.message : "Could not open")
+          setError(
+            reason instanceof Error ? reason.message : t("Could not open"),
+          )
         })
       }}
     >

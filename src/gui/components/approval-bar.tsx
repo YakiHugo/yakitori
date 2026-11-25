@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ShieldAlert } from "lucide-react"
 import type { ExecutionEntry } from "../execution-view.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
@@ -35,6 +36,7 @@ export function ApprovalRequests({
   isResolving(id: string): boolean
   onResolve(turnId: string, id: string, behavior: "allow" | "deny"): void
 }>) {
+  const { t } = useTranslation()
   if (pending.length === 0) return null
 
   return (
@@ -46,14 +48,16 @@ export function ApprovalRequests({
             key={entry.permissionRequestId}
             aria-label={
               entry.subject === undefined
-                ? `Permission · ${entry.action}`
-                : `Permission · ${entry.action}: ${entry.subject}`
+                ? t("Permission · {0}", entry.action)
+                : t("Permission · {0}: {1}", entry.action, entry.subject)
             }
             className="flex items-center gap-3"
           >
             <ShieldAlert className="size-4 shrink-0 text-amber-600" />
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">Permission · {entry.action}</p>
+              <p className="text-sm font-medium">
+                {t("Permission · {0}", entry.action)}
+              </p>
               {entry.subject !== undefined && (
                 <p className="truncate text-xs text-muted-foreground">
                   {entry.subject}
@@ -61,7 +65,7 @@ export function ApprovalRequests({
               )}
               <p className="text-xs text-muted-foreground">
                 {entry.reason ??
-                  "Runs with host user authority (files, process, network)."}
+                  t("Runs with host user authority (files, process, network).")}
               </p>
             </div>
             <Button
@@ -72,7 +76,7 @@ export function ApprovalRequests({
                 onResolve(entry.turnId, entry.permissionRequestId, "allow")
               }
             >
-              Allow
+              {t("Allow")}
             </Button>
             <Button
               type="button"
@@ -83,7 +87,7 @@ export function ApprovalRequests({
                 onResolve(entry.turnId, entry.permissionRequestId, "deny")
               }
             >
-              Deny
+              {t("Deny")}
             </Button>
           </fieldset>
         )

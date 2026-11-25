@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
@@ -9,8 +10,9 @@ export function AgentMessageCell({
   entry: Extract<ExecutionEntry, { kind: "agent_input" }>
   sessionId?: string | undefined
 }>) {
+  const { t } = useTranslation()
   const label =
-    entry.sourceSessionId === undefined ? "Agent task" : "Agent message"
+    entry.sourceSessionId === undefined ? t("Agent task") : t("Agent message")
   return (
     <article
       aria-label={label}
@@ -34,7 +36,7 @@ export function AgentMessageCell({
           title={
             entry.sourceSessionId === undefined
               ? undefined
-              : `From session ${entry.sourceSessionId}`
+              : t("From session {0}", entry.sourceSessionId)
           }
         >
           {label}

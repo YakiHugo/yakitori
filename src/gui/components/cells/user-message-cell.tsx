@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { ImageOff, LoaderCircle, PencilLine, Target } from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import { assetSourceKey } from "../../../protocol/asset-types.ts"
@@ -32,6 +33,7 @@ import { Button } from "../ui/button.tsx"
 import { ImageOutputCell } from "./image-output-cell.tsx"
 
 function MessageText({ text }: Readonly<{ text: string }>) {
+  const { t } = useTranslation()
   const paragraphs: ReactNode[] = []
   parsePrompt(text).forEach((paragraph, paragraphOffset) => {
     const content: ReactNode[] = []
@@ -45,7 +47,7 @@ function MessageText({ text }: Readonly<{ text: string }>) {
             // biome-ignore lint/suspicious/noArrayIndexKey: ProseMirror supplies document offsets, not array indices; admitted messages are immutable.
             key={offset}
             title={node.attrs.path}
-            aria-label={`View ${node.attrs.name} skill`}
+            aria-label={t("View {0} skill", node.attrs.name)}
             className="mx-0.5 inline cursor-pointer rounded-md bg-current/10 px-1.5 py-0.5 font-medium hover:bg-current/15 focus-visible:outline-2 focus-visible:outline-offset-2"
             onClick={() =>
               useWorkspaceStore
@@ -82,6 +84,7 @@ export function UserMessageCell({
   entry: Extract<ExecutionEntry, { kind: "user_input" }>
   queued: boolean
 }>) {
+  const { t } = useTranslation()
   const busy = useAppStore((state) => state.busy)
   const { sessionId, threadId, apiBase, capabilities } = useConversationScope()
   const { editable } = capabilities
@@ -124,7 +127,7 @@ export function UserMessageCell({
           {contextAttachments.length > 0 ? (
             <section
               className="message-attachments"
-              aria-label="Message sources"
+              aria-label={t("Message sources")}
             >
               <ContextExcerpts excerpts={contextAttachments} />
             </section>
@@ -169,7 +172,7 @@ export function UserMessageCell({
                   sessionId
                     ? {
                         kind: "message",
-                        label: "User message",
+                        label: t("User message"),
                         messageId: entry.inputId,
                         sessionId,
                       }
@@ -183,7 +186,7 @@ export function UserMessageCell({
           {sentAsGoal ? (
             <div className="flex items-center gap-1 text-caption text-muted-foreground">
               <Target className="size-3" />
-              <span>Sent as goal</span>
+              <span>{t("Sent as goal")}</span>
             </div>
           ) : null}
           <div className="flex min-h-5 items-center gap-1">
@@ -195,8 +198,8 @@ export function UserMessageCell({
                 <button
                   type="button"
                   disabled={busy}
-                  aria-label="Edit & resubmit"
-                  title="Edit & resubmit"
+                  aria-label={t("Edit & resubmit")}
+                  title={t("Edit & resubmit")}
                   onClick={() => {
                     setDraft(entry.content)
                     setEditing(true)
@@ -226,7 +229,7 @@ export function UserMessageCell({
         >
           <PromptEditor
             ref={editorRef}
-            label="Edit message"
+            label={t("Edit message")}
             value={draft}
             apiBase={apiBase}
             disabled={busy}
@@ -237,7 +240,7 @@ export function UserMessageCell({
                   setOpenError(
                     error instanceof Error
                       ? error.message
-                      : "Could not open PDF.",
+                      : t("Could not open PDF."),
                   ),
               )
             }}
@@ -275,7 +278,7 @@ export function UserMessageCell({
               disabled={busy}
               onClick={() => setEditing(false)}
             >
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               type="submit"
@@ -285,7 +288,7 @@ export function UserMessageCell({
                 (!hasInputDraft(edited) && contextAttachments.length === 0)
               }
             >
-              Send
+              {t("Send")}
             </Button>
           </div>
         </form>
@@ -309,12 +312,13 @@ function ReplayedInput({
   part: ReplayedInputPart
   apiBase: string
 }>) {
+  const { t } = useTranslation()
   if (part.type === "image")
     return (
       <ImageOutputCell
         image={part.image}
         apiBase={apiBase}
-        label="User image"
+        label={t("User image")}
       />
     )
   if (part.type === "text")
@@ -350,13 +354,14 @@ function MessageImage({
   name,
   onClick,
 }: Readonly<{ src: string; name: string; onClick(): void }>) {
+  const { t } = useTranslation()
   const [status, setStatus] = useState<"loading" | "loaded" | "error">(
     "loading",
   )
   return (
     <button
       type="button"
-      aria-label={`Preview ${name}`}
+      aria-label={t("Preview {0}", name)}
       title={name}
       className="message-image"
       onClick={onClick}
@@ -372,7 +377,7 @@ function MessageImage({
         <span
           className="message-image-placeholder"
           role="status"
-          aria-label={`Loading ${name}`}
+          aria-label={t("Loading {0}", name)}
         >
           <LoaderCircle
             size={16}
@@ -383,7 +388,7 @@ function MessageImage({
       {status === "error" && (
         <span className="message-image-placeholder">
           <ImageOff size={18} />
-          <span>Preview unavailable</span>
+          <span>{t("Preview unavailable")}</span>
         </span>
       )}
     </button>

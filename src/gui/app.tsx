@@ -1,3 +1,4 @@
+import { useTranslation } from "./i18n/use-translation.ts"
 import { GitFork, LoaderCircle, Square } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
@@ -28,6 +29,7 @@ import { useAppStore, useExecutionView } from "./store/app-store.ts"
 import { useEngineStore } from "./store/engine-store.ts"
 
 export function App() {
+  const { t } = useTranslation()
   useSessionRead()
   const externalSession = useEngineStore((state) => state.engineId)
   const externalSessionId = useEngineStore((state) => state.sessionId)
@@ -104,13 +106,15 @@ export function App() {
         usageAccountId={route.preview?.target?.provider}
         heading={
           settingsOpen ? (
-            <span>Settings</span>
+            <span>{t("Settings")}</span>
           ) : externalSession !== undefined ? (
             <EngineSessionHeading />
           ) : showSessionHeader ? (
             <SessionHeader />
           ) : (
-            <span>{hydrating ? "Loading conversation…" : "New session"}</span>
+            <span>
+              {hydrating ? t("Loading conversation…") : t("New session")}
+            </span>
           )
         }
         sessionActions={showSessionHeader ? <SessionSummary /> : undefined}
@@ -129,12 +133,14 @@ export function App() {
                 <button
                   type="button"
                   className="ml-3 underline"
-                  title="Hide this reminder only. The input may still be delivered; nothing is cancelled or resent."
+                  title={t(
+                    "Hide this reminder only. The input may still be delivered; nothing is cancelled or resent.",
+                  )}
                   onClick={() =>
                     useAppStore.getState().dismissInputRecoveryNotice()
                   }
                 >
-                  Dismiss reminder
+                  {t("Dismiss reminder")}
                 </button>
               )}
             </div>
@@ -166,6 +172,7 @@ export function App() {
 }
 
 function SessionComposer({ route }: Readonly<{ route: ComposerRoute }>) {
+  const { t } = useTranslation()
   const session = useAppStore((state) => state.selectedSession)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
@@ -185,14 +192,14 @@ function SessionComposer({ route }: Readonly<{ route: ComposerRoute }>) {
     activeTurnId !== undefined && inFlightActions.has(`cancel:${activeTurnId}`)
   return (
     <div className="mx-auto mb-5 flex max-w-3xl items-center justify-between gap-4 rounded-xl border bg-muted/40 px-4 py-3 text-sm">
-      <span>This conversation is archived.</span>
+      <span>{t("This conversation is archived.")}</span>
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {activeTurnId !== undefined && (
           <button
             type="button"
             className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5"
             disabled={stopping}
-            title="Interrupt (Esc)"
+            title={t("Interrupt (Esc)")}
             onClick={() => void cancelTurn(activeTurnId)}
           >
             {stopping ? (
@@ -200,7 +207,7 @@ function SessionComposer({ route }: Readonly<{ route: ComposerRoute }>) {
             ) : (
               <Square className="size-4" />
             )}
-            {stopping ? "Stopping…" : "Interrupt"}
+            {stopping ? t("Stopping…") : t("Interrupt")}
           </button>
         )}
         <button
@@ -215,7 +222,7 @@ function SessionComposer({ route }: Readonly<{ route: ComposerRoute }>) {
             })
           }
         >
-          Restore conversation
+          {t("Restore conversation")}
         </button>
       </div>
     </div>
@@ -223,6 +230,7 @@ function SessionComposer({ route }: Readonly<{ route: ComposerRoute }>) {
 }
 
 function SessionHeader() {
+  const { t } = useTranslation()
   const session = useAppStore((state) => state.selectedSession)
   const sessionsByProject = useAppStore((state) => state.sessionsByProject)
   const selectSession = useAppStore((state) => state.selectSession)
@@ -234,7 +242,7 @@ function SessionHeader() {
     <div className="window-session-heading">
       <div className="flex min-w-0 items-center gap-2">
         <h2 className="truncate text-sm font-semibold">
-          {session.title ?? "Untitled session"}
+          {session.title ?? t("Untitled session")}
         </h2>
         {session.parentSessionId !== undefined ? (
           <button
@@ -243,11 +251,11 @@ function SessionHeader() {
               void selectSession(session.parentSessionId as string)
             }
             className="inline-flex max-w-64 shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Open parent session"
+            title={t("Open parent session")}
           >
             <GitFork className="size-3" />
             <span className="truncate">
-              fork from {parent?.title ?? "parent"}
+              {t("fork from")} {parent?.title ?? "parent"}
             </span>
           </button>
         ) : null}
@@ -258,6 +266,7 @@ function SessionHeader() {
 }
 
 function SessionRename() {
+  const { t } = useTranslation()
   const session = useAppStore((state) => state.selectedSession)
   const revision = useAppStore((state) => state.renameDialogRevision)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
@@ -270,7 +279,7 @@ function SessionRename() {
   }, [revision])
   return open && session ? (
     <SidebarNameDialog
-      title="Rename conversation"
+      title={t("Rename conversation")}
       initialName={session.title ?? ""}
       onClose={() => setOpen(false)}
       onSave={(title) =>

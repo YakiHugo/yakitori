@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Check, ChevronDown, Folder, Plus, Search, X } from "lucide-react"
 import { useId, useLayoutEffect, useRef, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
@@ -5,6 +6,7 @@ import { CreateProjectDialog } from "./sidebar-add-project.tsx"
 import "./new-session-welcome.css"
 
 export function NewSessionWelcome() {
+  const { t } = useTranslation()
   const projects = useAppStore((state) => state.projects)
   const projectId = useAppStore((state) =>
     state.selectedSession === undefined
@@ -21,9 +23,12 @@ export function NewSessionWelcome() {
   const pickerRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const project = projects.find((entry) => entry.id === projectId)
+  const [beforeProject, afterProject] = t("What should we build in {0}?").split(
+    "{0}",
+  )
   const heading = project
-    ? `What should we build in ${project.name}?`
-    : "What should we build?"
+    ? t("What should we build in {0}?", project.name)
+    : t("What should we build?")
   const search = query.trim().toLowerCase()
   const matches = projects.filter((entry) =>
     entry.name.toLowerCase().includes(search),
@@ -39,12 +44,12 @@ export function NewSessionWelcome() {
   return (
     <div className="new-session-welcome">
       <h2 className="new-session-heading" aria-label={heading}>
-        {project ? "What should we build in " : heading}
+        {project ? beforeProject : heading}
         <span className="new-session-scope" data-project={!!project}>
           <button
             type="button"
             className="new-session-project"
-            aria-label="New session project"
+            aria-label={t("New session project")}
             aria-describedby={`${pickerId}-selection`}
             aria-haspopup="dialog"
             aria-expanded={pickerOpen}
@@ -54,11 +59,11 @@ export function NewSessionWelcome() {
           >
             {!project && <Folder size={14} aria-hidden="true" />}
             <span id={`${pickerId}-selection`}>
-              {project?.name ?? "No project"}
+              {project?.name ?? t("No project")}
             </span>
             {!project && <ChevronDown size={12} aria-hidden="true" />}
           </button>
-          {project && "?"}
+          {project && afterProject}
         </span>
       </h2>
       <div
@@ -66,7 +71,7 @@ export function NewSessionWelcome() {
         id={pickerId}
         className="new-session-project-picker"
         role="dialog"
-        aria-label="Choose a project"
+        aria-label={t("Choose a project")}
         aria-hidden={!pickerOpen}
         popover="auto"
         onBeforeToggle={(event) => {
@@ -101,8 +106,8 @@ export function NewSessionWelcome() {
           <Search size={16} aria-hidden="true" />
           <input
             ref={searchRef}
-            aria-label="Search projects"
-            placeholder="Search projects"
+            aria-label={t("Search projects")}
+            placeholder={t("Search projects")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -110,7 +115,7 @@ export function NewSessionWelcome() {
         <div className="new-session-project-results">
           {matches.length === 0 && (
             <p role="status">
-              {search ? "No matching projects" : "No projects yet"}
+              {search ? t("No matching projects") : t("No projects yet")}
             </p>
           )}
           {matches.map((entry) => (
@@ -136,7 +141,7 @@ export function NewSessionWelcome() {
             }}
           >
             <Plus size={16} aria-hidden="true" />
-            <span>Create project</span>
+            <span>{t("Create project")}</span>
           </button>
           <button
             type="button"
@@ -144,7 +149,7 @@ export function NewSessionWelcome() {
             onClick={() => select()}
           >
             <X size={16} aria-hidden="true" />
-            <span>Work without a project</span>
+            <span>{t("Work without a project")}</span>
             {projectId === undefined && <Check size={16} aria-hidden="true" />}
           </button>
         </div>

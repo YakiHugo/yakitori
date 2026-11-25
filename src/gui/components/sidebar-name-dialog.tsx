@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useRef, useState } from "react"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
@@ -13,6 +14,7 @@ export function SidebarNameDialog({
   onSave(name: string): Promise<boolean>
   onClose(): void
 }>) {
+  const { t } = useTranslation()
   const [name, setName] = useState(initialName)
   const [saving, setSaving] = useState(false)
   const active = useRef(true)
@@ -37,7 +39,7 @@ export function SidebarNameDialog({
         }}
       >
         <input
-          aria-label="Name"
+          aria-label={t("Name")}
           data-autofocus
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -45,10 +47,10 @@ export function SidebarNameDialog({
         />
         <div className="mt-5 flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button type="submit" disabled={saving || !name.trim()}>
-            Save
+            {t("Save")}
           </Button>
         </div>
       </form>

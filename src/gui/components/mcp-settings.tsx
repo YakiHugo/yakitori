@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useRef, useState } from "react"
 import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
@@ -15,7 +16,7 @@ const stateLabels = {
   failed: "Connection failed",
   unconnected: "Not connected",
   connecting: "Connecting…",
-}
+} as const
 
 export function McpSettings() {
   const apiBase = useAppStore((state) => state.apiBase)
@@ -33,6 +34,7 @@ function McpServerList({
   apiBase,
   sessionId,
 }: Readonly<{ apiBase: string; sessionId: string | undefined }>) {
+  const { t } = useTranslation()
   const [servers, setServers] = useState<McpServers>()
   const [statusError, setStatusError] = useState<string>()
   const [actionError, setActionError] = useState<string>()
@@ -76,7 +78,7 @@ function McpServerList({
         setStatusError(
           error instanceof Error
             ? error.message
-            : "Could not refresh MCP servers.",
+            : t("Could not refresh MCP servers."),
         )
       } finally {
         if (current) {
@@ -137,13 +139,13 @@ function McpServerList({
     <>
       <p className="mb-4 text-xs text-muted-foreground">
         {sessionId === undefined
-          ? "Tool connections from your global configuration."
-          : "Tool connections configured for the current conversation."}
+          ? t("Tool connections from your global configuration.")
+          : t("Tool connections configured for the current conversation.")}
       </p>
       {statusError ? (
         <p role="alert" className="mb-3 text-sm text-destructive">
           {statusError}
-          {servers === undefined ? "" : " Showing the previous status."}
+          {servers === undefined ? "" : t("Showing the previous status.")}
         </p>
       ) : null}
       {actionError ? (
@@ -153,14 +155,14 @@ function McpServerList({
       ) : null}
       {servers === undefined ? (
         statusError ? null : (
-          <p role="status">Loading MCP servers…</p>
+          <p role="status">{t("Loading MCP servers…")}</p>
         )
       ) : servers.length === 0 ? (
-        <p className="settings-hint">No MCP servers configured.</p>
+        <p className="settings-hint">{t("No MCP servers configured.")}</p>
       ) : (
         <ul
           className="settings-group flex flex-col"
-          aria-label="Configured MCP servers"
+          aria-label={t("Configured MCP servers")}
         >
           {servers.map((server) => (
             <li key={server.name} className="settings-row flex-wrap">
@@ -172,21 +174,25 @@ function McpServerList({
                       server.state === "failed" ? "destructive" : "secondary"
                     }
                   >
-                    {server.enabled ? stateLabels[server.state] : "Disabled"}
+                    {t(server.enabled ? stateLabels[server.state] : "Disabled")}
                   </Badge>
                   {server.required ? (
-                    <Badge variant="outline">Required</Badge>
+                    <Badge variant="outline">{t("Required")}</Badge>
                   ) : null}
                 </div>
                 <p>
-                  {server.transport === "http" ? "HTTP" : "Local process"} ·{" "}
+                  {server.transport === "http" ? "HTTP" : t("Local process")} ·{" "}
                   {server.toolCount} {server.toolCount === 1 ? "tool" : "tools"}
-                  {server.authenticated ? " · Signed in" : ""}
+                  {server.authenticated ? ` ${t("· Signed in")}` : ""}
                 </p>
                 {server.loginState === "pending" ? (
-                  <p role="status">Waiting for sign-in in your browser…</p>
+                  <p role="status">
+                    {t("Waiting for sign-in in your browser…")}
+                  </p>
                 ) : server.loginState === "failed" ? (
-                  <p role="alert">Sign-in failed. Try logging in again.</p>
+                  <p role="alert">
+                    {t("Sign-in failed. Try logging in again.")}
+                  </p>
                 ) : null}
                 {server.error ? <p role="alert">{server.error}</p> : null}
               </div>
@@ -211,24 +217,24 @@ function McpServerList({
                   >
                     {pendingAction?.name === server.name &&
                     pendingAction.action !== "reconnect"
-                      ? "Please wait…"
+                      ? t("Please wait…")
                       : server.authenticated
-                        ? "Log out"
-                        : "Log in"}
+                        ? t("Log out")
+                        : t("Log in")}
                   </Button>
                 ) : null}
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  aria-label={`Reconnect ${server.name}`}
+                  aria-label={t("Reconnect {0}", server.name)}
                   disabled={!server.enabled || pendingAction !== undefined}
                   onClick={() => void perform(server.name, "reconnect")}
                 >
                   {pendingAction?.name === server.name &&
                   pendingAction.action === "reconnect"
-                    ? "Connecting…"
-                    : "Reconnect"}
+                    ? t("Connecting…")
+                    : t("Reconnect")}
                 </Button>
               </div>
             </li>

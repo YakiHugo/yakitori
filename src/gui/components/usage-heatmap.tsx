@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useState } from "react"
 import { totalTokens, type usageCalendar } from "../usage-view.ts"
 import {
@@ -6,15 +7,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "./ui/tooltip.tsx"
-
-const exact = new Intl.NumberFormat("en")
-const month = new Intl.DateTimeFormat("en", { month: "short", timeZone: "UTC" })
-const fullDate = new Intl.DateTimeFormat("en", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  timeZone: "UTC",
-})
 
 export function UsageHeatmap({
   days,
@@ -25,6 +17,18 @@ export function UsageHeatmap({
   selectedDate: string | undefined
   onSelect: (date: string | undefined) => void
 }>) {
+  const { locale, t } = useTranslation()
+  const exact = new Intl.NumberFormat(locale)
+  const month = new Intl.DateTimeFormat(locale, {
+    month: "short",
+    timeZone: "UTC",
+  })
+  const fullDate = new Intl.DateTimeFormat(locale, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  })
   const [focusedDate, setFocusedDate] = useState<string>()
   const firstWeekday = days[0]
     ? new Date(`${days[0].date}T00:00:00Z`).getUTCDay()
@@ -54,13 +58,16 @@ export function UsageHeatmap({
   return (
     <section
       className="usage-card usage-activity"
-      aria-label="Activity heatmap"
+      aria-label={t("Activity heatmap")}
     >
       <div className="usage-card-heading">
-        <h4>Token activity</h4>
+        <h4>{t("Token activity")}</h4>
         <span>
-          {days.filter((day) => day.turns > 0 || totalTokens(day) > 0).length}{" "}
-          active days · Last {days.length} days
+          {t(
+            "{0} active days · Last {1} days",
+            days.filter((day) => day.turns > 0 || totalTokens(day) > 0).length,
+            days.length,
+          )}
         </span>
       </div>
       <div className="usage-calendar-scroll">
@@ -71,7 +78,9 @@ export function UsageHeatmap({
           <TooltipProvider delayDuration={120}>
             <fieldset
               className="usage-calendar"
-              aria-label="Daily token activity, arrow keys move between days"
+              aria-label={t(
+                "Daily token activity, arrow keys move between days",
+              )}
             >
               {days.map((day, index) => {
                 const date = new Date(`${day.date}T00:00:00Z`)
@@ -93,7 +102,12 @@ export function UsageHeatmap({
                             : Math.min(4, Math.ceil((tokens / peak) * 4))
                         }
                         aria-pressed={selectedDate === day.date}
-                        aria-label={`${day.date}: ${exact.format(tokens)} tokens, ${day.turns} turns`}
+                        aria-label={t(
+                          "{0}: {1} tokens, {2} turns",
+                          day.date,
+                          exact.format(tokens),
+                          day.turns,
+                        )}
                         onFocus={() => setFocusedDate(day.date)}
                         onClick={() =>
                           onSelect(
@@ -134,7 +148,7 @@ export function UsageHeatmap({
                       sideOffset={8}
                     >
                       <span>{fullDate.format(date)}</span>
-                      <strong>{exact.format(tokens)} tokens</strong>
+                      <strong>{t("{0} tokens", exact.format(tokens))}</strong>
                     </TooltipContent>
                   </Tooltip>
                 )

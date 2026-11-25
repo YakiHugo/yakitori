@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import {
   ChevronRight,
   Folder,
@@ -27,6 +28,7 @@ export function WorkspaceFileTree(props: TreeProps) {
 }
 
 function FileTree(props: TreeProps) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState("")
   const [refresh, setRefresh] = useState(0)
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
@@ -69,7 +71,7 @@ function FileTree(props: TreeProps) {
               setError(
                 cause instanceof Error
                   ? cause.message
-                  : "Could not find files.",
+                  : t("Could not find files."),
               )
               setLoading(false)
             }
@@ -83,13 +85,13 @@ function FileTree(props: TreeProps) {
   }, [props.apiBase, props.cwd, term, revision])
   const rootName = props.cwd.replace(/\/$/, "").split("/").at(-1) || props.cwd
   return (
-    <section className="workspace-file-tree" aria-label="Project files">
+    <section className="workspace-file-tree" aria-label={t("Project files")}>
       <div className="file-tree-toolbar">
         <label className="file-tree-filter">
           <Search size={13} aria-hidden="true" />
           <input
-            aria-label="Find files"
-            placeholder="Find files…"
+            aria-label={t("Find files")}
+            placeholder={t("Find files…")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -99,7 +101,7 @@ function FileTree(props: TreeProps) {
           {query !== "" ? (
             <button
               type="button"
-              aria-label="Clear file filter"
+              aria-label={t("Clear file filter")}
               onClick={() => setQuery("")}
             >
               <X size={13} />
@@ -109,7 +111,7 @@ function FileTree(props: TreeProps) {
         <button
           type="button"
           className="file-tree-refresh"
-          aria-label="Refresh files"
+          aria-label={t("Refresh files")}
           onClick={() => setRefresh((value) => value + 1)}
         >
           <RefreshCw size={13} />
@@ -123,7 +125,7 @@ function FileTree(props: TreeProps) {
           <>
             {loading ? (
               <p className="file-tree-hint" role="status">
-                Finding files…
+                {t("Finding files…")}
               </p>
             ) : null}
             {error ? (
@@ -131,7 +133,7 @@ function FileTree(props: TreeProps) {
                 {error}
               </p>
             ) : null}
-            <ul className="file-tree-results" aria-label="Matching files">
+            <ul className="file-tree-results" aria-label={t("Matching files")}>
               {result?.paths.map((path) => (
                 <li key={path}>
                   <button
@@ -151,11 +153,11 @@ function FileTree(props: TreeProps) {
             </ul>
             {result ? (
               <p className="file-tree-hint">
-                {result.paths.length === 0 ? "No files found. " : ""}
+                {result.paths.length === 0 ? `${t("No files found.")} ` : ""}
                 {result.truncated
-                  ? "More files may match. Narrow the filter. "
+                  ? `${t("More files may match. Narrow the filter.")} `
                   : ""}
-                Ignored files are excluded.
+                {t("Ignored files are excluded.")}
               </p>
             ) : null}
           </>
@@ -171,6 +173,7 @@ const Directory = memo(function Directory({
   revision,
   ...props
 }: TreeProps & Readonly<{ path: string; name: string; revision: string }>) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(path === ".")
   const [listing, setListing] = useState<WorkspaceListResponse>()
   const [loading, setLoading] = useState(false)
@@ -193,7 +196,9 @@ const Directory = memo(function Directory({
         (cause: unknown) => {
           if (current) {
             setError(
-              cause instanceof Error ? cause.message : "Could not list files.",
+              cause instanceof Error
+                ? cause.message
+                : translate("Could not list files."),
             )
             setLoading(false)
           }
@@ -252,7 +257,7 @@ const Directory = memo(function Directory({
           )}
           {loading ? (
             <li className="file-tree-hint" role="status">
-              Loading files…
+              {t("Loading files…")}
             </li>
           ) : null}
           {error ? (
@@ -261,11 +266,13 @@ const Directory = memo(function Directory({
             </li>
           ) : null}
           {!loading && listing?.entries.length === 0 ? (
-            <li className="file-tree-hint">This directory is empty.</li>
+            <li className="file-tree-hint">{t("This directory is empty.")}</li>
           ) : null}
           {listing?.truncated ? (
             <li className="file-tree-hint">
-              Directory listing truncated. Use Find files to locate a file.
+              {t(
+                "Directory listing truncated. Use Find files to locate a file.",
+              )}
             </li>
           ) : null}
         </ul>

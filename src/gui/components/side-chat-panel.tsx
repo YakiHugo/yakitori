@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { MessageCirclePlus } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { ModelSelection } from "../../protocol/events.ts"
@@ -46,6 +47,7 @@ export function SideChatPanel({
   apiBase: string
   active: boolean
 }>) {
+  const { t } = useTranslation()
   const [chat, setChat] = useState<SideChatSnapshot>()
   const [error, setError] = useState<string>()
   const [pending, setPending] = useState(false)
@@ -89,7 +91,7 @@ export function SideChatPanel({
   const routeError =
     route?.preview?.available === false
       ? (route.preview.rejections[0]?.message ??
-        "No connected account can run this model selection.")
+        t("No connected account can run this model selection."))
       : undefined
   const initialSelection = useRef(selection)
   const initialCwd = useRef(cwd)
@@ -511,7 +513,7 @@ export function SideChatPanel({
         ref={viewport}
         role="log"
         className="side-chat-transcript"
-        aria-label="Side chat messages"
+        aria-label={t("Side chat messages")}
         onScroll={() => {
           const element = viewport.current
           if (element)
@@ -540,10 +542,11 @@ export function SideChatPanel({
         ) : (
           <div className="workspace-empty side-chat-empty">
             <MessageCirclePlus size={34} strokeWidth={1.5} />
-            <h3>Side chat</h3>
+            <h3>{t("Side chat")}</h3>
             <p>
-              Ask a question alongside your work. Side chats are temporary and
-              disappear when you close the app.
+              {t(
+                "Ask a question alongside your work. Side chats are temporary and disappear when you close the app.",
+              )}
             </p>
           </div>
         )}
@@ -562,10 +565,10 @@ export function SideChatPanel({
       />
       {expired ? (
         <div className="side-chat-expired" role="status">
-          <p>Side chat expired. Start a new side chat to continue.</p>
+          <p>{t("Side chat expired. Start a new side chat to continue.")}</p>
           {hasInputDraft(tab.draft) ? (
             <PromptEditor
-              label="Unsent side chat draft"
+              label={t("Unsent side chat draft")}
               apiBase={apiBase}
               value={tab.draft}
               disabled
@@ -576,7 +579,7 @@ export function SideChatPanel({
                     setAttachmentError(
                       error instanceof Error
                         ? error.message
-                        : "Could not open PDF.",
+                        : t("Could not open PDF."),
                     ),
                 )
               }}
@@ -598,7 +601,7 @@ export function SideChatPanel({
                 disabled={stopping}
                 onClick={() => void cancel()}
               >
-                {stopping ? "Stopping…" : "Stop response"}
+                {stopping ? t("Stopping…") : t("Stop response")}
               </button>
             ) : null}
             <button
@@ -609,7 +612,7 @@ export function SideChatPanel({
                   .addTab("chat", sourceSessionId.current)
               }
             >
-              Start new side chat
+              {t("Start new side chat")}
             </button>
           </div>
         </div>
@@ -653,7 +656,7 @@ export function SideChatPanel({
           submissionBlocked={routeError !== undefined}
           attachmentError={attachmentError ?? routeError}
           onAttachmentError={setAttachmentError}
-          label="Message side chat"
+          label={t("Message side chat")}
           sendLabel="Send side chat message"
           stopLabel="Stop side chat"
           className="side-chat-composer"
