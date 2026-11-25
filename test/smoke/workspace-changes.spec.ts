@@ -37,6 +37,7 @@ async function reviewAndStageChanges(page: Page, cwd: string): Promise<void> {
   await page
     .getByRole("button", { name: "Show workspace", exact: true })
     .click()
+  await page.getByRole("button", { name: "Changes", exact: true }).click()
   await expect(
     page.getByRole("tab", { name: "Changes", exact: true }),
   ).toHaveAttribute("aria-selected", "true")

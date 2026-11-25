@@ -63,6 +63,11 @@ export function App() {
   const settingsOpen = useAppStore(
     (state) => state.settingsSection !== undefined,
   )
+  const showSessionHeader =
+    !settingsOpen &&
+    externalSession === undefined &&
+    hasSession &&
+    !emptySession
 
   const interruptSessionId = useAppStore((state) => state.selection.sessionId)
   const interruptTurnId = useExecutionView().activeTurnId
@@ -102,12 +107,13 @@ export function App() {
             <span>Settings</span>
           ) : externalSession !== undefined ? (
             <EngineSessionHeading />
-          ) : hasSession && !emptySession ? (
+          ) : showSessionHeader ? (
             <SessionHeader />
           ) : (
             <span>{hydrating ? "Loading conversation…" : "New session"}</span>
           )
         }
+        sessionActions={showSessionHeader ? <SessionSummary /> : undefined}
       >
         <main
           {...interrupt}
@@ -246,10 +252,7 @@ function SessionHeader() {
           </button>
         ) : null}
       </div>
-      <div className="window-session-actions">
-        <SessionRename />
-        <SessionSummary />
-      </div>
+      <SessionRename />
     </div>
   )
 }

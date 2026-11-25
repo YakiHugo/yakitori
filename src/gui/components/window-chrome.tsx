@@ -1,12 +1,5 @@
-import {
-  ArrowLeft,
-  ArrowRight,
-  House,
-  PanelLeft,
-  PanelRight,
-  Settings,
-} from "lucide-react"
-import { type ReactNode, type RefObject, useEffect } from "react"
+import { ArrowLeft, ArrowRight, House, PanelLeft, Settings } from "lucide-react"
+import { type ReactNode, useEffect } from "react"
 import { useNavigationHistory } from "../hooks/use-navigation-history.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { AppUpdate } from "./app-update.tsx"
@@ -16,19 +9,13 @@ export function WindowChrome({
   sidebarOpen,
   onToggleSidebar,
   heading,
-  workspaceOpen,
-  onToggleWorkspace,
-  workspaceToggleRef,
-  actions,
+  workspaceToolbar,
   usageAccountId,
 }: Readonly<{
   sidebarOpen: boolean
   onToggleSidebar(): void
   heading?: ReactNode
-  workspaceOpen: boolean
-  onToggleWorkspace(): void
-  workspaceToggleRef?: RefObject<HTMLButtonElement | null>
-  actions?: ReactNode
+  workspaceToolbar?: ReactNode
   usageAccountId?: string | undefined
 }>) {
   const settingsOpen = useAppStore(
@@ -116,22 +103,7 @@ export function WindowChrome({
           </button>
         </nav>
         <div className="window-heading">{heading}</div>
-        <div className="window-titlebar-actions">
-          {actions}
-          {!settingsOpen && !workspaceOpen && (
-            <button
-              ref={workspaceToggleRef}
-              type="button"
-              className="sidebar-icon"
-              aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}
-              aria-expanded={workspaceOpen}
-              title={`${workspaceOpen ? "Hide" : "Show"} workspace (⌘⇧B)`}
-              onClick={onToggleWorkspace}
-            >
-              <PanelRight size={16} />
-            </button>
-          )}
-        </div>
+        {workspaceToolbar}
       </header>
       <nav className="window-rail" aria-label="App navigation">
         <button

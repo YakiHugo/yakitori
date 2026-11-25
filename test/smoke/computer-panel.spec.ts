@@ -52,8 +52,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page.getByRole("button", { name: "Add workspace tab" }).click()
-    await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+    await page.getByRole("button", { name: "Computer", exact: true }).click()
     await expect(
       page.getByRole("button", { name: "Connect computer" }),
     ).toBeEnabled()

@@ -29,7 +29,6 @@ it("inherits pane sizing only on first entry and remembers an empty new-session 
     "../../src/gui/store/workspace-store.ts"
   )
   const store = useWorkspaceStore.getState()
-  store.closeTab("changes")
   store.setOpen(true)
   store.setExpanded(true)
   store.setSession("first")
@@ -73,8 +72,9 @@ it("keeps the selected tab when closing another and can empty an inactive new-se
     "../../src/gui/store/workspace-store.ts"
   )
   const store = useWorkspaceStore.getState()
+  const changes = store.addTab("changes")
   const selected = store.addTab("files")
-  store.closeTab("changes")
+  store.closeTab(changes)
   expect(
     selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
   ).toBe(selected)
@@ -133,7 +133,7 @@ it("keeps file and browser tabs in their opening session and preserves an emptie
     first.tabs
       .filter((tab) => tab.workspaceSessionId === "session-one")
       .map((tab) => tab.kind),
-  ).toEqual(["changes", "file", "browser"])
+  ).toEqual(["file", "browser"])
 
   first.setSession("session-two")
   expect(
@@ -141,7 +141,7 @@ it("keeps file and browser tabs in their opening session and preserves an emptie
       .getState()
       .tabs.filter((tab) => tab.workspaceSessionId === "session-two")
       .map((tab) => tab.kind),
-  ).toEqual(["changes"])
+  ).toEqual([])
   useWorkspaceStore.getState().openFile("notes.ts", "/repo")
   expect(
     useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "file"),
@@ -266,7 +266,7 @@ it("removes a deleted session's workspace tabs and leaves other sessions intact"
       .getState()
       .tabs.filter((tab) => tab.workspaceSessionId === "parent")
       .map((tab) => tab.kind),
-  ).toEqual(["changes"])
+  ).toEqual([])
 })
 
 it("opens a fresh side chat when the previous one has expired", async () => {
