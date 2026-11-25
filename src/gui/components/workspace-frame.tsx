@@ -2,16 +2,10 @@ import {
   Files,
   FolderOpen,
   GitCompareArrows,
-  Globe,
   Maximize2,
-  MessageCirclePlus,
   Minimize2,
-  Monitor,
   PanelRight,
-  Plus,
   SlidersHorizontal,
-  Users,
-  X,
 } from "lucide-react"
 import {
   type CSSProperties,
@@ -54,31 +48,24 @@ import { WindowChrome } from "./window-chrome.tsx"
 import { WorkspaceChangeSummary } from "./workspace-change-summary.tsx"
 import { WorkspaceChanges } from "./workspace-changes.tsx"
 import { WorkspaceFilePreview, WorkspaceFiles } from "./workspace-files.tsx"
+import { WorkspaceLauncher } from "./workspace-launcher.tsx"
+import { WorkspaceTabStrip } from "./workspace-tab-strip.tsx"
+import { workspaceTabPresentation } from "./workspace-views.ts"
 
-const views = [
-  { id: "changes", label: "Changes", icon: GitCompareArrows },
-  { id: "browser", label: "Browser", icon: Globe },
-  { id: "files", label: "Files", icon: Files },
-  { id: "chat", label: "Side chat", icon: MessageCirclePlus },
-  { id: "computer", label: "Computer", icon: Monitor },
-  { id: "agents", label: "Subagents", icon: Users },
-] as const
-
-function tabLabel(tab: WorkspaceTab): string {
-  if (tab.kind === "skill") return tab.name
-  if (tab.kind === "file") return tab.path.split("/").at(-1) ?? tab.path
-  if ((tab.kind === "browser" || tab.kind === "chat") && tab.title)
-    return tab.title
-  return views.find((view) => view.id === tab.kind)?.label ?? "Workspace"
+const emptyLauncher: WorkspaceTab = {
+  id: "workspace-launcher",
+  kind: "launcher",
 }
 
 export function WorkspaceFrame({
   children,
   heading,
+  sessionActions,
   usageAccountId,
 }: Readonly<{
   children: ReactNode
   heading?: ReactNode
+  sessionActions?: ReactNode
   usageAccountId?: string | undefined
 }>) {
   const [sidebarOpen, setSidebarOpen] = useState(
@@ -127,6 +114,11 @@ export function WorkspaceFrame({
   const visibleTabs = tabs.filter(
     (tab) => tab.workspaceSessionId === workspaceSessionId,
   )
+  const contentTabs = tabs.filter((tab) => tab.kind !== "launcher")
+  const newTab = visibleTabs.find((tab) => tab.kind === "launcher")
+  const launcher =
+    newTab ?? (activeId === undefined ? emptyLauncher : undefined)
+  const selectedTabId = activeId ?? launcher?.id ?? emptyLauncher.id
   const sessionIdForTab = (tab: WorkspaceTab) => {
     const owner = tab.workspaceSessionId
     if (owner === undefined) return undefined
@@ -153,11 +145,7 @@ export function WorkspaceFrame({
   const addPromptExcerpt = useAppStore((state) => state.addPromptExcerpt)
   const shell = useRef<HTMLDivElement>(null)
   const workspaceToggle = useRef<HTMLButtonElement>(null)
-  const toggleWorkspace = () => {
-    const focused = document.activeElement === workspaceToggle.current
-    setOpen(!open)
-    if (focused) requestAnimationFrame(() => workspaceToggle.current?.focus())
-  }
+  const launcherInput = useRef<HTMLInputElement>(null)
   const [available, setAvailable] = useState(() =>
     Math.max(672, window.innerWidth - 275),
   )
@@ -185,7 +173,6 @@ export function WorkspaceFrame({
     useState<Extract<WorkspaceTab, { kind: "chat" }>>()
   const [closingFile, setClosingFile] =
     useState<Extract<WorkspaceTab, { kind: "file" }>>()
-  const [adding, setAdding] = useState(false)
   const [resizing, setResizing] = useState(false)
   const [overviewOpen, setOverviewOpen] = useState(false)
   const overviewTrigger = useRef<HTMLButtonElement>(null)
@@ -204,17 +191,44 @@ export function WorkspaceFrame({
       ? nativeCwd
       : externalCwd
     : nativeCwd
+  const mainVisible = !open || !expanded
+  const canOpenOverview = Boolean(cwd) && !settingsOpen && mainVisible
+  const showOverview = overviewOpen && canOpenOverview
   const overviewGit = useWorkspaceGitStatus({
     cwd,
     apiBase,
-    active: overviewOpen && !open && !settingsOpen,
+    active: showOverview,
   })
   const addToMain = (excerpt: ContextExcerpt) => {
     useWorkspaceStore.getState().setExpanded(false)
     if (window.innerWidth < 1180) setOpen(false)
     addPromptExcerpt(excerpt)
   }
+  const focusSelectedTab = () => {
+    const workspace = selectWorkspacePresentation(useWorkspaceStore.getState())
+    document
+      .getElementById(`workspace-tab-${workspace.activeId ?? emptyLauncher.id}`)
+      ?.focus()
+  }
+  const openFromLauncher = (openView: () => void) => {
+    flushSync(() => {
+      openView()
+      if (newTab) closeTab(newTab.id)
+    })
+    focusSelectedTab()
+  }
   const requestClose = (tab: WorkspaceTab) => {
+    if (
+      tab === emptyLauncher ||
+      (tab.kind === "launcher" && visibleTabs.length === 1)
+    ) {
+      flushSync(() => {
+        if (tab !== emptyLauncher) closeTab(tab.id)
+        setOpen(false)
+      })
+      workspaceToggle.current?.focus()
+      return
+    }
     if (tab.kind === "file" && tab.dirty) {
       setClosingFile(tab)
       return
@@ -227,28 +241,30 @@ export function WorkspaceFrame({
         tab.excerpts.length)
     )
       setClosing(tab)
-    else closeTab(tab.id)
+    else {
+      flushSync(() => closeTab(tab.id))
+      focusSelectedTab()
+    }
   }
-  const projectOverviewTrigger =
-    cwd && !settingsOpen ? (
-      <button
-        ref={overviewTrigger}
-        type="button"
-        className="sidebar-icon workspace-overview-trigger"
-        aria-label={
-          overviewOpen ? "Hide project overview" : "Show project overview"
-        }
-        aria-expanded={overviewOpen}
-        aria-controls={overviewOpen ? "workspace-project-overview" : undefined}
-        title={overviewOpen ? "Hide project overview" : "Show project overview"}
-        onClick={() => {
-          if (open) setOpen(false)
-          setOverviewOpen(!overviewOpen)
-        }}
-      >
-        <SlidersHorizontal size={16} />
-      </button>
-    ) : null
+  const projectOverviewTrigger = canOpenOverview ? (
+    <button
+      ref={overviewTrigger}
+      type="button"
+      className="sidebar-icon workspace-overview-trigger"
+      aria-label={
+        overviewOpen ? "Hide project overview" : "Show project overview"
+      }
+      aria-expanded={overviewOpen}
+      aria-controls={overviewOpen ? "workspace-project-overview" : undefined}
+      title={overviewOpen ? "Hide project overview" : "Show project overview"}
+      onClick={() => {
+        if (!overviewOpen && open && window.innerWidth < 960) setOpen(false)
+        setOverviewOpen(!overviewOpen)
+      }}
+    >
+      <SlidersHorizontal size={16} />
+    </button>
+  ) : null
 
   useEffect(() => {
     if (external) return
@@ -305,22 +321,12 @@ export function WorkspaceFrame({
   }, [])
 
   useEffect(() => {
-    if (open && activeId)
-      document
-        .getElementById(`workspace-tab-${activeId}`)
-        ?.parentElement?.scrollIntoView({
-          block: "nearest",
-          inline: "nearest",
-        })
-  }, [open, activeId])
-
-  useEffect(() => {
     if (!resizing && widthRatio !== undefined)
       localStorage.setItem("yakitori.workspaceSplit", String(widthRatio))
   }, [widthRatio, resizing])
   useEffect(() => {
-    if (open || settingsOpen) setOverviewOpen(false)
-  }, [open, settingsOpen])
+    if (!canOpenOverview) setOverviewOpen(false)
+  }, [canOpenOverview])
   // A transient popover must not reappear in a different conversation.
   // biome-ignore lint/correctness/useExhaustiveDependencies: changing sessions closes the popover without being read by the effect.
   useEffect(() => {
@@ -328,7 +334,7 @@ export function WorkspaceFrame({
   }, [workspaceSessionId])
 
   useEffect(() => {
-    if (!overviewOpen) return
+    if (!showOverview) return
     overview.current?.focus()
     const inside = (target: EventTarget | null) =>
       target instanceof Node &&
@@ -352,7 +358,7 @@ export function WorkspaceFrame({
       document.removeEventListener("focusin", dismissOutside)
       document.removeEventListener("keydown", dismissEscape)
     }
-  }, [overviewOpen])
+  }, [showOverview])
 
   useEffect(() => {
     const bridge = window.yakitoriDesktop?.browser
@@ -410,45 +416,108 @@ export function WorkspaceFrame({
           addTab("chat", sessionId)
         }
       }
-      if (isUnmodifiedEscape(event)) {
-        if (adding) {
-          event.preventDefault()
-          setAdding(false)
-        } else if (
-          window.innerWidth < 1180 &&
-          selectWorkspacePresentation(useWorkspaceStore.getState()).open
-        ) {
-          event.preventDefault()
-          setOpen(false)
-        }
+      if (
+        isUnmodifiedEscape(event) &&
+        window.innerWidth < 1180 &&
+        selectWorkspacePresentation(useWorkspaceStore.getState()).open
+      ) {
+        event.preventDefault()
+        setOpen(false)
       }
     }
-    const dismiss = (event: PointerEvent) => {
-      if (
-        event.target instanceof Element &&
-        !event.target.closest(".workspace-add")
-      )
-        setAdding(false)
-    }
     window.addEventListener("keydown", keydown)
-    window.addEventListener("pointerdown", dismiss)
-    return () => {
-      window.removeEventListener("keydown", keydown)
-      window.removeEventListener("pointerdown", dismiss)
-    }
-  }, [setOpen, addTab, adding, sessionId, external])
+    return () => window.removeEventListener("keydown", keydown)
+  }, [setOpen, addTab, sessionId, external])
 
   return (
-    <div className="window-shell">
+    <div
+      className="window-shell"
+      style={{ "--workspace-width": `${width}px` } as CSSProperties}
+    >
       <WindowChrome
         usageAccountId={usageAccountId}
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
-        heading={heading}
-        workspaceOpen={open}
-        onToggleWorkspace={toggleWorkspace}
-        workspaceToggleRef={workspaceToggle}
-        actions={!open ? projectOverviewTrigger : undefined}
+        heading={
+          <>
+            {heading}
+            {mainVisible &&
+              !settingsOpen &&
+              (sessionActions || projectOverviewTrigger) && (
+                <div className="window-session-actions">
+                  {sessionActions}
+                  {projectOverviewTrigger}
+                </div>
+              )}
+          </>
+        }
+        workspaceToolbar={
+          !settingsOpen && (
+            <div
+              className="workspace-header"
+              data-open={open}
+              data-expanded={open && expanded}
+            >
+              {open && (
+                <>
+                  <WorkspaceTabStrip
+                    tabs={
+                      launcher === emptyLauncher
+                        ? [...visibleTabs, launcher]
+                        : visibleTabs
+                    }
+                    activeId={selectedTabId}
+                    onActivate={(id) => {
+                      if (id !== emptyLauncher.id) activate(id)
+                    }}
+                    onClose={requestClose}
+                    onNewTab={() => {
+                      if (launcher !== emptyLauncher)
+                        flushSync(() => addTab("launcher"))
+                      launcherInput.current?.focus()
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="sidebar-icon"
+                    aria-label={
+                      expanded ? "Restore workspace size" : "Expand workspace"
+                    }
+                    title={
+                      expanded
+                        ? "Restore split"
+                        : "Fill view with content · Option-click for Chat"
+                    }
+                    onClick={(event) => {
+                      if (event.altKey) {
+                        useWorkspaceStore.getState().setExpanded(false)
+                        setOpen(false)
+                      } else useWorkspaceStore.getState().setExpanded(!expanded)
+                    }}
+                  >
+                    {expanded ? (
+                      <Minimize2 size={15} />
+                    ) : (
+                      <Maximize2 size={15} />
+                    )}
+                  </button>
+                </>
+              )}
+              <button
+                ref={workspaceToggle}
+                type="button"
+                className="sidebar-icon workspace-toggle"
+                aria-label={open ? "Hide workspace" : "Show workspace"}
+                aria-expanded={open}
+                aria-controls="workspace-panel"
+                title={open ? "Hide workspace (⌘⇧B)" : "Show workspace (⌘⇧B)"}
+                onClick={() => setOpen(!open)}
+              >
+                <PanelRight size={16} />
+              </button>
+            </div>
+          )
+        }
       />
       <div
         ref={shell}
@@ -459,7 +528,7 @@ export function WorkspaceFrame({
         <SidebarFrame open={sidebarOpen} setOpen={setSidebarOpen} />
         <div className="workspace-main">
           {children}
-          {overviewOpen && !open && !settingsOpen && cwd && (
+          {showOverview && cwd && (
             <aside
               ref={overview}
               id="workspace-project-overview"
@@ -531,6 +600,7 @@ export function WorkspaceFrame({
           )}
         </div>
         <aside
+          id="workspace-panel"
           aria-label="Workspace"
           aria-hidden={!open}
           inert={!open}
@@ -538,7 +608,6 @@ export function WorkspaceFrame({
           data-resizing={resizing}
           data-open={open}
           data-expanded={expanded}
-          style={{ "--workspace-width": `${width}px` } as CSSProperties}
         >
           <hr
             tabIndex={0}
@@ -572,166 +641,8 @@ export function WorkspaceFrame({
             }}
             onLostPointerCapture={() => setResizing(false)}
           />
-          <header className="workspace-header">
-            {open ? projectOverviewTrigger : null}
-            {cwd && !settingsOpen ? (
-              <span className="workspace-header-divider" aria-hidden="true" />
-            ) : null}
-            <div className="workspace-tab-strip">
-              <div
-                className="workspace-tabs"
-                role="tablist"
-                aria-label="Workspace views"
-              >
-                {visibleTabs.map((tab, index) => {
-                  const { id } = tab
-                  const label = tabLabel(tab)
-                  const Icon =
-                    tab.kind === "file" || tab.kind === "skill"
-                      ? Files
-                      : (views.find((view) => view.id === tab.kind)?.icon ??
-                        Files)
-                  return (
-                    <div
-                      key={id}
-                      className="workspace-tab"
-                      data-active={activeId === id}
-                    >
-                      <button
-                        id={`workspace-tab-${id}`}
-                        type="button"
-                        role="tab"
-                        aria-selected={activeId === id}
-                        aria-controls={`workspace-content-${id}`}
-                        tabIndex={activeId === id ? 0 : -1}
-                        title={label}
-                        onClick={() => activate(id)}
-                        onKeyDown={(event) => {
-                          const next =
-                            event.key === "ArrowRight"
-                              ? (index + 1) % visibleTabs.length
-                              : event.key === "ArrowLeft"
-                                ? (index + visibleTabs.length - 1) %
-                                  visibleTabs.length
-                                : event.key === "Home"
-                                  ? 0
-                                  : event.key === "End"
-                                    ? visibleTabs.length - 1
-                                    : undefined
-                          if (next === undefined) return
-                          event.preventDefault()
-                          const entry = visibleTabs[next]
-                          if (!entry) return
-                          activate(entry.id)
-                          document
-                            .getElementById(`workspace-tab-${entry.id}`)
-                            ?.focus()
-                        }}
-                      >
-                        <Icon size={14} />
-                        <span>
-                          {label}
-                          {tab.kind === "file" && tab.dirty ? " •" : ""}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className="workspace-tab-close"
-                        aria-label={`Close ${label}`}
-                        onClick={() => requestClose(tab)}
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-              <div className="workspace-add">
-                <button
-                  type="button"
-                  className="sidebar-icon"
-                  aria-label="Add workspace tab"
-                  aria-haspopup="menu"
-                  aria-expanded={adding}
-                  onClick={() => setAdding((value) => !value)}
-                >
-                  <Plus size={17} />
-                </button>
-                {adding && (
-                  <div
-                    role="menu"
-                    aria-label="Open workspace view"
-                    className="workspace-add-menu"
-                  >
-                    {views
-                      .filter(
-                        ({ id }) =>
-                          !external ||
-                          id === "changes" ||
-                          id === "files" ||
-                          id === "browser",
-                      )
-                      .map(({ id, label, icon: Icon }) => (
-                        <button
-                          key={id}
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            addTab(id, sessionId)
-                            setAdding(false)
-                          }}
-                        >
-                          <Icon size={17} />
-                          <span>{label}</span>
-                          {id === "browser" ? (
-                            <kbd>⌘T</kbd>
-                          ) : id === "files" ? (
-                            <kbd>⌘P</kbd>
-                          ) : id === "chat" ? (
-                            <kbd>⌥⌘S</kbd>
-                          ) : null}
-                        </button>
-                      ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="workspace-header-actions">
-              <button
-                type="button"
-                className="sidebar-icon"
-                aria-label={
-                  expanded ? "Restore workspace size" : "Expand workspace"
-                }
-                title={
-                  expanded
-                    ? "Restore split"
-                    : "Fill view with content · Option-click for Chat"
-                }
-                onClick={(event) => {
-                  if (event.altKey) {
-                    useWorkspaceStore.getState().setExpanded(false)
-                    setOpen(false)
-                  } else useWorkspaceStore.getState().setExpanded(!expanded)
-                }}
-              >
-                {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-              </button>
-              <button
-                ref={open ? workspaceToggle : undefined}
-                type="button"
-                className="sidebar-icon workspace-collapse"
-                aria-label="Hide workspace"
-                aria-expanded={true}
-                title="Hide workspace (⌘⇧B)"
-                onClick={toggleWorkspace}
-              >
-                <PanelRight size={16} />
-              </button>
-            </div>
-          </header>
           <div className="workspace-body">
-            {tabs.map((tab) => (
+            {contentTabs.map((tab) => (
               <div
                 key={`${apiBase}:${tab.id}`}
                 id={`workspace-content-${tab.id}`}
@@ -866,21 +777,34 @@ export function WorkspaceFrame({
                 )}
               </div>
             ))}
-            {visibleTabs.length === 0 && !external && (
-              <div className="workspace-empty">
-                <MessageCirclePlus size={30} strokeWidth={1.25} />
-                <strong>Open something alongside your conversation</strong>
-                <p>
-                  Browse the web, read a file, or ask a question in a temporary
-                  side chat.
-                </p>
-                <button
-                  type="button"
-                  className="rounded-lg border px-3 py-2 text-foreground"
-                  onClick={() => addTab("chat", sessionId)}
-                >
-                  New side chat
-                </button>
+            {launcher && (
+              <div
+                key={`${apiBase}:${workspaceSessionId}:${launcher.id}`}
+                id={`workspace-content-${launcher.id}`}
+                role="tabpanel"
+                aria-labelledby={`workspace-tab-${launcher.id}`}
+                className="workspace-content"
+                data-kind="launcher"
+                hidden={!open || selectedTabId !== launcher.id}
+              >
+                <WorkspaceLauncher
+                  active={open && selectedTabId === launcher.id}
+                  apiBase={apiBase}
+                  cwd={cwd}
+                  external={external}
+                  inputRef={launcherInput}
+                  onOpenView={(view) =>
+                    openFromLauncher(() => addTab(view, sessionId))
+                  }
+                  onOpenFile={(path, root) =>
+                    openFromLauncher(() => openFile(path, root))
+                  }
+                  onOpenUrl={(url) =>
+                    openFromLauncher(() =>
+                      useWorkspaceStore.getState().openBrowser(url),
+                    )
+                  }
+                />
               </div>
             )}
             {activeFile && expanded ? (
@@ -899,7 +823,7 @@ export function WorkspaceFrame({
         </aside>
         {closingFile ? (
           <DiscardFileDialog
-            name={tabLabel(closingFile)}
+            name={workspaceTabPresentation(closingFile).label}
             onCancel={() => setClosingFile(undefined)}
             onDiscard={() => {
               closeTab(closingFile.id)
@@ -926,7 +850,7 @@ export function WorkspaceFrame({
                         excerpt,
                         number: index + 1,
                         ownerId: `side:${tab.id}`,
-                        conversation: tabLabel(tab),
+                        conversation: workspaceTabPresentation(tab).label,
                       }))
                     : [],
                 ),
@@ -974,7 +898,7 @@ export function WorkspaceFrame({
         )}
         {closing && (
           <CloseSideChatDialog
-            title={tabLabel(closing)}
+            title={workspaceTabPresentation(closing).label}
             onCancel={() => setClosing(undefined)}
             onConfirm={() => {
               closeTab(closing.id)

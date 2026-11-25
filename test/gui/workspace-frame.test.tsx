@@ -3,17 +3,18 @@ import {
   act,
   cleanup,
   fireEvent,
-  render,
+  render as renderWithTestingLibrary,
   screen,
   within,
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
-import { createRef } from "react"
+import { createRef, type ReactNode } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type { BrowserPanelProps } from "../../src/gui/components/browser-panel.tsx"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import { ConversationFind } from "../../src/gui/components/conversation-find.tsx"
 import { ModelSelector } from "../../src/gui/components/model-selector.tsx"
+import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "../../src/gui/components/workspace-frame.tsx"
 import { contextSourceAttributes } from "../../src/gui/conversation-context.ts"
 import {
@@ -188,11 +189,15 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+function render(ui: ReactNode) {
+  return renderWithTestingLibrary(ui, { wrapper: TooltipProvider })
+}
+
 async function addView(user: ReturnType<typeof userEvent.setup>, name: string) {
-  await user.click(screen.getByRole("button", { name: "Add workspace tab" }))
-  await user.click(
-    screen.getByRole("menuitem", { name: new RegExp(`^${name}`) }),
-  )
+  if (!screen.queryByRole("tabpanel", { name: "New tab" }))
+    await user.click(screen.getByRole("button", { name: "Add workspace tab" }))
+  const launcher = screen.getByRole("tabpanel", { name: "New tab" })
+  await user.click(within(launcher).getByRole("button", { name }))
 }
 
 it("opens project actions in a dismissible overview instead of a persistent card", async () => {
@@ -265,8 +270,11 @@ it("opens project actions in a dismissible overview instead of a persistent card
   )
   expect(screen.getByRole("dialog", { name: "Project overview" })).toBeDefined()
   expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
-    false,
+    true,
   )
+  expect(
+    screen.getByRole("tab", { name: "Files", selected: true }),
+  ).toBeDefined()
 })
 
 it("keeps a dirty file tab until its edits are explicitly discarded", async () => {
@@ -279,9 +287,9 @@ it("keeps a dirty file tab until its edits are explicitly discarded", async () =
   )
   await user.click(screen.getByRole("button", { name: "Change file" }))
   await user.click(screen.getByRole("button", { name: "Close notes.txt" }))
-  expect(screen.getByRole("dialog").textContent).toContain(
-    "Discard changes to notes.txt?",
-  )
+  expect(
+    screen.getByRole("dialog", { name: "Discard changes to notes.txt?" }),
+  ).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Keep editing" }))
   expect(screen.getByRole("tab", { name: /notes.txt/ })).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Close notes.txt" }))
@@ -436,6 +444,7 @@ it("restores each session's workspace tabs and roots across selection changes", 
       selectedSession: session("session-two", "/session/two"),
     }),
   )
+  await addView(user, "Changes")
   expect(screen.getByText("Changes at /session/two")).toBeDefined()
   expect(screen.queryByRole("tab", { name: "Files" })).toBeNull()
   expect(screen.queryByText("Files at /session/one")).toBeNull()
@@ -455,6 +464,8 @@ it("restores each session's workspace tabs and roots across selection changes", 
   expect(screen.getByText("Files at /session/one")).toBeDefined()
 
   act(() => useAppStore.setState({ selection: {}, selectedSession: undefined }))
+  await user.click(screen.getByRole("button", { name: "Show workspace" }))
+  await addView(user, "Changes")
   expect(screen.getByText("Changes at /project/two")).toBeDefined()
   expect(screen.queryByRole("tab", { name: "Files" })).toBeNull()
 })
@@ -539,8 +550,9 @@ it("does not show the previous session's root while the next session hydrates", 
   expect(screen.queryByText("Changes at /session/one")).toBeNull()
   expect(screen.queryByText("Changes at /project/one")).toBeNull()
   expect(
-    screen.getByText(/Select a project or open a conversation/),
-  ).toBeDefined()
+    (screen.getByRole("button", { name: "Files" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true)
 })
 
 it("restores each session's workspace visibility and expansion", async () => {
@@ -633,7 +645,55 @@ it("hides file and side chat tabs from other sessions and restores their drafts"
   expect(screen.getByRole("tab", { name: "work.ts" })).toBeDefined()
 })
 
-it("opens views from the add menu and closes only the chosen tab", async () => {
+it("keeps a new tab while switching views and returns to it after the last view closes", async () => {
+  const user = userEvent.setup()
+  useWorkspaceStore.setState({
+    tabs: [],
+    presentationBySession: {
+      "": { open: false, expanded: false, activeId: undefined },
+    },
+  })
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  await user.click(screen.getByRole("button", { name: "Show workspace" }))
+  expect(screen.getAllByRole("tab")).toEqual([
+    screen.getByRole("tab", { name: "New tab", selected: true }),
+  ])
+
+  await addView(user, "Browser")
+  expect(screen.queryByRole("tab", { name: "New tab" })).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Add workspace tab" }))
+  const input = screen.getByRole("textbox", {
+    name: "Search files or enter a URL",
+  })
+  expect(document.activeElement).toBe(input)
+  await user.type(input, "https://example.com")
+  await user.click(screen.getByRole("tab", { name: "Browser" }))
+  await user.click(screen.getByRole("tab", { name: "New tab" }))
+  expect((input as HTMLInputElement).value).toBe("https://example.com")
+  await user.click(screen.getByRole("button", { name: "Close New tab" }))
+  expect(screen.queryByRole("tab", { name: "New tab" })).toBeNull()
+  expect(
+    screen.getByRole("tab", { name: "Browser", selected: true }),
+  ).toBeDefined()
+
+  await user.click(screen.getByRole("button", { name: "Close Browser" }))
+  expect(document.activeElement).toBe(
+    screen.getByRole("tab", { name: "New tab", selected: true }),
+  )
+  await addView(user, "Browser")
+  await user.click(screen.getByRole("button", { name: "Add workspace tab" }))
+  await user.click(screen.getByRole("button", { name: "Close Browser" }))
+  await user.click(screen.getByRole("button", { name: "Close New tab" }))
+  expect(document.activeElement).toBe(
+    screen.getByRole("button", { name: "Show workspace" }),
+  )
+})
+
+it("opens views from the launcher and closes only the chosen tab", async () => {
   const user = userEvent.setup()
   render(
     <WorkspaceFrame>

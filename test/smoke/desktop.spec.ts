@@ -234,10 +234,7 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
   await page
     .getByRole("button", { name: "Show workspace", exact: true })
     .click()
-  await page
-    .getByRole("button", { name: "Add workspace tab", exact: true })
-    .click()
-  await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+  await page.getByRole("button", { name: "Computer", exact: true }).click()
   await expect(
     page.getByRole("button", { name: "Connect computer", exact: true }),
   ).toBeEnabled()
@@ -293,10 +290,7 @@ test("embedded browser selections attach editable excerpts to main and side draf
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    await page.getByRole("button", { name: "Browser", exact: true }).click()
     await page.getByRole("textbox", { name: "Browser address" }).fill(url)
     await page.getByRole("textbox", { name: "Browser address" }).press("Enter")
     await expect(
@@ -924,10 +918,7 @@ const image = await tools.call('browser_inspect',{action:'screenshot',mode:'view
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    await page.getByRole("button", { name: "Browser", exact: true }).click()
     await page.getByRole("textbox", { name: "Browser address" }).fill(url)
     await page.getByRole("textbox", { name: "Browser address" }).press("Enter")
     await expect(
@@ -1222,10 +1213,7 @@ test("packaged preview recording decodes and saves WebM through Electron's downl
   await page
     .getByRole("button", { name: "Show workspace", exact: true })
     .click()
-  await page
-    .getByRole("button", { name: "Add workspace tab", exact: true })
-    .click()
-  await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+  await page.getByRole("button", { name: "Computer", exact: true }).click()
   const preview = page.getByRole("region", { name: "Live computer preview" })
   await preview
     .getByRole("button", { name: "Start preview", exact: true })

@@ -11,7 +11,7 @@ export type WorkspaceView =
   | "computer"
   | "agents"
 export type WorkspaceTab = (
-  | { id: string; kind: "files" | "computer" }
+  | { id: string; kind: "launcher" | "files" | "computer" }
   | {
       id: string
       kind: "changes"
@@ -72,7 +72,7 @@ type WorkspaceStore = {
   setSession(sessionId: string | undefined): void
   removeSession(sessionId: string): void
   activate(id: string): void
-  addTab(kind: WorkspaceView, sourceSessionId?: string): string
+  addTab(kind: WorkspaceView | "launcher", sourceSessionId?: string): string
   closeTab(id: string): void
   openFile(path: string, cwd: string): void
   openChanges(path?: string, staged?: boolean): void
@@ -134,12 +134,11 @@ function updatePresentation(
   }
 }
 
-const tabs: WorkspaceTab[] = [{ id: "changes", kind: "changes" }]
 export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
-  tabs,
+  tabs: [],
   sessionId: undefined,
   presentationBySession: {
-    "": { open: false, expanded: false, activeId: tabs[0]?.id },
+    "": { open: false, expanded: false, activeId: undefined },
   },
   setOpen: (open) => set((state) => updatePresentation(state, { open })),
   setExpanded: (expanded) =>
@@ -168,6 +167,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         ),
         presentationBySession: {
           ...current.presentationBySession,
+          "": { ...draft, activeId: undefined },
           [sessionId]: draft,
         },
       })
@@ -176,21 +176,15 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     const existing = current.tabs.find(
       (tab) => tab.workspaceSessionId === sessionId,
     )
-    const initialTab = existing ?? {
-      id: `workspace_${crypto.randomUUID()}`,
-      kind: "changes" as const,
-      ...(sessionId === undefined ? {} : { workspaceSessionId: sessionId }),
-    }
     const { open, expanded } = selectWorkspacePresentation(current)
     set({
       sessionId,
-      tabs: existing ? current.tabs : [...current.tabs, initialTab],
       presentationBySession: {
         ...current.presentationBySession,
         [key]: {
           open: sessionId?.startsWith("draft_") ? false : open,
           expanded: sessionId?.startsWith("draft_") ? false : expanded,
-          activeId: initialTab.id,
+          activeId: existing?.id,
         },
       },
     })
@@ -213,6 +207,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   },
   addTab(kind, sourceSessionId) {
     const reusable =
+      kind === "launcher" ||
       kind === "changes" ||
       kind === "files" ||
       kind === "computer" ||

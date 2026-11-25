@@ -13,7 +13,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding-inline: 58px 12px;
+  padding-left: 58px;
   min-width: 0;
 }
 .window-navigation {
@@ -26,16 +26,26 @@
   display: flex;
   align-items: center;
   flex: 1;
+  gap: 4px;
   min-width: 0;
   margin-left: 12px;
   font-size: 14px;
   font-weight: 500;
 }
-.window-titlebar-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
+.window-heading:last-child {
+  margin-right: 12px;
+}
+.window-heading > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.window-titlebar:has(.workspace-header[data-open="true"]) .window-heading {
+  min-width: min(72px, 24vw);
+}
+.window-titlebar:has(.workspace-header[data-expanded="true"]) .window-heading {
+  flex: 0 1 auto;
+  max-width: min(220px, 25%);
 }
 .window-titlebar[data-sidebar-open="true"] .window-navigation {
   width: calc(var(--sidebar-width, 275px) - 14px);
@@ -53,6 +63,7 @@
   align-items: center;
   flex-shrink: 0;
   gap: 4px;
+  margin-left: auto;
 }
 .window-engine-label {
   flex-shrink: 0;
@@ -117,13 +128,21 @@ html[data-desktop="macos"] .window-titlebar {
   padding-left: 90px;
   -webkit-app-region: drag;
 }
-html[data-desktop="macos"] .window-titlebar button {
+html[data-desktop="macos"] .window-titlebar :is(button, [role="tablist"]) {
   -webkit-app-region: no-drag;
 }
 html[data-desktop="macos"]
   .window-titlebar[data-sidebar-open="true"]
   .window-navigation {
   width: calc(var(--sidebar-width, 275px) - 46px);
+}
+@media (max-width: 959px) {
+  .window-titlebar[data-sidebar-open="true"]:has(
+      .workspace-header[data-open="true"]
+    )
+    .window-navigation {
+    width: auto;
+  }
 }
 @media (max-width: 699px) {
   .window-titlebar[data-sidebar-open="true"] .window-navigation,
@@ -137,5 +156,10 @@ html[data-desktop="macos"]
   }
   .window-session-heading button[title="Open parent session"] {
     max-width: 80px;
+  }
+}
+@media (max-width: 479px) {
+  .window-titlebar {
+    padding-left: 8px;
   }
 }

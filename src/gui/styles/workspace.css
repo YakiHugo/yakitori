@@ -1,7 +1,5 @@
 .workspace-shell {
   position: relative;
-  --workspace-surface: color-mix(in oklab, var(--muted) 75%, var(--background));
-  --workspace-content-radius: 14px;
 }
 .workspace-frame {
   position: relative;
@@ -10,43 +8,38 @@
   flex: 0 0 var(--workspace-width);
   width: var(--workspace-width);
   min-width: 0;
-  border-left: 1px solid var(--border);
-  background: var(--workspace-surface);
 }
 .workspace-header {
-  height: 52px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 0 10px;
+  align-self: stretch;
+  gap: 6px;
+  min-width: 0;
+  padding-inline: 8px 12px;
   flex-shrink: 0;
 }
-.workspace-header-divider {
-  width: 1px;
-  height: 20px;
-  flex-shrink: 0;
-  background: var(--border);
+.workspace-header[data-open="true"] {
+  flex: 0 1 var(--workspace-width);
+}
+.workspace-header[data-expanded="true"] {
+  flex: 1;
 }
 .workspace-tab-strip {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex: 1;
   min-width: 0;
 }
-.workspace-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.workspace-collapse {
+.workspace-toggle[aria-expanded="true"] {
   background: color-mix(in oklab, var(--foreground) 6%, transparent);
   color: var(--foreground);
 }
 .workspace-frame[data-open="false"] {
   display: none;
+}
+.workspace-frame[data-expanded="false"] {
+  border-left: 1px solid var(--border);
 }
 .workspace-main {
   position: relative;
@@ -68,19 +61,21 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .workspace-tab {
   display: flex;
   align-items: center;
-  flex-shrink: 0;
-  flex-basis: 168px;
-  min-width: 0;
-  max-width: min(200px, 100%);
+  flex: 1 1 156px;
+  min-width: min(92px, 100%);
+  max-width: min(176px, 100%);
   border: 1px solid transparent;
   border-radius: 10px;
+}
+.workspace-tab:not([data-active="true"]):hover {
+  background: color-mix(in oklab, var(--foreground) 4%, transparent);
 }
 .workspace-tab[data-active="true"] {
   background: var(--background);
@@ -126,50 +121,14 @@
 .workspace-tab-close:hover {
   background: color-mix(in oklab, var(--foreground) 8%, transparent);
 }
-.workspace-add {
-  position: relative;
+.workspace-add-tab {
   flex-shrink: 0;
-}
-.workspace-add-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 40;
-  width: 220px;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--popover);
-  box-shadow: 0 12px 32px #0002;
-}
-.workspace-add-menu button {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  gap: 10px;
-  border-radius: 7px;
-  padding: 9px;
-  text-align: left;
-  font-size: 13px;
-}
-.workspace-add-menu button:hover {
-  background: var(--accent);
-}
-.workspace-add-menu kbd {
-  margin-left: auto;
-  color: var(--muted-foreground);
-  font-family: inherit;
-  font-size: 11px;
 }
 .workspace-body {
   display: flex;
   flex: 1;
   min-width: 0;
   min-height: 0;
-  margin: 0 8px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--workspace-content-radius);
-  background: var(--background);
   overflow: hidden;
   container-type: inline-size;
 }
@@ -195,10 +154,6 @@
 }
 .workspace-content[hidden] {
   display: none;
-}
-/* Native browser views are rectangular and sit above renderer clipping. */
-.workspace-content[data-kind="browser"] {
-  padding-bottom: var(--workspace-content-radius);
 }
 .side-chat-panel {
   display: flex;
@@ -332,7 +287,7 @@
 }
 .workspace-resize {
   position: absolute;
-  inset: 0 auto 0 -3px;
+  inset: 0 auto 0 -4px;
   width: 6px;
   height: auto;
   border: 0;
@@ -362,7 +317,7 @@
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 18px;
-  background: var(--workspace-surface);
+  background: color-mix(in oklab, var(--muted) 75%, var(--background));
   box-shadow: 0 8px 32px #00000012;
   outline: none;
 }
@@ -373,7 +328,7 @@
 .workspace-project-body {
   padding: 10px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--workspace-content-radius);
+  border-radius: 14px;
   background: var(--background);
 }
 .workspace-project-heading {
@@ -427,17 +382,28 @@
   background: var(--accent);
   color: var(--foreground);
 }
-.workspace-frame button:focus-visible {
+:is(.workspace-header, .workspace-frame) button:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
+@media (max-width: 479px) {
+  .workspace-header {
+    gap: 4px;
+    padding-inline: 4px;
+  }
+}
+@media (min-width: 960px) {
+  .workspace-header[data-open="true"][data-expanded="false"] {
+    border-left: 1px solid var(--border);
+  }
+}
 /* Below the sum of the three minimum widths, the content pane is a drawer. */
 @media (max-width: 959px) {
-  .workspace-frame {
+  .workspace-frame[data-expanded="false"] {
     position: absolute;
     inset: 0 0 0 auto;
     z-index: 20;
     max-width: 100%;
-    box-shadow: -12px 0 36px #0001;
+    background: inherit;
   }
 }

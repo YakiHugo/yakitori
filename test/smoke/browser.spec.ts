@@ -325,10 +325,7 @@ test("browser display requests select the owned tab and refuse cancelled or fore
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    await page.getByRole("button", { name: "Browser", exact: true }).click()
     const tab = page.getByRole("tab", { name: "Owned browser", exact: true })
     await expect(tab).toHaveAttribute("aria-selected", "true")
     const tabId = await page.evaluate(
@@ -397,7 +394,7 @@ test("browser display requests select the owned tab and refuse cancelled or fore
     }, ownerSessionId)
     await expect(tab).toHaveAttribute("aria-selected", "true")
     await expect(
-      workspace.getByRole("tab", { name: "Agent fixture" }),
+      page.getByRole("tab", { name: "Agent fixture" }),
     ).toHaveAttribute("aria-selected", "false")
     expect(errors).toEqual([])
   } finally {
@@ -486,10 +483,7 @@ test("live computer preview renders decoded frames and pointer positions and sen
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+    await page.getByRole("button", { name: "Computer", exact: true }).click()
     const preview = page.getByRole("region", { name: "Live computer preview" })
     await expect(
       preview.getByRole("combobox", { name: "Preview target", exact: true }),
@@ -784,10 +778,7 @@ test("edit and undo replace history in one session across open windows", async (
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: /^Files/ }).click()
+    await page.getByRole("button", { name: "Files", exact: true }).click()
     await page
       .getByRole("main")
       .getByRole("button", { name: "Edit & resubmit", exact: true })
@@ -1598,10 +1589,7 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+    await page.getByRole("button", { name: "Computer", exact: true }).click()
     const connectComputer = page.getByRole("button", {
       name: "Connect computer",
       exact: true,
@@ -1813,10 +1801,7 @@ test("expired side chats dismiss excerpt actions and leave main chat quoting ava
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: /^Side chat/ }).click()
+    await page.getByRole("button", { name: "Side chat", exact: true }).click()
     const side = page.locator("[data-side-chat-id]")
     await side
       .getByRole("textbox", { name: "Message side chat" })
@@ -2070,10 +2055,7 @@ test("window history restores sessions and drafts without creating duplicate con
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
       .click()
-    await page
-      .getByRole("button", { name: "Add workspace tab", exact: true })
-      .click()
-    await page.getByRole("menuitem", { name: /^Files/ }).click()
+    await page.getByRole("button", { name: "Files", exact: true }).click()
     await page
       .getByRole("button", { name: "Expand workspace", exact: true })
       .click()
@@ -2114,15 +2096,18 @@ test("window history restores sessions and drafts without creating duplicate con
     await page.keyboard.press("ControlOrMeta+Shift+b")
     await expect(workspace).toBeVisible()
     await expect(workspace).toHaveAttribute("data-expanded", "false")
-    await page
-      .getByRole("button", { name: "Close Changes", exact: true })
-      .click()
-    await expect(workspace.getByRole("tab")).toHaveCount(0)
+    await page.getByRole("button", { name: "Files", exact: true }).click()
+    await page.getByRole("button", { name: "Close Files", exact: true }).click()
+    const newTab = page.getByRole("tab", {
+      name: "New tab",
+      selected: true,
+    })
+    await expect(newTab).toBeVisible()
     await back.click()
     await expect(files).toHaveAttribute("aria-selected", "true")
     await forward.click()
     await expect(workspace).toBeVisible()
-    await expect(workspace.getByRole("tab")).toHaveCount(0)
+    await expect(newTab).toBeVisible()
     expect(creations).toBe(1)
     expect((await client.request("session/list", {})).sessions).toHaveLength(1)
     await page.getByRole("button", { name: "Settings", exact: true }).click()

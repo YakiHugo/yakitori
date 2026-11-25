@@ -466,6 +466,12 @@ test("conversation scrolls at the page edge while the project overview stays on 
   const content = page.locator(".conversation-content")
   const composer = page.locator(".conversation-composer")
   const overview = page.getByRole("dialog", { name: "Project overview" })
+  const showOverview = page.getByRole("button", {
+    name: "Show project overview",
+    exact: true,
+  })
+  const showContext = page.getByRole("button", { name: "Session context" })
+  const context = page.getByRole("dialog", { name: "Session context" })
   await expect(overview).toHaveCount(0)
   for (const width of [1480, 1180, 1100]) {
     await page.setViewportSize({ width, height: 960 })
@@ -488,9 +494,7 @@ test("conversation scrolls at the page edge while the project overview stays on 
   }
   await page.setViewportSize({ width: 1480, height: 960 })
   const transcriptBeforeOverview = await viewport.boundingBox()
-  await page
-    .getByRole("button", { name: "Show project overview", exact: true })
-    .click()
+  await showOverview.click()
   await expect(overview).toBeVisible()
   await overview.screenshot({
     path: testInfo.outputPath("project-overview.png"),
@@ -519,10 +523,32 @@ test("conversation scrolls at the page edge while the project overview stays on 
         : Infinity
     })
     .toBeLessThan(1)
+  const split = await workspace.boundingBox()
+  if (!split) throw new Error("Workspace is missing.")
+  for (const [trigger, dialog] of [
+    [showOverview, overview],
+    [showContext, context],
+  ] as const) {
+    const button = await trigger.boundingBox()
+    if (!button) throw new Error("Session action is missing.")
+    expect(button.x + button.width).toBeLessThan(split.x)
+    await trigger.click()
+    await expect(dialog).toBeVisible()
+    await expect(workspace).toBeVisible()
+    const panel = await dialog.boundingBox()
+    if (!panel) throw new Error("Session action panel is missing.")
+    expect(panel.x + panel.width).toBeLessThanOrEqual(split.x)
+    await page.keyboard.press("Escape")
+    await expect(dialog).toBeHidden()
+  }
   await page.getByRole("button", { name: "Expand workspace" }).click()
   await expect(viewport).toBeHidden()
+  await expect(showOverview).toBeHidden()
+  await expect(showContext).toBeHidden()
   await page.getByRole("button", { name: "Restore workspace size" }).click()
   await expect(viewport).toBeVisible()
+  await expect(showOverview).toBeVisible()
+  await expect(showContext).toBeVisible()
   await page.getByRole("button", { name: "Hide workspace" }).click()
   await page.getByRole("textbox", { name: "Message the Mate" }).fill("/goal")
   await page.getByRole("button", { name: "Send", exact: true }).click()
@@ -542,7 +568,7 @@ test("conversation scrolls at the page edge while the project overview stays on 
   })
 })
 
-test("workspace tabs and actions stay reachable at the minimum width", async ({
+test("workspace tabs and actions share the titlebar and stay reachable at the minimum width", async ({
   page,
   renderingApp,
 }, testInfo) => {
@@ -556,7 +582,7 @@ test("workspace tabs and actions stay reachable at the minimum width", async ({
     name: "Workspace",
     exact: true,
   })
-  const header = workspace.locator(".workspace-header")
+  const header = page.getByRole("banner").locator(".workspace-header")
   const add = header.getByRole("button", { name: "Add workspace tab" })
   const hide = header.getByRole("button", {
     name: "Hide workspace",
@@ -568,14 +594,35 @@ test("workspace tabs and actions stay reachable at the minimum width", async ({
   await expect(show).toBeFocused()
   await page.keyboard.press("Enter")
   await expect(hide).toBeFocused()
+  await expect(
+    header.getByRole("tab", { name: "New tab", selected: true }),
+  ).toBeVisible()
+  const [toolbarBox, workspaceBox, contentBox] = await Promise.all([
+    header.boundingBox(),
+    workspace.boundingBox(),
+    workspace.getByRole("tabpanel", { name: "New tab" }).boundingBox(),
+  ])
+  if (!toolbarBox || !workspaceBox)
+    throw new Error("Workspace layout is missing.")
+  expect(toolbarBox.x).toBeCloseTo(workspaceBox.x, 0)
+  expect(toolbarBox.y + toolbarBox.height).toBeCloseTo(workspaceBox.y, 0)
+  expect(contentBox).toEqual({
+    ...workspaceBox,
+    x: workspaceBox.x + 1,
+    width: workspaceBox.width - 1,
+  })
+  await workspace.getByRole("button", { name: "Changes", exact: true }).click()
   await add.click()
-  await page.getByRole("menuitem", { name: /^Files/ }).click()
-  await workspace
-    .getByRole("region", { name: "Project files", exact: true })
-    .getByRole("button", { name: filename, exact: true })
-    .click()
+  const search = workspace.getByRole("textbox", {
+    name: "Search files or enter a URL",
+  })
+  await expect(search).toBeFocused()
+  await search.fill(filename)
+  await workspace.getByRole("button", { name: filename, exact: true }).click()
+  await expect(header.getByRole("tab", { name: "New tab" })).toHaveCount(0)
   await add.click()
-  await page.getByRole("menuitem", { name: /^Browser/ }).click()
+  await search.fill("https://example.com/workspace")
+  await search.press("Enter")
   const separator = workspace.getByRole("separator", {
     name: "Workspace width",
   })
@@ -584,15 +631,17 @@ test("workspace tabs and actions stay reachable at the minimum width", async ({
     await page.keyboard.press("ArrowRight")
   await expect(separator).toHaveAttribute("aria-valuenow", "320")
   const tabs = header.getByRole("tablist", { name: "Workspace views" })
-  await header.getByRole("tab", { name: "Browser", exact: true }).focus()
+  const browser = header.getByRole("tab", { name: "Browser", exact: true })
+  await browser.focus()
+  await expect(
+    workspace.getByRole("link", { name: "Open page" }),
+  ).toHaveAttribute("href", "https://example.com/workspace")
   await page.keyboard.press("Home")
   await expect(
     header.getByRole("tab", { name: "Changes", exact: true }),
   ).toBeFocused()
   await page.keyboard.press("End")
-  await expect(
-    header.getByRole("tab", { name: "Browser", exact: true }),
-  ).toBeFocused()
+  await expect(browser).toBeFocused()
   await page.keyboard.press("ArrowLeft")
   const selected = header.getByRole("tab", { name: filename, exact: true })
   const close = header.getByRole("button", {
@@ -643,11 +692,23 @@ test("workspace tabs and actions stay reachable at the minimum width", async ({
     expect(box.x + box.width).toBeLessThanOrEqual(bounds.x + bounds.width)
     previousRight = box.x + box.width
   }
-  await workspace.screenshot({
+  await page.screenshot({
     path: testInfo.outputPath("workspace-minimum-width.png"),
   })
   await close.click()
   await expect(selected).toHaveCount(0)
+  await header
+    .getByRole("button", { name: "Expand workspace", exact: true })
+    .click()
+  await expect(
+    header.getByRole("button", { name: "Restore workspace size" }),
+  ).toBeVisible()
+  await header.getByRole("button", { name: "Restore workspace size" }).click()
+  await page.setViewportSize({ width: 480, height: 800 })
+  await expect(
+    header.getByRole("tab", { name: "Browser", selected: true }),
+  ).toBeInViewport()
+  await expect(hide).toBeInViewport()
 })
 
 test("new session project picker searches, switches and creates projects without losing the draft", async ({
