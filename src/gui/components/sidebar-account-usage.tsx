@@ -10,7 +10,12 @@ import { useAppStore } from "../store/app-store.ts"
 import { AccountFinancials } from "./account-financials.tsx"
 import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 import { formatPlan, formatResetTime } from "./subscription-panel.tsx"
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./ui/tooltip.tsx"
 import "./sidebar-account-usage.css"
 
 type UsageResult =
@@ -22,11 +27,13 @@ export function SidebarAccountUsage({
 }: Readonly<{ currentAccountId: string | undefined }>) {
   const apiBase = useAppStore((state) => state.apiBase)
   return (
-    <AccountUsagePopover
-      key={apiBase}
-      apiBase={apiBase}
-      currentAccountId={currentAccountId}
-    />
+    <TooltipProvider>
+      <AccountUsagePopover
+        key={apiBase}
+        apiBase={apiBase}
+        currentAccountId={currentAccountId}
+      />
+    </TooltipProvider>
   )
 }
 
@@ -127,6 +134,7 @@ function AccountUsagePopover({
         id={id}
         popover="auto"
         role="dialog"
+        aria-hidden={!open}
         aria-labelledby={`${id}-title`}
         className="account-usage-popover"
         onToggle={(event) => {
