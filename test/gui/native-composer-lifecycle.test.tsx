@@ -236,7 +236,7 @@ it("keeps the welcome layout for a local draft until its first send creates the 
   fireEvent.click(screen.getByRole("button", { name: "New session" }))
   const editor = screen.getByRole("textbox", { name: "Message the Mate" })
   const surface = editor.closest(".conversation-surface")
-  const expectWelcomeLayout = (heading = "What would you like to work on?") => {
+  const expectWelcomeLayout = (heading = "What should we build?") => {
     expect(surface?.getAttribute("data-empty")).toBe("true")
     expect(
       screen.getByRole("heading", {
@@ -268,15 +268,15 @@ it("keeps the welcome layout for a local draft until its first send creates the 
       ],
     }),
   )
-  expectWelcomeLayout("What would you like to build in Default project?")
+  expectWelcomeLayout("What should we build in Default project?")
   expect(
-    screen.getByRole("combobox", { name: "New session project" }),
+    screen.getByRole("button", { name: "New session project" }),
   ).toHaveProperty("disabled", false)
   expect(
-    screen.getByRole("combobox", { name: "New session project" }).textContent,
+    screen.getByRole("button", { name: "New session project" }).textContent,
   ).toBe("Default project")
   await pastePrompt(editor, "Begin")
-  expectWelcomeLayout("What would you like to build in Default project?")
+  expectWelcomeLayout("What should we build in Default project?")
   expect(fake.current.requestsFor("session/create")).toHaveLength(0)
   expect(fake.current.streams).toHaveLength(0)
   fireEvent.click(screen.getByRole("button", { name: "Send" }))
@@ -287,7 +287,7 @@ it("keeps the welcome layout for a local draft until its first send creates the 
   })
   expect(fake.current.requestsFor("session/input")).toHaveLength(0)
   expect(editor.textContent).toBe("Begin")
-  expectWelcomeLayout("What would you like to build in Default project?")
+  expectWelcomeLayout("What should we build in Default project?")
   await act(async () => release())
   expect(fake.current.requestsFor("session/input")).toHaveLength(1)
   expect(editor.textContent).toBe("")
@@ -297,7 +297,7 @@ it("keeps the welcome layout for a local draft until its first send creates the 
     screen.getByRole("heading", { name: "Untitled session" }),
   ).toBeDefined()
   expect(
-    screen.queryByRole("combobox", { name: "New session project" }),
+    screen.queryByRole("button", { name: "New session project" }),
   ).toBeNull()
   const stream = fake.current.streams.at(-1)
   if (!stream) throw new Error("Session stream missing")

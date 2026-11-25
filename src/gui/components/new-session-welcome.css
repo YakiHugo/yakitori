@@ -1,0 +1,180 @@
+.new-session-welcome {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: var(--conversation-width);
+  margin-inline: auto;
+  padding: 16px 20px 16px;
+  text-align: center;
+}
+
+.new-session-heading {
+  anchor-name: --new-session-heading;
+  width: 100%;
+  font-size: clamp(1.5rem, 5.4cqi, 2.125rem);
+  font-weight: 500;
+  line-height: 1.22;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.new-session-scope {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+}
+
+.new-session-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: inherit;
+}
+
+.new-session-scope[data-project="true"] .new-session-project:not(:disabled) {
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--muted-foreground);
+  text-underline-offset: 0.19em;
+}
+
+.new-session-scope[data-project="false"] {
+  display: flex;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.new-session-scope[data-project="false"] .new-session-project {
+  min-height: 30px;
+  padding-inline: 8px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--text-detail);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+
+.new-session-project span,
+.new-session-project-picker button span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-session-project svg,
+.new-session-project-picker svg {
+  flex: none;
+}
+
+.new-session-scope[data-project="false"]
+  .new-session-project:is(:hover, [aria-expanded="true"]):not(:disabled) {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.new-session-scope[data-project="true"]
+  .new-session-project:is(:hover, [aria-expanded="true"]):not(:disabled) {
+  text-decoration-style: solid;
+  text-decoration-color: currentColor;
+}
+
+.new-session-project-picker {
+  position: fixed;
+  position-anchor: --new-session-heading;
+  position-area: block-end span-all;
+  position-try-fallbacks: flip-block;
+  justify-self: anchor-center;
+  inset: auto;
+  margin: 12px 0;
+  width: min(19rem, 100cqi);
+  max-height: min(23rem, 48dvh);
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px -6px rgb(0 0 0 / 20%);
+  font-size: var(--text-detail);
+  text-align: left;
+}
+
+.new-session-project-picker:popover-open {
+  display: flex;
+  flex-direction: column;
+}
+
+.new-session-project-search {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 4px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.new-session-project-search input {
+  width: 100%;
+  min-width: 0;
+  padding-block: 9px;
+  outline: none;
+  color: var(--popover-foreground);
+}
+
+.new-session-project-search:focus-within {
+  color: var(--foreground);
+}
+
+.new-session-project-results {
+  min-height: 36px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.new-session-project-results p {
+  padding: 9px 10px;
+  color: var(--muted-foreground);
+}
+
+.new-session-project-actions {
+  flex: none;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.new-session-project-picker button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding-inline: 10px;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.new-session-project-picker button svg {
+  color: var(--muted-foreground);
+}
+
+.new-session-project-picker button[aria-pressed="true"] svg:last-child {
+  color: var(--foreground);
+}
+
+.new-session-project-picker button:is(:hover, :focus-visible) {
+  background: var(--accent);
+}
+
+@media (max-height: 500px) {
+  .new-session-welcome {
+    padding-block: 8px 12px;
+  }
+}

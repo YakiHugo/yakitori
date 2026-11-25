@@ -1044,7 +1044,7 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
-      page.getByRole("combobox", { name: "New session project", exact: true }),
+      page.getByRole("button", { name: "New session project", exact: true }),
     ).toBeEnabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
@@ -1244,7 +1244,7 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
-      page.getByRole("combobox", { name: "New session project", exact: true }),
+      page.getByRole("button", { name: "New session project", exact: true }),
     ).toBeEnabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
