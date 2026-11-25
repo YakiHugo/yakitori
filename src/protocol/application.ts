@@ -55,7 +55,6 @@ export type ApiRevertSessionRequest = Readonly<{
 export type ApiRevertSessionResponse = Readonly<{
   session: ApiSessionDetail
   historyEndSeqExclusive: number
-  events: readonly AppSessionEventEnvelope[]
 }>
 
 export type ApiListSessionsResponse = {
@@ -401,15 +400,6 @@ export type ApiResolvePermissionResponse = {
 export type ApiReadSessionEventsResponse = {
   readonly events: readonly AppSessionEventEnvelope[]
   readonly nextAfter?: number
-}
-
-export type ApiDisplayWindowResponse = {
-  readonly session: ApiSessionDetail
-  readonly events: readonly AppSessionEventEnvelope[]
-  readonly historyBefore?: number
-  readonly historyAfter?: number
-  readonly statePending?: boolean
-  readonly activityTurnIds?: readonly string[]
 }
 
 export type ApiSessionSummary = Readonly<{

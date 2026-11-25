@@ -8,12 +8,12 @@ import type {
   ProjectMoveParams,
   ProjectUpdateParams,
   SessionActivityResponse,
-  SessionHistoryResponse,
   SessionInputStatusResponse,
   SessionSubscribeParams,
   SessionUnsubscribeParams,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
+import type { SessionTurnsResponse } from "../../protocol/session-turns.ts"
 import type { BrowserControl } from "../browser-control.ts"
 import type { ComputerControl } from "../computer-control.ts"
 import type { ComputerPreviewService } from "../computer-preview.ts"
@@ -42,9 +42,8 @@ export type {
   SessionListParams,
   SessionPermissionRequestParams,
   SessionPermissionRequestResult,
-  SessionReplayCompleteNotification,
+  SessionLiveReadyNotification,
   SessionSubscribeParams,
-  SessionSubscribeResponse,
   SessionSubscriptionErrorNotification,
   SessionUnsubscribeParams,
   SidebarChangedNotification,
@@ -255,26 +254,7 @@ function parseSessionSubscribeParams(params: unknown): SessionSubscribeParams {
   if (typeof sessionId !== "string" || sessionId.trim() === "") {
     throw invalidParams("sessionId must be a non-empty string.")
   }
-  const after = record.after
-  if (
-    after !== undefined &&
-    (typeof after !== "number" || !Number.isInteger(after) || after < 0)
-  ) {
-    throw invalidParams("after must be a non-negative integer.")
-  }
-  const recent = record.recent
-  if (
-    recent !== undefined &&
-    typeof recent !== "boolean" &&
-    recent !== "transcript"
-  ) {
-    throw invalidParams('recent must be a boolean or "transcript".')
-  }
-  return {
-    sessionId,
-    ...(after === undefined ? {} : { after }),
-    ...(recent === undefined ? {} : { recent }),
-  }
+  return { sessionId }
 }
 
 function parseSessionUnsubscribeParams(
@@ -517,14 +497,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function sessionScope(params: unknown): RequestSerializationScope {
+function sessionScope(
+  params: unknown,
+  kind: "session" | "sessionSharedRead" = "session",
+): RequestSerializationScope {
   // The scope key is derived before handler-side validation; malformed params
   // share an inert key and the handler rejects them with invalid_input.
   const sessionId =
     isRecord(params) && typeof params.sessionId === "string"
       ? params.sessionId
       : ""
-  return { kind: "session", sessionId }
+  return { kind, sessionId }
+}
+
+function sessionSharedReadScope(params: unknown): RequestSerializationScope {
+  return sessionScope(params, "sessionSharedRead")
 }
 
 function handlerEntry<TResult>(
@@ -641,7 +628,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ),
   handlerEntry<ApiReadGoalResponse>(
     "goal/read",
-    sessionScope,
+    sessionSharedReadScope,
     (handlers, params) => handlers.readGoal(params),
   ),
   handlerEntry<ApiSetGoalResponse>(
@@ -711,31 +698,8 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ),
   handlerEntry<ApiSessionSummary>(
     "session/summary",
-    sessionScope,
+    sessionSharedReadScope,
     (handlers, params) => handlers.readSessionSummary(params),
-  ),
-  handlerEntry<SessionHistoryResponse>(
-    "session/history",
-    sessionScope,
-    async (handlers, params) => {
-      const result = await handlers.readDisplayWindow(params)
-      if (!result.ok) return result
-      return {
-        ok: true,
-        value: {
-          events: result.value.events,
-          ...(result.value.activityTurnIds === undefined
-            ? {}
-            : { activityTurnIds: result.value.activityTurnIds }),
-          ...(result.value.historyBefore === undefined
-            ? {}
-            : { historyBefore: result.value.historyBefore }),
-          ...(result.value.historyAfter === undefined
-            ? {}
-            : { historyAfter: result.value.historyAfter }),
-        },
-      }
-    },
   ),
   handlerEntry<SessionInputStatusResponse>(
     "session/input/status",
@@ -744,14 +708,19 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     () => undefined,
     (handlers, params) => handlers.readInputStatus(params),
   ),
+  handlerEntry<SessionTurnsResponse>(
+    "session/turns/list",
+    sessionSharedReadScope,
+    (handlers, params) => handlers.listCompletedTurns(params),
+  ),
   handlerEntry<SessionActivityResponse>(
-    "session/activity/read",
+    "session/turn/activity",
     () => undefined,
     (handlers, params) => handlers.readDisplayActivity(params),
   ),
   {
     method: "session/skills",
-    scope: sessionScope,
+    scope: sessionSharedReadScope,
     async invoke(params, context) {
       const owner = skillOwner(requireParamsRecord(params, "session/skills"))
       if (owner.projectId === undefined)
@@ -889,7 +858,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ),
   handlerEntry<{ items: readonly QueuedInput[] }>(
     "session/queue/list",
-    sessionScope,
+    sessionSharedReadScope,
     (handlers, params) => handlers.listQueuedInputs(params),
   ),
   handlerEntry<{ item: QueuedInput }>(
@@ -928,17 +897,34 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   {
     method: "session/subscribe",
     shutdownContinuation: true,
-    scope: sessionScope,
+    scope: sessionSharedReadScope,
     async invoke(params, context) {
       const request = parseSessionSubscribeParams(params)
       const outcome = await context.subscriptions.subscribe({
         connectionId: context.connectionId,
         sessionId: request.sessionId,
-        after: request.after ?? 0,
-        ...(request.recent === undefined ? {} : { recent: request.recent }),
       })
       if (!outcome.ok) return { result: adaptHandlerResult(outcome.result) }
-      return { result: outcome.response, afterResponse: outcome.replay }
+      return {
+        result: outcome.response,
+        afterResponse: outcome.startLiveDelivery,
+      }
+    },
+  },
+  {
+    method: "session/open",
+    scope: sessionSharedReadScope,
+    async invoke(params, context) {
+      const { sessionId } = parseSessionSubscribeParams(params)
+      const outcome = await context.subscriptions.open({
+        sessionId,
+        connectionId: context.connectionId,
+      })
+      if (!outcome.ok) return { result: adaptHandlerResult(outcome.result) }
+      return {
+        result: outcome.response,
+        afterResponse: outcome.startLiveDelivery,
+      }
     },
   },
   {

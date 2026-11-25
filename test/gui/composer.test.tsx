@@ -3163,7 +3163,7 @@ it.each([
   act(() => {
     const stream = fakeRef.current.streams.at(-1)
     stream?.emitSnapshot({ session: { ...createdSession, id: "session_b" } })
-    stream?.emitReplayComplete()
+    stream?.emitReady()
   })
   expect(useAppStore.getState().promptDraft).toEqual(inputParts(command))
   await act(async () => {

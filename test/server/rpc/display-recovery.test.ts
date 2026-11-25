@@ -10,7 +10,7 @@ import {
   createCoalescingDeltaPublisher,
   type LiveSessionEvent,
 } from "../../../src/runtime/live-events.ts"
-import type { ApiReadSessionResponse } from "../../../src/server/protocol.ts"
+import type { LiveSessionSnapshot } from "../../../src/protocol/rpc-methods.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -20,7 +20,6 @@ import {
   makeTurnStarted,
   okResult,
   openTestConnection,
-  pagedEventsHandler,
   type TestConnection,
 } from "./testkit.ts"
 
@@ -35,8 +34,12 @@ it("restores an active response over RPC without replaying tools or duplicating 
       activeTurnId: "turn_1",
     })
   const handlers = createFakeHandlers({
-    readSession: async () => okResult({ session: detail() }),
-    readSessionEvents: pagedEventsHandler(events),
+    readLiveSession: async () =>
+      okResult({
+        session: detail(),
+        watermarkSeq: detail().seq,
+        activeTurn: { turnId: "turn_1", events: [...events] },
+      }),
   })
   const { processor, eventHub } = createTestProcessor({ handlers })
   const assistant = createCoalescingDeltaPublisher(eventHub, 30)
@@ -59,26 +62,32 @@ it("restores an active response over RPC without replaying tools or duplicating 
   ) => {
     const response = await client.sendRequest("session/subscribe", {
       sessionId,
-      after: state.lastSeq,
     })
     if (!("result" in response)) throw new Error("Subscription failed")
-    const snapshot = (response.result as ApiReadSessionResponse).session
+    const snapshot = response.result as LiveSessionSnapshot
+    expect(client.notifications("session/event")).toEqual([])
+    state = createExecutionViewState()
+    for (const event of snapshot.activeTurn?.events ?? []) {
+      state = reduceExecutionView(state, {
+        type: "durable",
+        event,
+        replay: true,
+      })
+    }
+    state = reduceExecutionView(state, {
+      type: "replay_completed",
+      session: snapshot.session,
+    })
     await client.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
     await flush()
-    state = reduceExecutionView(state, { type: "snapshot", session: snapshot })
     for (const frame of client.frames) {
       if (!("method" in frame)) continue
       if (frame.method === "session/event")
         state = reduceExecutionView(state, {
           type: "durable",
           event: (frame.params as { event: AppSessionEventEnvelope }).event,
-        })
-      if (frame.method === "session/replayComplete")
-        state = reduceExecutionView(state, {
-          type: "replay_completed",
-          session: snapshot,
         })
       if (frame.method === "session/transient")
         state = reduceExecutionView(state, {

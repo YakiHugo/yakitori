@@ -6,9 +6,11 @@ import {
   useRef,
   useState,
 } from "react"
-import type { SessionHistoryResponse } from "../../protocol/rpc-methods.ts"
+import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
+import { prependSessionTurns } from "../lib/session-turn-history.ts"
 import {
   createExecutionViewState,
+  appendTurnActivityPage,
   type ExecutionViewState,
   prependExecutionHistory,
   projectExecutionView,
@@ -18,6 +20,93 @@ import { type HistoryMatch, useAppStore } from "../store/app-store.ts"
 import { ConversationMessages } from "./conversation-messages.tsx"
 import { ConversationScopeContext } from "./conversation-scope.tsx"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
+
+type HistoryPage = Readonly<{
+  execution: ExecutionViewState
+  before?: number
+  after?: number
+  focusItemId?: string
+}>
+type HistoryPosition = Readonly<{
+  direction: "before" | "after"
+  cursor: number
+}>
+
+function matchesHistoryItem(
+  event: AppSessionEventEnvelope,
+  itemId: string,
+): boolean {
+  return event.type === "input.admitted"
+    ? event.data.inputId === itemId
+    : event.type === "item.completed" && event.data.item.itemId === itemId
+}
+
+async function readHistoryMatchPage(
+  apiBase: string,
+  { sessionId, location }: HistoryMatch,
+  position: HistoryPosition | undefined,
+): Promise<HistoryPage> {
+  const client = getAppRpcClient(apiBase)
+  const page = await client.request("session/turns/list", {
+    sessionId,
+    rolloutId: location.rolloutId,
+    view: "summary",
+    ...(position === undefined
+      ? { aroundTurnId: location.turnId }
+      : { [position.direction]: position.cursor }),
+  })
+  if (page.view !== "summary") throw new Error("Expected a Turn summary page.")
+  let execution = prependSessionTurns(createExecutionViewState(), page.turns)
+  if (page.activeTurn !== undefined) {
+    execution = prependExecutionHistory(execution, page.activeTurn.events)
+    if (page.activeTurn.activityBefore !== undefined)
+      execution = {
+        ...execution,
+        deferredTurnActivity: {
+          ...execution.deferredTurnActivity,
+          [page.activeTurn.turnId]: page.activeTurn.activityBefore,
+        },
+      }
+  }
+  let focusItemId =
+    position === undefined && location.resultItemId !== undefined
+      ? location.itemId
+      : undefined
+  if (position === undefined) {
+    const anchorTurn =
+      page.activeTurn ??
+      page.turns.find((turn) => turn.turnId === location.turnId)
+    if (
+      !anchorTurn?.events.some((event) =>
+        matchesHistoryItem(event, location.itemId),
+      )
+    ) {
+      const result = await client.request("session/turn/activity", {
+        sessionId,
+        rolloutId: location.rolloutId,
+        turnId: location.turnId,
+        aroundItemId: location.itemId,
+      })
+      const { deferredTurnActivity } = execution
+      execution = {
+        ...appendTurnActivityPage(
+          execution,
+          location.turnId,
+          result.events,
+          undefined,
+        ),
+        deferredTurnActivity,
+      }
+      focusItemId = location.itemId
+    }
+  }
+  return {
+    execution,
+    ...(page.nextBefore === undefined ? {} : { before: page.nextBefore }),
+    ...(page.nextAfter === undefined ? {} : { after: page.nextAfter }),
+    ...(focusItemId === undefined ? {} : { focusItemId }),
+  }
+}
 
 export function HistoryMatchDialog() {
   const match = useAppStore((state) => state.historyMatch)
@@ -38,10 +127,8 @@ function HistoryMatchPage({
 }: Readonly<{ match: HistoryMatch; apiBase: string }>) {
   const { t } = useTranslation()
   const { sessionId, location } = match
-  const [position, setPosition] = useState<
-    Readonly<{ before?: number; after?: number }>
-  >({})
-  const [page, setPage] = useState<SessionHistoryResponse>()
+  const [position, setPosition] = useState<HistoryPosition>()
+  const [page, setPage] = useState<HistoryPage>()
   const [execution, setExecution] = useState<ExecutionViewState>()
   const [error, setError] = useState<string>()
   const viewport = useRef<HTMLDivElement>(null)
@@ -52,50 +139,39 @@ function HistoryMatchPage({
     setPage(undefined)
     setExecution(undefined)
     setError(undefined)
-    void getAppRpcClient(apiBase)
-      .request("session/history", { sessionId, location, ...position })
-      .then(
-        (response) => {
-          if (requestVersion.current !== revision) return
-          setPage(response)
-          const view = prependExecutionHistory(
-            createExecutionViewState(),
-            response.events,
-          )
-          setExecution({
-            ...view,
-            deferredTurnActivity: Object.fromEntries(
-              (response.activityTurnIds ?? []).map((id) => [id, "unloaded"]),
-            ),
-          })
-        },
-        (cause: unknown) => {
-          if (requestVersion.current !== revision) return
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : translate("Could not load this part of the conversation."),
-          )
-        },
-      )
+    void readHistoryMatchPage(apiBase, match, position).then(
+      (response) => {
+        if (requestVersion.current !== revision) return
+        setPage(response)
+        setExecution(response.execution)
+      },
+      (cause: unknown) => {
+        if (requestVersion.current !== revision) return
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : translate("Could not load this part of the conversation."),
+        )
+      },
+    )
     return () => {
       requestVersion.current++
     }
-  }, [apiBase, sessionId, location, position])
+  }, [apiBase, match, position])
 
   useLayoutEffect(() => {
     if (page === undefined) return
     const content = viewport.current
     if (content === null) return
     const anchor =
-      position.before === undefined && position.after === undefined
+      position === undefined
         ? content.querySelector(
             `[data-context-message-id="${CSS.escape(location.itemId)}"]`,
           )
         : undefined
     if (!(anchor instanceof HTMLElement)) {
       content.scrollTop =
-        position.after === undefined ? 0 : content.scrollHeight
+        position?.direction === "after" ? content.scrollHeight : 0
       return
     }
     anchor.setAttribute("data-find-current", "")
@@ -113,7 +189,7 @@ function HistoryMatchPage({
       if (before === undefined || before === "loaded") return
       const revision = requestVersion.current
       const response = await getAppRpcClient(apiBase).request(
-        "session/activity/read",
+        "session/turn/activity",
         {
           sessionId,
           rolloutId: location.rolloutId,
@@ -125,20 +201,19 @@ function HistoryMatchPage({
       setExecution((current) =>
         current === undefined
           ? undefined
-          : {
-              ...prependExecutionHistory(current, response.events),
-              deferredTurnActivity: {
-                ...current.deferredTurnActivity,
-                [turnId]: response.nextBefore ?? "loaded",
-              },
-            },
+          : appendTurnActivityPage(
+              current,
+              turnId,
+              response.events,
+              response.nextBefore,
+            ),
       )
     },
     [apiBase, execution?.deferredTurnActivity, location.rolloutId, sessionId],
   )
 
-  const earlier = page?.historyBefore
-  const later = page?.historyAfter
+  const earlier = page?.before
+  const later = page?.after
   return (
     <SidebarDialog
       title={match.title ?? t("Conversation history")}
@@ -155,7 +230,8 @@ function HistoryMatchPage({
             <ConversationScopeContext.Provider
               value={{
                 sessionId,
-                threadId: sessionId,
+                threadId: `history-match:${sessionId}:${location.itemId}`,
+                focusItemId: page?.focusItemId,
                 apiBase,
                 workspaceRoot:
                   match.summary?.workingDirectory ?? execution.workingDirectory,
@@ -183,7 +259,11 @@ function HistoryMatchPage({
           className="underline disabled:opacity-40"
           disabled={earlier === undefined}
           onClick={() => {
-            if (earlier !== undefined) setPosition({ before: earlier })
+            if (earlier !== undefined && page !== undefined)
+              setPosition({
+                direction: "before",
+                cursor: earlier,
+              })
           }}
         >
           {t("Earlier")}
@@ -193,7 +273,11 @@ function HistoryMatchPage({
           className="underline disabled:opacity-40"
           disabled={later === undefined}
           onClick={() => {
-            if (later !== undefined) setPosition({ after: later })
+            if (later !== undefined && page !== undefined)
+              setPosition({
+                direction: "after",
+                cursor: later,
+              })
           }}
         >
           {t("Later")}

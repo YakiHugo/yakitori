@@ -4,11 +4,8 @@ import type {
   SessionStreamHandlers,
 } from "../../src/gui/lib/rpc-client.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
+import type { SessionStreamSnapshot } from "../../src/gui/lib/session-turn-history.ts"
 import type { AppSessionEventEnvelope } from "../../src/protocol/events.ts"
-import type {
-  SessionSubscribeParams,
-  SessionSubscribeResponse,
-} from "../../src/protocol/rpc-methods.ts"
 import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import type {
   GoalChangedNotification,
@@ -25,22 +22,52 @@ import type {
 
 export class FakeSessionStream implements SessionStream {
   closed = false
-  snapshot: SessionSubscribeResponse | undefined
+  snapshot: SessionStreamSnapshot | undefined
 
   constructor(
     readonly sessionId: string,
     public after: number,
     private readonly handlers: SessionStreamHandlers,
-    readonly options?: Readonly<{ recent?: SessionSubscribeParams["recent"] }>,
   ) {}
 
   close(): void {
     this.closed = true
   }
 
-  emitSnapshot(response: SessionSubscribeResponse): void {
-    this.snapshot = response
-    this.handlers.onSnapshot(response)
+  emitSnapshot(
+    response: Omit<SessionStreamSnapshot, "completedTurns"> & {
+      events?: readonly AppSessionEventEnvelope[]
+      activityTurnIds?: readonly string[]
+    },
+  ): void {
+    const { activityTurnIds, events, ...snapshot } = response
+    const fixtureTurn = {
+      completionSeq: snapshot.session.seq,
+      completedAt: snapshot.session.updatedAt,
+      outcome: "completed" as const,
+    }
+    this.snapshot = {
+      ...snapshot,
+      completedTurns: [
+        ...(activityTurnIds ?? []).map((turnId) => ({
+          ...fixtureTurn,
+          turnId,
+          events: [],
+          activityCount: 1,
+        })),
+        ...(events === undefined
+          ? []
+          : [
+              {
+                ...fixtureTurn,
+                turnId: "turn_fixture",
+                events,
+                activityCount: 0,
+              },
+            ]),
+      ],
+    }
+    this.handlers.onSnapshot(this.snapshot)
   }
 
   emitEvent(event: AppSessionEventEnvelope): void {
@@ -51,8 +78,8 @@ export class FakeSessionStream implements SessionStream {
     this.handlers.onTransient(event)
   }
 
-  emitReplayComplete(): void {
-    this.handlers.onReplayComplete()
+  emitReady(): void {
+    this.handlers.onReady()
   }
 
   emitHistoryReset(): void {
@@ -168,9 +195,8 @@ export class FakeRpcClient {
     sessionId: string,
     after: number,
     handlers: SessionStreamHandlers,
-    options?: Readonly<{ recent?: SessionSubscribeParams["recent"] }>,
   ): FakeSessionStream {
-    const stream = new FakeSessionStream(sessionId, after, handlers, options)
+    const stream = new FakeSessionStream(sessionId, after, handlers)
     this.streams.push(stream)
     return stream
   }

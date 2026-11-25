@@ -12,15 +12,21 @@ import type { ApiSessionDetail } from "../../protocol/application.ts"
 import { answerTextParts } from "../../protocol/model-output.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import {
+  appendTurnActivityPage,
   createExecutionViewState,
   type ExecutionEntry,
   type ExecutionViewAction,
   executionEntryKey,
   projectExecutionView,
-  reduceExecutionView,
 } from "../execution-view.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { inputDisplayParts } from "../input-draft.ts"
+import {
+  hydrateSessionExecution,
+  prependSessionTurns,
+  reduceSessionExecution,
+  turnHistoryPage,
+} from "../lib/session-turn-history.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { type AppRpcClient, createAppRpcClient } from "../lib/rpc-client.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
@@ -72,15 +78,20 @@ function ChildTrace({
   const [permissionError, setPermissionError] = useState<string>()
   const [attempt, setAttempt] = useState(0)
   const [historyRevision, setHistoryRevision] = useState(0)
+  const [historyBefore, setHistoryBefore] = useState<number>()
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [historyError, setHistoryError] = useState<string>()
   const clientRef = useRef<AppRpcClient | undefined>(undefined)
   const executionRef = useRef(execution)
+  const historyEpoch = useRef(0)
+  const activityLoads = useRef(new Set<string>())
   // A snapshot watermark can precede undelivered history. Only received
   // durable events advance the cursor used when replacing the connection.
   const lastReceivedEventSeq = useRef(0)
   const scroll = usePinnedScroll(sessionId, historyRevision)
   const view = useMemo(() => projectExecutionView(execution), [execution])
   const dispatch = useCallback((action: ExecutionViewAction) => {
-    executionRef.current = reduceExecutionView(executionRef.current, action)
+    executionRef.current = reduceSessionExecution(executionRef.current, action)
     setExecution(executionRef.current)
   }, [])
 
@@ -92,8 +103,8 @@ function ChildTrace({
     const client = createAppRpcClient({ apiBase })
     clientRef.current = client
     let disposed = false
-    let replaySnapshot: ApiSessionDetail | undefined
     setLoading(true)
+    setLoadingEarlier(false)
     setError(undefined)
     const onStreamUnavailable = (cause: unknown) => {
       if (disposed) return
@@ -107,39 +118,44 @@ function ChildTrace({
       {
         onHistoryReset: () => {
           if (disposed) return
+          historyEpoch.current++
           lastReceivedEventSeq.current = 0
-          replaySnapshot = undefined
           executionRef.current = createExecutionViewState()
           setExecution(executionRef.current)
           setHistoryRevision((revision) => revision + 1)
+          setHistoryBefore(undefined)
+          setLoadingEarlier(false)
+          setHistoryError(undefined)
           setLoading(true)
           setError(undefined)
           setPermissionError(undefined)
         },
-        onSnapshot: ({ session: snapshot }) => {
+        onSnapshot: (response) => {
           if (disposed) return
-          replaySnapshot = snapshot
-          setLoading(true)
+          const snapshot = response.session
           setSession(snapshot)
-          dispatch({ type: "snapshot", session: snapshot })
+          setHistoryBefore(response.historyBefore)
+          lastReceivedEventSeq.current = snapshot.seq
+          executionRef.current = hydrateSessionExecution(response)
+          setExecution(executionRef.current)
+          setLoading(false)
         },
         onEvent: (event) => {
-          if (disposed || event.sessionId !== sessionId) return
-          lastReceivedEventSeq.current = Math.max(
-            lastReceivedEventSeq.current,
-            event.seq,
+          if (
+            disposed ||
+            event.sessionId !== sessionId ||
+            event.seq <= lastReceivedEventSeq.current
           )
+            return
+          lastReceivedEventSeq.current = event.seq
           dispatch({ type: "durable", event })
         },
         onTransient: (event) => {
           if (disposed || event.sessionId !== sessionId) return
           dispatch({ type: "transient", event })
         },
-        onReplayComplete: () => {
+        onReady: () => {
           if (disposed) return
-          if (replaySnapshot)
-            dispatch({ type: "replay_completed", session: replaySnapshot })
-          replaySnapshot = undefined
           setError(undefined)
           setLoading(false)
         },
@@ -154,6 +170,82 @@ function ChildTrace({
       client.close()
     }
   }, [apiBase, sessionId, attempt, dispatch])
+
+  const loadEarlier = async (): Promise<void> => {
+    const client = clientRef.current
+    const rolloutId = session?.rolloutId
+    if (
+      client === undefined ||
+      rolloutId === undefined ||
+      historyBefore === undefined ||
+      loadingEarlier
+    )
+      return
+    const epoch = historyEpoch.current
+    const isCurrent = () =>
+      clientRef.current === client && historyEpoch.current === epoch
+    setLoadingEarlier(true)
+    setHistoryError(undefined)
+    try {
+      const history = await client.request("session/turns/list", {
+        sessionId,
+        rolloutId,
+        before: historyBefore,
+        view: "summary",
+      })
+      if (!isCurrent()) return
+      if (history.view !== "summary")
+        throw new Error("Expected a Turn summary page.")
+      const page = turnHistoryPage(history)
+      executionRef.current = prependSessionTurns(
+        executionRef.current,
+        page.turns,
+      )
+      setExecution(executionRef.current)
+      setHistoryBefore(page.historyBefore)
+    } catch (cause) {
+      if (isCurrent())
+        setHistoryError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (isCurrent()) setLoadingEarlier(false)
+    }
+  }
+
+  const loadActivity = async (turnId: string): Promise<void> => {
+    const client = clientRef.current
+    const rolloutId = session?.rolloutId
+    const before = executionRef.current.deferredTurnActivity[turnId]
+    if (!client || !rolloutId || before === undefined || before === "loaded")
+      return
+    const epoch = historyEpoch.current
+    const key = `${epoch}:${turnId}`
+    if (activityLoads.current.has(key)) return
+    activityLoads.current.add(key)
+    const isCurrent = () =>
+      clientRef.current === client && historyEpoch.current === epoch
+    setHistoryError(undefined)
+    try {
+      const page = await client.request("session/turn/activity", {
+        sessionId,
+        rolloutId,
+        turnId,
+        ...(typeof before === "number" ? { before } : {}),
+      })
+      if (!isCurrent()) return
+      executionRef.current = appendTurnActivityPage(
+        executionRef.current,
+        turnId,
+        page.events,
+        page.nextBefore,
+      )
+      setExecution(executionRef.current)
+    } catch (cause) {
+      if (isCurrent())
+        setHistoryError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      activityLoads.current.delete(key)
+    }
+  }
 
   useLayoutEffect(() => {
     if (active) scroll.onLayoutChange()
@@ -250,11 +342,20 @@ function ChildTrace({
         return [entry]
       return entry.itemId === answer.entry.itemId ? [answer.entry] : []
     })
-    const result: {
+    type Block = {
       key: string
       activity: boolean
       entries: ExecutionEntry[]
-    }[] = []
+      turnId?: string
+    }
+    const result: Block[] = []
+    const deferred = new Map<string, Block>()
+    const turnsByInput = new Map(
+      Object.entries(view.turnTimings).map(([turnId, timing]) => [
+        timing.inputId,
+        turnId,
+      ]),
+    )
     for (const entry of entries) {
       const activity =
         (entry.kind === "tool" &&
@@ -263,8 +364,35 @@ function ChildTrace({
           entry.state !== "interrupted") ||
         entry.kind === "reasoning" ||
         (entry.kind === "permission" && entry.state === "resolved")
+      const input = entry.kind === "user_input" || entry.kind === "agent_input"
+      const turnId = input ? turnsByInput.get(entry.inputId) : entry.turnId
+      let turnActivity = turnId === undefined ? undefined : deferred.get(turnId)
+      if (
+        turnId !== undefined &&
+        turnActivity === undefined &&
+        view.deferredTurnActivity?.[turnId] !== undefined
+      ) {
+        turnActivity = {
+          key: `activity:${turnId}`,
+          activity: true,
+          entries: [],
+          turnId,
+        }
+        deferred.set(turnId, turnActivity)
+        if (input)
+          result.push({
+            key: executionEntryKey(entry),
+            activity: false,
+            entries: [entry],
+          })
+        result.push(turnActivity)
+        if (input) continue
+      }
       const previous = result.at(-1)
-      if (activity && previous?.activity) previous.entries.push(entry)
+      if (activity && turnActivity !== undefined)
+        turnActivity.entries.push(entry)
+      else if (activity && previous?.activity && previous.turnId === undefined)
+        previous.entries.push(entry)
       else
         result.push({
           key: executionEntryKey(entry),
@@ -273,7 +401,12 @@ function ChildTrace({
         })
     }
     return result
-  }, [view.entries, view.turnTimings, view.activeTurnId])
+  }, [
+    view.entries,
+    view.turnTimings,
+    view.activeTurnId,
+    view.deferredTurnActivity,
+  ])
   const renderEntry = (entry: ExecutionEntry) => (
     <TraceEntry
       key={executionEntryKey(entry)}
@@ -313,6 +446,23 @@ function ChildTrace({
           onScroll={scroll.onScroll}
         >
           <div ref={scroll.contentRef} className="subagent-trace">
+            {historyBefore !== undefined ? (
+              <button
+                type="button"
+                className="subagent-activity-trigger"
+                disabled={loadingEarlier}
+                onClick={() => void loadEarlier()}
+              >
+                {loadingEarlier
+                  ? t("Loading conversation history…")
+                  : t("Earlier")}
+              </button>
+            ) : null}
+            {historyError === undefined ? null : (
+              <p role="alert" className="subagent-error">
+                {historyError}
+              </p>
+            )}
             {view.entries.length === 0 ? (
               <p className="subagent-empty">
                 {loading
@@ -322,16 +472,38 @@ function ChildTrace({
             ) : (
               blocks.map((block) =>
                 block.activity ? (
-                  <Collapsible key={block.key} className="subagent-activity">
+                  <Collapsible
+                    key={block.key}
+                    className="subagent-activity"
+                    onOpenChange={(open) => {
+                      if (
+                        open &&
+                        block.turnId !== undefined &&
+                        view.deferredTurnActivity?.[block.turnId] === "unloaded"
+                      )
+                        void loadActivity(block.turnId)
+                    }}
+                  >
                     <CollapsibleTrigger className="subagent-activity-trigger">
                       <ChevronRight size={14} />
                       {t("Activity")}
-                      <span>
-                        {block.entries.length}{" "}
-                        {block.entries.length === 1 ? "step" : "steps"}
-                      </span>
+                      {block.entries.length === 0 ? null : (
+                        <span>
+                          {block.entries.length}{" "}
+                          {block.entries.length === 1 ? "step" : "steps"}
+                        </span>
+                      )}
                     </CollapsibleTrigger>
                     <CollapsibleContent className="subagent-activity-content">
+                      {block.turnId !== undefined &&
+                      view.deferredTurnActivity?.[block.turnId] !== "loaded" ? (
+                        <button
+                          type="button"
+                          onClick={() => void loadActivity(block.turnId ?? "")}
+                        >
+                          {t("Load earlier activity")}
+                        </button>
+                      ) : null}
                       <ol
                         className="agent-timeline"
                         aria-label={t("Subagent activity")}

@@ -15,9 +15,13 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { createEventEnvelope } from "../../src/kernel/events.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const { request } = vi.hoisted(() => ({ request: vi.fn() }))
-vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
+vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/gui/lib/rpc-client.ts")>()),
   getAppRpcClient: () => ({ request }),
 }))
 
@@ -99,8 +103,33 @@ it("reads a body result at its history location before opening the conversation"
     .mockResolvedValueOnce({
       data: [{ session, location, snippet: "saved discussion" }],
     })
-    .mockResolvedValueOnce({ events: [], historyAfter: 21 })
-    .mockResolvedValueOnce({ events: [], historyBefore: 15 })
+    .mockResolvedValueOnce({
+      view: "summary",
+      nextAfter: 21,
+      turns: [
+        {
+          activityCount: 0,
+          turnId: location.turnId,
+          events: [
+            createEventEnvelope({
+              sessionId: session.id,
+              seq: 18,
+              createdAt: session.createdAt,
+              event: {
+                type: "input.admitted",
+                data: {
+                  requestId: location.turnId,
+                  inputId: location.itemId,
+                  role: "user",
+                  content: inputFixture(inputParts("Saved discussion")),
+                },
+              },
+            }),
+          ],
+        },
+      ],
+    })
+    .mockResolvedValueOnce({ view: "summary", turns: [], nextBefore: 15 })
   const user = userEvent.setup()
   render(
     <>
@@ -115,14 +144,18 @@ it("reads a body result at its history location before opening the conversation"
   await user.click(await screen.findByRole("button", { name: /Found work/ }))
   const later = await screen.findByRole("button", { name: "Later" })
   await waitFor(() => expect((later as HTMLButtonElement).disabled).toBe(false))
-  expect(request).toHaveBeenNthCalledWith(2, "session/history", {
+  expect(screen.getByText("Saved discussion")).toBeDefined()
+  expect(request).toHaveBeenNthCalledWith(2, "session/turns/list", {
     sessionId: session.id,
-    location,
+    rolloutId: location.rolloutId,
+    view: "summary",
+    aroundTurnId: location.turnId,
   })
   await user.click(later)
-  expect(request).toHaveBeenNthCalledWith(3, "session/history", {
+  expect(request).toHaveBeenNthCalledWith(3, "session/turns/list", {
     sessionId: session.id,
-    location,
+    rolloutId: location.rolloutId,
+    view: "summary",
     after: 21,
   })
   expect(selectSession).not.toHaveBeenCalled()

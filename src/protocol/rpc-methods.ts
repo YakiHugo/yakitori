@@ -74,6 +74,11 @@ import type {
   WorkspaceRpcResponses,
 } from "./rpc-workspace.ts"
 import type { SessionSidebar, SidebarChange } from "./sidebar.ts"
+import type {
+  SessionActiveTurn,
+  SessionTurnsParams,
+  SessionTurnsResponse,
+} from "./session-turns.ts"
 import type { WorkspaceReadResponse } from "./workspace.ts"
 export type InitializeParams = Readonly<{
   clientInfo: Readonly<{ name: string; version: string }>
@@ -98,24 +103,16 @@ export type SessionListParams = Readonly<{
   projectId?: string
 }>
 
-export type SessionSubscribeParams = Readonly<{
-  sessionId: string
-  after?: number
-  recent?: boolean | "transcript"
-}>
+export type SessionSubscribeParams = Readonly<{ sessionId: string }>
 
-export type SessionSubscribeResponse = ApiReadSessionResponse & {
-  readonly historyBefore?: number
-  // A cold open carries its display window atomically with the snapshot.
-  readonly events?: readonly AppSessionEventEnvelope[]
-  readonly statePending?: boolean
-  readonly activityTurnIds?: readonly string[]
-}
+export type LiveSessionSnapshot = ApiReadSessionResponse &
+  Readonly<{
+    watermarkSeq: number
+    activeTurn?: SessionActiveTurn
+  }>
 
-export type SessionSnapshotNotification = Readonly<{
-  sessionId: string
-  snapshot: SessionSubscribeResponse
-}>
+export type OpenSessionSnapshot = LiveSessionSnapshot &
+  Readonly<{ history: Extract<SessionTurnsResponse, { view: "summary" }> }>
 
 export type SessionInputStatusParams = Readonly<{
   sessionId: string
@@ -128,31 +125,12 @@ export type SessionInputStatusResponse = Readonly<{
   events: readonly AppSessionEventEnvelope[]
 }>
 
-export type SessionHistoryParams =
-  | Readonly<{
-      sessionId: string
-      before: number
-      transcript?: true
-    }>
-  | Readonly<{
-      sessionId: string
-      location: import("./application.ts").HistoryLocation
-      before?: number
-      after?: number
-    }>
-
-export type SessionHistoryResponse = Readonly<{
-  events: readonly AppSessionEventEnvelope[]
-  historyBefore?: number
-  historyAfter?: number
-  activityTurnIds?: readonly string[]
-}>
-
 export type SessionActivityParams = Readonly<{
   sessionId: string
   rolloutId: string
   turnId: string
   before?: number
+  aroundItemId?: string
 }>
 
 export type SessionActivityResponse = Readonly<{
@@ -216,7 +194,7 @@ export type GoalChangedNotification = Readonly<{
   goal: ThreadGoal | null
 }>
 
-export type SessionReplayCompleteNotification = Readonly<{
+export type SessionLiveReadyNotification = Readonly<{
   sessionId: string
   seq: number
 }>
@@ -314,8 +292,9 @@ export type RpcMethodParams = Readonly<
       "session/turn/cancel": ApiCancelTurnRequest
       "session/turn/resume": ApiResumeTurnRequest
       "session/subscribe": SessionSubscribeParams
-      "session/history": SessionHistoryParams
-      "session/activity/read": SessionActivityParams
+      "session/open": SessionSubscribeParams
+      "session/turns/list": SessionTurnsParams
+      "session/turn/activity": SessionActivityParams
       "session/unsubscribe": SessionUnsubscribeParams
       "project/list": ProjectListParams
       "project/read": ProjectReadParams
@@ -382,9 +361,10 @@ export type RpcMethodResponses = Readonly<
       "session/input/cancel": ApiCancelInputResponse
       "session/turn/cancel": ApiCancelTurnResponse
       "session/turn/resume": ApiResumeTurnResponse
-      "session/subscribe": SessionSubscribeResponse
-      "session/history": SessionHistoryResponse
-      "session/activity/read": SessionActivityResponse
+      "session/subscribe": LiveSessionSnapshot
+      "session/open": OpenSessionSnapshot
+      "session/turns/list": SessionTurnsResponse
+      "session/turn/activity": SessionActivityResponse
       "session/unsubscribe": Readonly<Record<string, never>>
       "project/list": ApiListProjectsResponse
       "project/read": ApiReadProjectResponse

@@ -1,12 +1,13 @@
 import { isKernelEvent } from "../../kernel/index.ts"
-import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
-import type { SessionSubscribeResponse } from "../../protocol/rpc-methods.ts"
+import type {
+  LiveSessionSnapshot,
+  OpenSessionSnapshot,
+} from "../../protocol/rpc-methods.ts"
 import {
   sessionEventMethod,
   sessionPermissionRequestedMethod,
   sessionPermissionRequestMethod,
-  sessionReplayCompleteMethod,
-  sessionSnapshotMethod,
+  sessionLiveReadyMethod,
   sessionSubscriptionErrorMethod,
   sessionTransientMethod,
 } from "../../protocol/rpc-wire.ts"
@@ -40,24 +41,22 @@ import {
 export type SessionSubscribeInput = Readonly<{
   connectionId: number
   sessionId: string
-  after: number
-  // Cold open paints the latest prompt and its replies. A caught-up cursor
-  // still replays only the tail after `after`.
-  recent?: boolean | "transcript"
 }>
 
-export type SessionSubscribeOutcome =
+export type SessionSubscribeOutcome<T = LiveSessionSnapshot> =
   | Readonly<{
       ok: true
-      response: SessionSubscribeResponse
-      // Runs after the subscribe response is sent: durable replay,
-      // replayComplete, permission replay, then the reconciled live buffer.
-      replay(): Promise<void>
+      response: T
+      // Called after the transport writes the response to this connection.
+      startLiveDelivery(): Promise<void>
     }>
   | Readonly<{ ok: false; result: ApplicationResult<never> }>
 
 export type SessionSubscriptions = Readonly<{
   subscribe(input: SessionSubscribeInput): Promise<SessionSubscribeOutcome>
+  open(
+    input: SessionSubscribeInput,
+  ): Promise<SessionSubscribeOutcome<OpenSessionSnapshot>>
   unsubscribe(connectionId: number, sessionId: string): void
   removeConnection(connectionId: number): void
 }>
@@ -74,14 +73,8 @@ export type SessionSubscriptionsOptions = Readonly<{
   reportOperationalFailure?: OperationalFailureReporter
 }>
 
-const replayPageLimit = 500
-
-// Per-Session subscription sets keyed by connection id, mirroring Codex:
-// subscriptions hang off the Session, not the connection, so a second client
-// attaches to live state. The flow reproduces the SSE contract: subscribe
-// live first (buffering), read the snapshot, replay durable events
-// after..snapshot.seq, mark the watermark, replay still-pending permissions,
-// then reconcile buffered live deliveries against the snapshot.
+// Register the listener before capturing a watermark. Once the response is
+// sent, release only buffered events that the snapshot does not already cover.
 export function createSessionSubscriptions(
   options: SessionSubscriptionsOptions,
 ): SessionSubscriptions {
@@ -273,16 +266,18 @@ export function createSessionSubscriptions(
     retirePermissionsForTurn(sessionId)
   }
 
-  async function subscribe(
+  async function subscribe<T>(
     input: SessionSubscribeInput,
-  ): Promise<SessionSubscribeOutcome> {
-    // A repeat subscribe replaces the previous subscription with a fresh
-    // replay, matching an SSE reconnect.
+    readResponse: (
+      snapshot: LiveSessionSnapshot,
+    ) => Promise<ApplicationResult<T>>,
+  ): Promise<SessionSubscribeOutcome<T>> {
+    // A repeat subscribe replaces only this connection’s existing listener.
     remove(input.connectionId, input.sessionId)
 
     let live = false
     let closed = false
-    let lastSeq = input.after
+    let lastSeq = 0
     const buffered: SessionDelivery[] = []
 
     const deliver = (delivery: SessionDelivery): void => {
@@ -361,7 +356,7 @@ export function createSessionSubscriptions(
         remove(input.connectionId, input.sessionId)
       else entry.close()
     }
-    const closedOutcome = (): SessionSubscribeOutcome => ({
+    const closedOutcome = (): SessionSubscribeOutcome<T> => ({
       ok: false,
       result: {
         ok: false,
@@ -380,40 +375,11 @@ export function createSessionSubscriptions(
     const pendingBeforeSnapshot = options.pendingRequests.pendingForSession(
       input.sessionId,
     )
-    let snapshot: Awaited<ReturnType<ServerHandlers["readSession"]>>
-    let windowEvents: readonly AppSessionEventEnvelope[] | undefined
-    let historyBefore: number | undefined
-    let statePending = false
-    const transcript = input.after === 0 && input.recent === "transcript"
-    let activityTurnIds: readonly string[] | undefined
+    let snapshot: Awaited<ReturnType<ServerHandlers["readLiveSession"]>>
     try {
-      if (input.recent === true || input.recent === "transcript") {
-        const window = await options.handlers.readDisplayWindow({
-          sessionId: input.sessionId,
-          ...(transcript ? { transcript } : {}),
-        })
-        if (closed) return closedOutcome()
-        if (!window.ok) {
-          removeOwnedSubscription()
-          return { ok: false, result: window }
-        }
-        snapshot = { ok: true, value: { session: window.value.session } }
-        // A cached view usually needs only this window's suffix. If it missed
-        // older prompts too, ordinary paging must still fill that whole gap.
-        if (
-          input.after === 0 ||
-          window.value.historyBefore === undefined ||
-          input.after >= window.value.historyBefore
-        )
-          windowEvents = window.value.events
-        historyBefore = window.value.historyBefore
-        statePending = window.value.statePending === true
-        activityTurnIds = window.value.activityTurnIds
-      } else {
-        snapshot = await options.handlers.readSession({
-          sessionId: input.sessionId,
-        })
-      }
+      snapshot = await options.handlers.readLiveSession({
+        sessionId: input.sessionId,
+      })
     } catch (error) {
       // No replay consumer will be returned on a rejected snapshot read. Release
       // this listener without removing a newer subscription for the same key.
@@ -428,19 +394,20 @@ export function createSessionSubscriptions(
       removeOwnedSubscription()
       return { ok: false, result: snapshot }
     }
-    const watermark = snapshot.value.session.seq
-    // The first display window travels with its snapshot. A client can paint
-    // immediately, without consuming one notification per historical record.
-    const initialEvents = input.after === 0 ? windowEvents : undefined
-    const needsInitialBody =
-      initialEvents !== undefined &&
-      !initialEvents.some(
-        (event) =>
-          event.type === "input.admitted" ||
-          event.type === "item.started" ||
-          event.type === "item.completed",
-      )
-    if (initialEvents !== undefined) lastSeq = watermark
+    let response: ApplicationResult<T>
+    try {
+      response = await readResponse(snapshot.value)
+    } catch (error) {
+      removeOwnedSubscription()
+      throw error
+    }
+    if (closed) return closedOutcome()
+    if (!response.ok) {
+      removeOwnedSubscription()
+      return { ok: false, result: response }
+    }
+    const watermark = snapshot.value.watermarkSeq
+    lastSeq = watermark
     // Entries the snapshot no longer lists belong to Turns that ended while
     // nobody was subscribed; rejecting them with the turn-transition marker
     // keeps the pending map bounded and their continuations silent.
@@ -477,35 +444,10 @@ export function createSessionSubscriptions(
     }
     releasePermissionResetSubscription(input.sessionId)
 
-    const replay = async (): Promise<void> => {
+    const startLiveDelivery = async (): Promise<void> => {
       try {
-        if (initialEvents === undefined && windowEvents !== undefined) {
-          for (const event of windowEvents) {
-            if (closed) return
-            if (event.seq <= input.after || event.seq > watermark) continue
-            deliver({ kind: "durable", events: [event] })
-          }
-        } else if (initialEvents === undefined) {
-          let cursor = input.after
-          for (;;) {
-            if (closed) return
-            const page = await options.handlers.readSessionEvents({
-              sessionId: input.sessionId,
-              after: cursor,
-              through: watermark,
-              limit: replayPageLimit,
-            })
-            if (closed) return
-            if (!page.ok) throw new Error(page.error.message)
-            for (const event of page.value.events) {
-              deliver({ kind: "durable", events: [event] })
-            }
-            if (page.value.nextAfter === undefined) break
-            cursor = page.value.nextAfter
-          }
-        }
         if (closed) return
-        options.notify(input.connectionId, sessionReplayCompleteMethod, {
+        options.notify(input.connectionId, sessionLiveReadyMethod, {
           sessionId: input.sessionId,
           seq: watermark,
         })
@@ -535,21 +477,6 @@ export function createSessionSubscriptions(
         )
         buffered.length = 0
         live = true
-        if (statePending)
-          void refreshProjectionSnapshot().catch((error: unknown) => {
-            if (closed) return
-            removeOwnedSubscription()
-            options.notify(input.connectionId, sessionSubscriptionErrorMethod, {
-              sessionId: input.sessionId,
-              message: "Session state could not be loaded.",
-            } satisfies SessionSubscriptionErrorNotification)
-            reportOperationalFailure(reporter, {
-              component: "session-subscriptions",
-              operation: "refresh-projection-snapshot",
-              cause: error,
-              sessionId: input.sessionId,
-            })
-          })
       } catch (error) {
         // The subscribe response is already sent, so a replay failure cannot
         // become an error response. A replaced or closed subscription must
@@ -558,81 +485,51 @@ export function createSessionSubscriptions(
           removeOwnedSubscription()
           options.notify(input.connectionId, sessionSubscriptionErrorMethod, {
             sessionId: input.sessionId,
-            message: "Session event replay failed.",
+            message: "Session live delivery could not start.",
           } satisfies SessionSubscriptionErrorNotification)
         }
         reportOperationalFailure(reporter, {
           component: "session-subscriptions",
-          operation: "replay",
+          operation: "start-live-delivery",
           cause: error,
           sessionId: input.sessionId,
         })
       }
     }
-    const refreshProjectionSnapshot = async (): Promise<void> => {
-      while (!closed) {
-        // This independent read waits for selected-thread indexing, after the
-        // bounded window has already painted and live deliveries are enabled.
-        const ready = await options.handlers.readInputStatus({
-          sessionId: input.sessionId,
-          requestIds: [],
-        })
-        if (closed) return
-        if (!ready.ok) throw new Error(ready.error.message)
-        const refreshed = await options.handlers.readDisplayWindow({
-          sessionId: input.sessionId,
-          ...(transcript ? { transcript } : {}),
-        })
-        if (closed) return
-        if (!refreshed.ok) throw new Error(refreshed.error.message)
-        if (refreshed.value.statePending) continue
-        const refreshBody =
-          needsInitialBody || refreshed.value.activityTurnIds !== undefined
-        options.notify(input.connectionId, sessionSnapshotMethod, {
-          sessionId: input.sessionId,
-          snapshot: {
-            session: refreshed.value.session,
-            // A sparse raw suffix may contain no display body at all. In that
-            // case install the indexed first window; otherwise only supplement
-            // state, preserving the reader's existing history coverage.
-            events: refreshBody
-              ? refreshed.value.events
-              : refreshed.value.events.filter(
-                  (event) =>
-                    event.type === "context.tokens" ||
-                    (event.type === "turn.started" &&
-                      !initialEvents?.some(
-                        (initial) => initial.id === event.id,
-                      )),
-                ),
-            ...(refreshBody && refreshed.value.historyBefore !== undefined
-              ? { historyBefore: refreshed.value.historyBefore }
-              : {}),
-            ...(refreshed.value.activityTurnIds === undefined
-              ? {}
-              : { activityTurnIds: refreshed.value.activityTurnIds }),
-          },
-        })
-        return
-      }
-    }
     return {
       ok: true,
-      response: {
-        ...snapshot.value,
-        ...(initialEvents === undefined ? {} : { events: initialEvents }),
-        ...(statePending ? { statePending: true } : {}),
-        ...(activityTurnIds === undefined ? {} : { activityTurnIds }),
-        ...(input.after !== 0 || historyBefore === undefined
-          ? {}
-          : { historyBefore }),
-      },
-      replay,
+      response: response.value,
+      startLiveDelivery,
     }
   }
 
   return {
-    subscribe,
+    subscribe: (input) =>
+      subscribe(input, async (snapshot) => ({ ok: true, value: snapshot })),
+    open: (input) =>
+      subscribe(input, async (snapshot) => {
+        const history = await options.handlers.listCompletedTurns({
+          sessionId: input.sessionId,
+          rolloutId: snapshot.session.rolloutId,
+          view: "summary",
+          through: snapshot.watermarkSeq,
+          activeTurnId: snapshot.activeTurn?.turnId,
+        })
+        if (!history.ok) return history
+        if (
+          history.value.view !== "summary" ||
+          history.value.seq !== snapshot.watermarkSeq ||
+          history.value.rolloutId !== snapshot.session.rolloutId
+        )
+          return {
+            ok: false,
+            error: {
+              code: "conflict",
+              message: "Session history changed while opening.",
+            },
+          }
+        return { ok: true, value: { ...snapshot, history: history.value } }
+      }),
     unsubscribe: remove,
     removeConnection(connectionId) {
       for (const [sessionId, set] of bySession) {

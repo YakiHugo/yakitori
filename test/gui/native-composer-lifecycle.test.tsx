@@ -172,7 +172,7 @@ it.each([
   )
   fireEvent.keyDown(editor, { key: "Enter" })
   expect(fake.current.requestsFor("session/input")).toHaveLength(1)
-  act(() => stream.emitReplayComplete())
+  act(() => stream.emitReady())
   expect(screen.getByRole("textbox", { name: "Message the Mate" })).toBe(editor)
   expect(document.activeElement).toBe(editor)
   await act(async () => releaseInput())
@@ -303,7 +303,7 @@ it("keeps the welcome layout for a local draft until its first send creates the 
   if (!stream) throw new Error("Session stream missing")
   act(() => stream.emitSnapshot({ session: projectSession }))
   expect(surface?.hasAttribute("data-empty")).toBe(false)
-  act(() => stream.emitReplayComplete())
+  act(() => stream.emitReady())
   expect(surface?.hasAttribute("data-empty")).toBe(false)
   const input = fake.current.requestsFor("session/input")[0]
     ?.params as ApiAdmitInputRequest
@@ -337,7 +337,7 @@ it("keeps the welcome layout for a local draft until its first send creates the 
   await act(async () => releaseInput())
 })
 
-it("keeps a populated session docked while its snapshot awaits history replay", async () => {
+it("keeps the composer docked until the first Turn page is ready", async () => {
   render(<App />)
   await act(async () => useAppStore.getState().selectSession(session.id))
   const stream = fake.current.streams.at(-1)
@@ -345,11 +345,13 @@ it("keeps a populated session docked while its snapshot awaits history replay", 
   const editor = screen.getByRole("textbox", { name: "Message the Mate" })
   const surface = editor.closest(".conversation-surface")
   expect(surface?.hasAttribute("data-empty")).toBe(false)
+  expect(screen.getByRole("status").textContent).toBe("Loading conversation…")
   act(() =>
     stream.emitSnapshot({
       session: { ...session, counts: { ...session.counts, inputs: 1 } },
     }),
   )
   expect(surface?.hasAttribute("data-empty")).toBe(false)
-  expect(screen.getByRole("status").textContent).toBe("Loading conversation…")
+  expect(screen.queryByText("Loading conversation…")).toBeNull()
+  expect(screen.getByRole("textbox", { name: "Message the Mate" })).toBe(editor)
 })

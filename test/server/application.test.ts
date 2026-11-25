@@ -612,17 +612,17 @@ describe("application composition", () => {
           JSON.stringify({
             id: 2,
             method: "session/subscribe",
-            params: { sessionId, after: 0 },
+            params: { sessionId },
           }),
         )
         await vi.waitFor(() =>
           expect(
-            frames.some((frame) => frame.method === "session/replayComplete"),
+            frames.some((frame) => frame.method === "session/liveReady"),
           ).toBe(true),
         )
         expect(
           frames.filter((frame) => frame.method === "session/event"),
-        ).not.toHaveLength(0)
+        ).toHaveLength(0)
         expect(
           frames.filter((frame) => frame.method === "session/completed"),
         ).toEqual([])
@@ -978,7 +978,7 @@ describe("application composition", () => {
         await send("session/subscribe", { sessionId })
         await vi.waitFor(() =>
           expect(frames).toContainEqual({
-            method: "session/replayComplete",
+            method: "session/liveReady",
             params: expect.objectContaining({ sessionId }),
           }),
         )
@@ -1242,7 +1242,7 @@ describe("application composition", () => {
         )
         await vi.waitFor(() =>
           expect(frames).toContainEqual({
-            method: "session/replayComplete",
+            method: "session/liveReady",
             params: expect.objectContaining({ sessionId: childSessionId }),
           }),
         )

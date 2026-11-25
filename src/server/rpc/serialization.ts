@@ -4,6 +4,7 @@ export type RequestSerializationScope =
   | Readonly<{ kind: "global"; name: string }>
   | Readonly<{ kind: "globalSharedRead"; name: string }>
   | Readonly<{ kind: "session"; sessionId: string }>
+  | Readonly<{ kind: "sessionSharedRead"; sessionId: string }>
   | Readonly<{ kind: "process" }>
 
 type SerializationAccess = "exclusive" | "sharedRead"
@@ -89,9 +90,7 @@ export class RequestSerializationQueues {
   }
 }
 
-// A shared read of a named global resource serializes against exclusive access
-// to the same name: reads and writes of one resource share a queue key, with
-// reads as the shared-access mode.
+// Reads and writes of one resource share a queue key.
 function queueKey(scope: RequestSerializationScope): {
   key: string
   access: SerializationAccess
@@ -103,6 +102,8 @@ function queueKey(scope: RequestSerializationScope): {
       return { key: `global:${scope.name}`, access: "sharedRead" }
     case "session":
       return { key: `session:${scope.sessionId}`, access: "exclusive" }
+    case "sessionSharedRead":
+      return { key: `session:${scope.sessionId}`, access: "sharedRead" }
     case "process":
       return { key: "process", access: "exclusive" }
   }

@@ -35,8 +35,9 @@ import { parseUserQuestions } from "../../protocol/user-interaction.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
+  appendTurnActivityPage,
   type ExecutionViewState,
-  prependExecutionHistory,
+  executionEntries,
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
@@ -61,7 +62,18 @@ import {
   getAppRpcClient,
   type SessionStream,
 } from "../lib/rpc-client.ts"
+import {
+  hydrateSessionExecution,
+  prependSessionTurns,
+  reduceSessionExecution,
+  sessionDisplayEvents,
+  turnHistoryPage,
+} from "../lib/session-turn-history.ts"
 import { questionAnswerMemory } from "../question-answer-memory.ts"
+import {
+  BackgroundSessionStreams,
+  type RetainedSessionStream,
+} from "./background-session-streams.ts"
 import {
   readThreadScopeValue,
   removeThreadScope,
@@ -82,8 +94,7 @@ const unsentProjectKey = (projectId: string | undefined): string =>
   projectId ?? ""
 
 // In-memory transcript for sessions the user has already opened. Switching
-// back shows this immediately and subscribes only for the tail. Test resets
-// call createInitialAppState, which clears it.
+// back can reuse it while its subscription is still connected.
 const executionViews = new Map<
   string,
   Readonly<{
@@ -93,12 +104,15 @@ const executionViews = new Map<
     historyBefore?: number
   }>
 >()
+const backgroundStreams = new BackgroundSessionStreams((key) => {
+  executionViews.delete(key)
+})
 
 type EarlierHistoryPage = Readonly<{
   selection: SessionSelection
   rolloutId: string | undefined
   before: number
-  response: Promise<RpcMethodResponses["session/history"]>
+  response: Promise<ReturnType<typeof turnHistoryPage>>
 }>
 let earlierHistoryPage: EarlierHistoryPage | undefined
 const earlierHistoryLoads = new Map<string, EarlierHistoryPage>()
@@ -110,22 +124,6 @@ export type HistoryMatch = Readonly<{
   summary?: ApiSessionSummary
 }>
 
-function deferTurnActivity(
-  execution: ExecutionViewState,
-  turnIds: readonly string[] | undefined,
-): ExecutionViewState {
-  if (!turnIds?.length) return execution
-  return {
-    ...execution,
-    deferredTurnActivity: {
-      ...Object.fromEntries(
-        turnIds.map((turnId) => [turnId, "unloaded" as const]),
-      ),
-      ...execution.deferredTurnActivity,
-    },
-  }
-}
-
 function executionViewKey(apiBase: string, sessionId: string): string {
   return `${apiBase}\0${sessionId}`
 }
@@ -133,9 +131,14 @@ function executionViewKey(apiBase: string, sessionId: string): string {
 function rememberExecutionView(state: AppStoreData): void {
   const sessionId = state.selection.sessionId
   if (sessionId === undefined) return
-  if (state.execution.lastSeq === 0 && state.execution.entries.length === 0)
+  if (
+    state.execution.lastSeq === 0 &&
+    executionEntries(state.execution).length === 0
+  )
     return
-  executionViews.set(executionViewKey(state.apiBase, sessionId), {
+  const key = executionViewKey(state.apiBase, sessionId)
+  executionViews.delete(key)
+  executionViews.set(key, {
     execution: state.execution,
     selectedSession: state.selectedSession,
     queuedItems: state.queuedItems,
@@ -410,6 +413,7 @@ function subscriptionUsageLoading(
 }
 
 export function createInitialAppState(): AppStoreData {
+  backgroundStreams.clear()
   executionViews.clear()
   earlierHistoryPage = undefined
   earlierHistoryLoads.clear()
@@ -767,16 +771,25 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const readEarlierHistory = (): EarlierHistoryPage | undefined => {
     const selection = currentSelection()
     const before = get().historyBefore
-    if (!selection || before === undefined) return
+    const rolloutId = get().selectedSession?.rolloutId
+    if (!selection || before === undefined || rolloutId === undefined) return
     if (earlierHistoryPage && isCurrentEarlierPage(earlierHistoryPage))
       return earlierHistoryPage
-    const response = getAppRpcClient(selection.apiBase).request(
-      "session/history",
-      { sessionId: selection.sessionId, before, transcript: true },
-    )
+    const response = getAppRpcClient(selection.apiBase)
+      .request("session/turns/list", {
+        sessionId: selection.sessionId,
+        rolloutId,
+        before,
+        view: "summary",
+      })
+      .then((history) => {
+        if (history.view !== "summary")
+          throw new ApiRequestError("Expected a Turn summary page.")
+        return turnHistoryPage(history)
+      })
     const page = {
       selection,
-      rolloutId: get().selectedSession?.rolloutId,
+      rolloutId,
       before,
       response,
     }
@@ -1040,7 +1053,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           undefined
         )
           return []
-        const entry = execution.entries.find(
+        const entry = executionEntries(execution).find(
           (entry) => entry.kind === "tool" && entry.toolCallId === toolCallId,
         )
         if (entry?.kind !== "tool") return []
@@ -1136,7 +1149,13 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     sessionId: string,
     requestId: string,
   ): void => {
-    if (get().execution.admittedRequestIds[requestId]) return
+    const state = get()
+    const execution =
+      state.selection.sessionId === sessionId
+        ? state.execution
+        : executionViews.get(executionViewKey(state.apiBase, sessionId))
+            ?.execution
+    if (execution?.admittedRequestIds[requestId]) return
     const admission = inputRecoveryMemory.readAdmissionByRequestId(
       get().apiBase,
       sessionId,
@@ -1227,6 +1246,39 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
   const closeStream = (): void => {
     get().stream?.close()
+    foregroundStream = undefined
+    set({ stream: undefined })
+  }
+
+  let foregroundStream: RetainedSessionStream | undefined
+  let runningSessionIds = new Set<string>()
+
+  const parkSelectedStream = (): void => {
+    const state = get()
+    const sessionId = state.selection.sessionId
+    const stream = foregroundStream
+    if (
+      sessionId === undefined ||
+      stream?.source !== state.stream ||
+      !stream?.ready()
+    ) {
+      closeStream()
+      return
+    }
+    rememberExecutionView(state)
+    const key = executionViewKey(state.apiBase, sessionId)
+    const view = executionViews.get(key)
+    if (view === undefined) {
+      closeStream()
+      return
+    }
+    backgroundStreams.park(
+      key,
+      stream,
+      runningSessionIds.has(sessionId) ||
+        view.execution.activeTurnId !== undefined,
+    )
+    foregroundStream = undefined
     set({ stream: undefined })
   }
 
@@ -1240,6 +1292,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     if (earlierHistoryPage?.selection.sessionId === sessionId)
       earlierHistoryPage = undefined
     earlierHistoryLoads.delete(sessionId)
+    backgroundStreams.drop(cacheKey)
     executionViews.delete(cacheKey)
     summarySnapshots.delete(sessionId)
     summaryReadRevisions.set(
@@ -1273,7 +1326,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       admissionRequests.delete(requestId)
     }
     const threadId = get().sessionThreadIds[sessionId] ?? sessionId
-    removeThreadScope(threadId)
+    if (!preserveRecovery) removeThreadScope(threadId)
     // The namespaced scope also owns the editor's undo history. Retire only
     // history-derived state so reverting a rollout cannot erase a human draft.
     writeThreadScopeValue(
@@ -1411,30 +1464,42 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const connectEvents = (
     selection: SessionSelection,
     after: number,
-    options: Readonly<{ blockUntilReplay?: boolean }> = {},
+    preload = false,
+    pendingQuestions?: ExecutionViewState,
   ): void => {
-    if (!isCurrentSelection(selection)) return
-    closeStream()
-    authoritativeTurns.delete(selection.sessionId)
-    set((state) => ({
-      pendingSteers: {
-        ...state.pendingSteers,
-        [selection.sessionId]: inputRecoveryMemory
-          .readSteers(state.apiBase, selection.sessionId)
-          .filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
-      },
-    }))
-    // Legacy snapshot-only streams wait for replay. An embedded complete
-    // window releases hydration in onSnapshot; cached resumes have a body.
-    const blockUntilReplay = options.blockUntilReplay !== false
-    if (blockUntilReplay) set({ hydratingSessionId: selection.sessionId })
-    let replaySnapshot: ApiSessionDetail | undefined
-    // The RPC stream resumes after received events on reconnect, including
-    // those not yet published to this view. Retain them across snapshots.
-    const replayEvents = new Map<number, AppSessionEventEnvelope>()
-    let initialSnapshot = true
-    let snapshotStatePending = false
-    let pendingHistoryBefore: number | undefined
+    if (!preload) {
+      if (!isCurrentSelection(selection)) return
+      closeStream()
+      authoritativeTurns.delete(selection.sessionId)
+      set((state) => ({
+        pendingSteers: {
+          ...state.pendingSteers,
+          [selection.sessionId]: inputRecoveryMemory
+            .readSteers(state.apiBase, selection.sessionId)
+            .filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
+        },
+        hydratingSessionId: selection.sessionId,
+      }))
+    }
+    let ready = false
+    const viewKey = executionViewKey(selection.apiBase, selection.sessionId)
+    const parkedView = (source: SessionStream) =>
+      isCurrentHistory(selection) &&
+      backgroundStreams.get(viewKey)?.source === source
+        ? executionViews.get(viewKey)
+        : undefined
+    const dropParkedStream = (source: SessionStream): void => {
+      if (backgroundStreams.get(viewKey)?.source === source)
+        backgroundStreams.drop(viewKey)
+    }
+    const updateParkedActivity = (execution: ExecutionViewState): void => {
+      backgroundStreams.updateActivity(
+        viewKey,
+        !ready ||
+          execution.activeTurnId !== undefined ||
+          runningSessionIds.has(selection.sessionId),
+      )
+    }
     const reconcileAdmissionEvent = (event: AppSessionEventEnvelope): void => {
       if (
         !isInputAdmittedEvent(event) ||
@@ -1488,152 +1553,42 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         after,
         {
           onSnapshot: (response) => {
-            if (get().stream !== source || !isCurrentSelection(selection)) {
+            const foreground =
+              get().stream === source && isCurrentSelection(selection)
+            const parked = foreground ? undefined : parkedView(source)
+            if (!foreground && parked === undefined) {
+              dropParkedStream(source)
               return
             }
-            if (!reconcileRecoveryRollout(response.session)) return
-            if (response.statePending === true && !snapshotStatePending)
-              pendingHistoryBefore =
-                response.historyBefore ?? get().historyBefore
-            const completingPendingSnapshot =
-              snapshotStatePending && response.statePending !== true
-            const historyAdvanced =
-              completingPendingSnapshot &&
-              get().historyBefore !== pendingHistoryBefore
-            const retainHistoryBoundary =
-              historyAdvanced &&
-              (get().historyBefore === undefined ||
-                (response.historyBefore !== undefined &&
-                  (get().historyBefore ?? 0) <= response.historyBefore))
-            snapshotStatePending = response.statePending === true
-            const initializeHistory = initialSnapshot && after === 0
-            initialSnapshot = false
+            if (foreground && !reconcileRecoveryRollout(response.session))
+              return
+            ready = false
+
+            const previous = parked?.execution ?? get().execution
+            const execution = hydrateSessionExecution(response, previous)
             const latestGoal = goalSnapshots.get(selection.sessionId)
-            if (latestGoal !== undefined && latestGoal !== goalAtSubscribe)
-              response = {
-                ...response,
-                session: withGoal(response.session, latestGoal.goal),
-              }
-            replaySnapshot =
-              response.events === undefined ? response.session : undefined
-            const closingQuestions: ExecutionViewState[] = []
-            let execution = get().execution
-            if (response.events !== undefined) {
-              if (
-                completingPendingSnapshot &&
-                response.events.some(
-                  (event) =>
-                    event.type === "input.admitted" ||
-                    event.type === "turn.started" ||
-                    event.type === "item.started" ||
-                    event.type === "item.completed",
-                )
-              )
-                execution = {
-                  ...prependExecutionHistory(execution, response.events),
-                  lastSeq: Math.max(execution.lastSeq, response.session.seq),
-                }
-              const events = new Map(
-                [...replayEvents.values(), ...response.events].map((event) => [
-                  event.seq,
-                  event,
-                ]),
-              )
-              replayEvents.clear()
-              for (const event of [...events.values()].sort(
-                (left, right) => left.seq - right.seq,
-              )) {
-                if (
-                  event.seq <= execution.lastSeq &&
-                  !(
-                    event.type === "context.tokens" &&
-                    execution.contextTokens === undefined
-                  )
-                )
-                  continue
-                if (isTurnCompletedEvent(event))
-                  closingQuestions.push(execution)
-                const lastSeq = execution.lastSeq
-                execution = reduceExecutionView(execution, {
-                  type: "durable",
-                  event,
-                  replay: true,
-                })
-                if (execution.lastSeq < lastSeq)
-                  execution = { ...execution, lastSeq }
-              }
-              if (
-                !snapshotStatePending &&
-                response.session.activeTurnId === undefined
-              )
-                closingQuestions.push(execution)
-              execution = snapshotStatePending
-                ? {
-                    ...execution,
-                    lastSeq: Math.max(execution.lastSeq, response.session.seq),
-                    ...(response.session.workingDirectory === undefined
-                      ? {}
-                      : {
-                          workingDirectory: response.session.workingDirectory,
-                        }),
-                    ...(response.session.mateId === undefined
-                      ? {}
-                      : { mateId: response.session.mateId }),
-                    ...(response.session.mateRevisionId === undefined
-                      ? {}
-                      : { mateRevisionId: response.session.mateRevisionId }),
-                  }
-                : reduceExecutionView(execution, {
-                    type: "replay_completed",
-                    session: response.session,
-                  })
-            } else if (blockUntilReplay) {
-              execution = {
-                ...reduceExecutionView(execution, {
-                  type: "snapshot",
-                  session: response.session,
-                }),
-                // A legacy snapshot does not prove replay has reached the view.
-                lastSeq: execution.lastSeq,
-              }
+            const selectedSession =
+              latestGoal !== undefined && latestGoal !== goalAtSubscribe
+                ? withGoal(response.session, latestGoal.goal)
+                : response.session
+            if (parked !== undefined) {
+              executionViews.set(viewKey, {
+                queuedItems: parked.queuedItems,
+                execution,
+                selectedSession,
+                ...(response.historyBefore === undefined
+                  ? {}
+                  : { historyBefore: response.historyBefore }),
+              })
+              if (execution.activeTurnId === undefined)
+                restoreQuestionDrafts(selection.sessionId, previous)
+              for (const event of sessionDisplayEvents(response))
+                reconcileAdmissionEvent(event)
+              updateParkedActivity(execution)
+              return
             }
-            if (
-              !snapshotStatePending &&
-              execution.lastModel === undefined &&
-              response.session.currentModel !== undefined
-            )
-              execution = {
-                ...execution,
-                lastModel: response.session.currentModel,
-              }
             let modelSelections = get().modelSelections
             let restoringModelSelectionFor = get().restoringModelSelectionFor
-            const currentSession = get().selectedSession
-            const newerExecution = execution.lastSeq > response.session.seq
-            let selectedSession = response.session
-            if (newerExecution && currentSession !== undefined) {
-              const {
-                activeTurnId: _activeTurnId,
-                status: _status,
-                currentModel: _currentModel,
-                ...metadata
-              } = response.session
-              const currentModel =
-                execution.lastModel ?? response.session.currentModel
-              selectedSession = {
-                ...metadata,
-                seq: Math.max(currentSession.seq, execution.lastSeq),
-                updatedAt: currentSession.updatedAt,
-                active: execution.activeTurnId !== undefined,
-                ...(execution.activeTurnId === undefined
-                  ? {}
-                  : { activeTurnId: execution.activeTurnId }),
-                ...(currentSession.status === undefined
-                  ? {}
-                  : { status: currentSession.status }),
-                ...(currentModel === undefined ? {} : { currentModel }),
-              }
-            }
             if (
               restoringModelSelectionFor === selection.sessionId &&
               selectedSession.currentModel !== undefined
@@ -1645,73 +1600,41 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               persistModelSelections(modelSelections)
               restoringModelSelectionFor = undefined
             }
-            execution = deferTurnActivity(execution, response.activityTurnIds)
             set({
               selectedSession,
               sessionsByProject: replaceSessionSummaryInLists(
                 get().sessionsByProject,
                 selectedSession,
               ),
-              ...(initializeHistory ||
-              ((response.historyBefore !== undefined ||
-                response.activityTurnIds !== undefined) &&
-                !retainHistoryBoundary)
-                ? { historyBefore: response.historyBefore }
-                : {}),
-              hydratingSessionId:
-                blockUntilReplay && response.events === undefined
-                  ? selection.sessionId
-                  : undefined,
+              historyBefore: response.historyBefore,
+              hydratingSessionId: undefined,
               currentProject: response.session.projectId,
               modelSelections,
               restoringModelSelectionFor,
               execution,
             })
-            for (const closing of closingQuestions)
-              restoreQuestionDrafts(selection.sessionId, closing)
-            for (const event of response.events ?? [])
+            if (execution.activeTurnId === undefined)
+              restoreQuestionDrafts(
+                selection.sessionId,
+                pendingQuestions ?? previous,
+              )
+            pendingQuestions = undefined
+            for (const event of sessionDisplayEvents(response))
               reconcileAdmissionEvent(event)
           },
-          onReplayComplete: () => {
+          onReady: () => {
+            ready = true
             if (get().stream !== source || !isCurrentSelection(selection)) {
+              const parked = parkedView(source)
+              if (parked !== undefined) updateParkedActivity(parked.execution)
               return
             }
-            const snapshot = replaySnapshot
-            replaySnapshot = undefined
-            const events = [...replayEvents.values()]
-            replayEvents.clear()
-            const closingQuestions: ExecutionViewState[] = []
-            set((state) => {
-              let execution = state.execution
-              if (snapshot !== undefined) {
-                for (const event of events) {
-                  if (
-                    event.seq > execution.lastSeq &&
-                    isTurnCompletedEvent(event)
-                  )
-                    closingQuestions.push(execution)
-                  execution = reduceExecutionView(execution, {
-                    type: "durable",
-                    event,
-                    replay: true,
-                  })
-                }
-                if (snapshot.activeTurnId === undefined)
-                  closingQuestions.push(execution)
-                execution = reduceExecutionView(execution, {
-                  type: "replay_completed",
-                  session: snapshot,
-                })
-              }
-              return {
-                hydratingSessionId: undefined,
-                ...(state.message === "The connection to the server was lost."
-                  ? { message: undefined }
-                  : {}),
-                execution,
-              }
-            })
-            if (snapshotStatePending) return
+            set((state) => ({
+              hydratingSessionId: undefined,
+              ...(state.message === "The connection to the server was lost."
+                ? { message: undefined }
+                : {}),
+            }))
             authoritativeTurns.set(
               selection.sessionId,
               get().execution.activeTurnId,
@@ -1727,8 +1650,6 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               )
                 pending.finish()
             }
-            for (const execution of closingQuestions)
-              restoreQuestionDrafts(selection.sessionId, execution)
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -1912,11 +1833,52 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             })()
           },
           onEvent: (event) => {
+            if (event.sessionId !== selection.sessionId) return
             if (get().stream !== source || !isCurrentSelection(selection)) {
+              const parked = parkedView(source)
+              if (parked === undefined || event.seq <= parked.execution.lastSeq)
+                return
+              reconcileAdmissionEvent(event)
+              const execution = reduceSessionExecution(parked.execution, {
+                type: "durable",
+                event,
+              })
+              const session = applyDurableSessionDetail(
+                parked.selectedSession,
+                event,
+              )
+              executionViews.set(viewKey, {
+                ...parked,
+                execution,
+                selectedSession: session,
+              })
+              if (isTurnCompletedEvent(event)) {
+                authoritativeTurns.set(
+                  selection.sessionId,
+                  execution.activeTurnId,
+                )
+                authoritativeTurnRevisions.set(
+                  selection.sessionId,
+                  (authoritativeTurnRevisions.get(selection.sessionId) ?? 0) +
+                    1,
+                )
+                restoreUncommittedSteers(selection.sessionId, event.data.turnId)
+                restoreUncommittedAdmission(
+                  selection.sessionId,
+                  event.data.turnId,
+                )
+                restoreQuestionDrafts(selection.sessionId, parked.execution)
+              }
+              updateParkedActivity(execution)
+              set((state) => ({
+                sessionsByProject: updateSessionSummaryInLists(
+                  state.sessionsByProject,
+                  session,
+                ),
+              }))
               return
             }
-            if (event.sessionId !== selection.sessionId) return
-            if (replaySnapshot !== undefined) replayEvents.set(event.seq, event)
+            if (event.seq <= get().execution.lastSeq) return
             reconcileAdmissionEvent(event)
             const questionsBeforeEvent = get().execution
             set((state) => {
@@ -1930,16 +1892,13 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                   state.sessionsByProject,
                   selectedSession,
                 ),
-                execution:
-                  replaySnapshot === undefined
-                    ? reduceExecutionView(state.execution, {
-                        type: "durable",
-                        event,
-                      })
-                    : state.execution,
+                execution: reduceSessionExecution(state.execution, {
+                  type: "durable",
+                  event,
+                }),
               }
             })
-            if (isTurnCompletedEvent(event) && replaySnapshot === undefined) {
+            if (isTurnCompletedEvent(event)) {
               authoritativeTurns.set(
                 selection.sessionId,
                 get().execution.activeTurnId,
@@ -1958,10 +1917,28 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
           },
           onTransient: (event) => {
+            if (event.sessionId !== selection.sessionId) return
             if (get().stream !== source || !isCurrentSelection(selection)) {
+              const parked = parkedView(source)
+              if (parked === undefined) return
+              const execution = reduceExecutionView(parked.execution, {
+                type: "transient",
+                event,
+              })
+              const selectedSession = applyTransientSessionDetail(
+                parked.selectedSession,
+                event,
+              )
+              executionViews.set(viewKey, {
+                ...parked,
+                execution,
+                selectedSession,
+              })
+              if (event.type === "turn.finished")
+                restoreQuestionDrafts(selection.sessionId, parked.execution)
+              updateParkedActivity(execution)
               return
             }
-            if (event.sessionId !== selection.sessionId) return
             const questionsBeforeEvent = get().execution
             set((state) => ({
               selectedSession: applyTransientSessionDetail(
@@ -1984,8 +1961,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           },
           onError: (error) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
+              dropParkedStream(source)
               return
             }
+            foregroundStream = undefined
             set({
               stream: undefined,
               hydratingSessionId: undefined,
@@ -2000,8 +1979,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           },
           onDisconnected: (error) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
+              dropParkedStream(source)
               return
             }
+            ready = false
             set({
               hydratingSessionId: undefined,
               execution: reduceExecutionView(get().execution, {
@@ -2017,10 +1998,29 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             })
           },
         },
-        { recent: "transcript" },
       )
-      set({ stream: source })
+      const controls = {
+        source,
+        ready: () => ready,
+        activate(revision: number) {
+          selection = { ...selection, revision }
+          foregroundStream = controls
+          set({ stream: source })
+        },
+      }
+      if (preload) {
+        executionViews.set(viewKey, {
+          execution: createExecutionViewState(),
+          selectedSession: undefined,
+          queuedItems: [],
+        })
+        backgroundStreams.park(viewKey, controls, true)
+      } else {
+        foregroundStream = controls
+        set({ stream: source })
+      }
     } catch (error) {
+      if (preload) throw error
       closeStream()
       if (!isCurrentSelection(selection)) return
       set({
@@ -2028,6 +2028,26 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         message: errorMessage(error, "Could not open event stream."),
       })
     }
+  }
+
+  const preloadRunningSession = (sessionId: string): void => {
+    const state = get()
+    if (
+      state.selection.sessionId === sessionId ||
+      backgroundStreams.get(executionViewKey(state.apiBase, sessionId)) !==
+        undefined
+    )
+      return
+    connectEvents(
+      {
+        apiBase: state.apiBase,
+        sessionId,
+        revision: state.sessionSelectionIntentRevision,
+        historyRevision: historyRevision(state.apiBase, sessionId),
+      },
+      0,
+      true,
+    )
   }
 
   return {
@@ -2038,6 +2058,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       const client = getAppRpcClient(get().apiBase)
       if (projectChangesSubscribedClient !== client) {
         projectChangesSubscribedClient = client
+        runningSessionIds.clear()
         client.subscribeToSessionHistoryChanges((sessionId) => {
           if (getAppRpcClient(get().apiBase) !== client) return
           if (
@@ -2129,6 +2150,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                     ),
                   ),
                 }))
+                if (summary.active) preloadRunningSession(sessionId)
               },
               isCurrent,
               false,
@@ -2167,11 +2189,24 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           void get().loadProjects()
         })
         client.subscribeToSessionActivity((activeSessionIds) => {
+          if (getAppRpcClient(get().apiBase) !== client) return
           if (activeSessionIds === undefined) {
+            runningSessionIds.clear()
             void get().refreshSidebar()
             return
           }
           const active = new Set(activeSessionIds)
+          runningSessionIds = active
+          const prefix = `${get().apiBase}\0`
+          for (const [key, view] of executionViews) {
+            if (!key.startsWith(prefix)) continue
+            backgroundStreams.updateActivity(
+              key,
+              active.has(key.slice(prefix.length)) ||
+                backgroundStreams.get(key)?.ready() === false ||
+                view.execution.activeTurnId !== undefined,
+            )
+          }
           set((state) => {
             let changed = false
             const sessionsByProject = Object.fromEntries(
@@ -2198,6 +2233,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             )
             return changed ? { sessionsByProject } : {}
           })
+          for (const sessionId of active)
+            if (findCachedSession(get(), sessionId) !== undefined)
+              preloadRunningSession(sessionId)
         })
         client.subscribeToQueueChanges((sessionId) => {
           if (get().selection.sessionId === sessionId)
@@ -2366,6 +2404,15 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               },
             }
           })
+          const selectedId = get().selection.sessionId
+          const loaded = get().sessionsByProject[key]?.sessions ?? []
+          for (const session of loaded) {
+            if (
+              session.active &&
+              (selectedId !== undefined || session !== loaded[0])
+            )
+              preloadRunningSession(session.id)
+          }
           applied = true
         },
         () => sessionListRevisions[key] === requestRevision,
@@ -2648,8 +2695,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     },
 
     clearSessionSelection: (input) => {
-      rememberExecutionView(get())
-      closeStream()
+      parkSelectedStream()
       set((state) => ({
         sessionDrafts: stashSessionDraft(state),
         currentProject:
@@ -2703,8 +2749,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         return
       }
       const state = get()
-      rememberExecutionView(state)
-      closeStream()
+      parkSelectedStream()
       set({
         sessionDrafts: stashSessionDraft(state),
         currentProject: projectId,
@@ -2984,7 +3029,13 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         restoringModelSelectionFor: undefined,
       }))
       const selection = currentSelection()
-      if (selection) connectEvents(selection, 0)
+      if (selection)
+        connectEvents(
+          selection,
+          0,
+          false,
+          options?.preserveRecovery ? state.execution : undefined,
+        )
     },
 
     revertSession: async (atInputId, reason, content) => {
@@ -3049,20 +3100,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             historyBefore: undefined,
             queuedItems: [],
             restoringModelSelectionFor: undefined,
-            execution: response.events.reduce(
-              (execution, event) =>
-                reduceExecutionView(execution, {
-                  type: "durable",
-                  event,
-                  replay: true,
-                }),
-              createExecutionViewState(session),
-            ),
+            execution: createExecutionViewState(session),
             composerFocusRevision: state.composerFocusRevision + 1,
           }))
           const selection = currentSelection()
           if (!selection) return
-          connectEvents(selection, response.events.at(-1)?.seq ?? session.seq)
+          connectEvents(selection, session.seq)
           loadSessionSkills(current.sessionId)
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
@@ -3098,7 +3141,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         useWorkspaceStore.getState().removeSession(removedThreadId)
         removeThreadScope(removedThreadId)
         removeThreadScope(`${get().apiBase}:${removedThreadId}`)
-        executionViews.delete(executionViewKey(get().apiBase, sessionId))
+        const viewKey = executionViewKey(get().apiBase, sessionId)
+        backgroundStreams.drop(viewKey)
+        executionViews.delete(viewKey)
         releaseUnsentSession(sessionId)
         unpublishedSessionIds.delete(sessionId)
         if (get().selection.sessionId === sessionId) {
@@ -3347,7 +3392,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       const ongoing = activityLoads.get(key)
       if (ongoing) return ongoing
       const request = getAppRpcClient(selection.apiBase)
-        .request("session/activity/read", {
+        .request("session/turn/activity", {
           sessionId: selection.sessionId,
           rolloutId,
           turnId,
@@ -3356,7 +3401,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         .then((page) => {
           if (
             !isCurrentSelection(selection) ||
-            get().selectedSession?.rolloutId !== rolloutId
+            get().selectedSession?.rolloutId !== rolloutId ||
+            get().execution.deferredTurnActivity[turnId] !== before
           )
             return
           if (
@@ -3366,13 +3412,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           )
             throw new ApiRequestError("Earlier activity did not advance.")
           set((current) => ({
-            execution: {
-              ...prependExecutionHistory(current.execution, page.events),
-              deferredTurnActivity: {
-                ...current.execution.deferredTurnActivity,
-                [turnId]: page.nextBefore ?? "loaded",
-              },
-            },
+            execution: appendTurnActivityPage(
+              current.execution,
+              turnId,
+              page.events,
+              page.nextBefore,
+            ),
           }))
         })
         .finally(() => activityLoads.delete(key))
@@ -3406,10 +3451,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         if (earlierHistoryPage === page) earlierHistoryPage = undefined
         set({
           historyBefore: response.historyBefore,
-          execution: deferTurnActivity(
-            prependExecutionHistory(get().execution, response.events),
-            response.activityTurnIds,
-          ),
+          execution: prependSessionTurns(get().execution, response.turns),
         })
         return true
       } catch (error) {
@@ -3443,7 +3485,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         )
           return false
         if (
-          get().execution.entries.some((entry) =>
+          executionEntries(get().execution).some((entry) =>
             entry.kind === "user_input" || entry.kind === "agent_input"
               ? entry.inputId === itemId
               : entry.kind === "tool"
@@ -3511,10 +3553,15 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           summary.projectId ?? "",
         )
       }
-      rememberExecutionView(get())
-      const storedView = executionViews.get(
-        executionViewKey(get().apiBase, sessionId),
-      )
+      parkSelectedStream()
+      const key = executionViewKey(get().apiBase, sessionId)
+      const storedView = executionViews.get(key)
+      const isOutdated =
+        storedView !== undefined &&
+        summary !== undefined &&
+        ((storedView.selectedSession !== undefined &&
+          summary.rolloutId !== storedView.selectedSession.rolloutId) ||
+          (summary.latestCompletionSeq ?? 0) > storedView.execution.lastSeq)
       const needsAdmissionHistory =
         storedView?.historyBefore !== undefined &&
         [
@@ -3529,10 +3576,16 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         )
       const cached =
         storedView !== undefined &&
+        backgroundStreams.get(key)?.ready() === true &&
         storedView.execution.lastSeq > 0 &&
+        !isOutdated &&
         !needsAdmissionHistory
           ? storedView
           : undefined
+      if (cached === undefined) backgroundStreams.drop(key)
+      const retained =
+        cached === undefined ? undefined : backgroundStreams.take(key)
+      executionViews.delete(key)
       queueReadRevision += 1
       const selection = {
         revision: get().sessionSelectionIntentRevision + 1,
@@ -3540,28 +3593,30 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         apiBase: get().apiBase,
         historyRevision: historyRevision(get().apiBase, sessionId),
       }
-      closeStream()
       set((state) => ({
         sessionSelectionIntentRevision: selection.revision,
         selection: { sessionId },
         threadId: state.sessionThreadIds[sessionId] ?? sessionId,
         restoringModelSelectionFor:
+          retained === undefined &&
           state.modelSelections[sessionId] === undefined
             ? sessionId
             : undefined,
         hydratingSessionId: cached ? undefined : sessionId,
         historyBefore: cached?.historyBefore,
         execution: cached?.execution ?? createExecutionViewState(),
-        selectedSession: cached?.selectedSession,
+        selectedSession: retainedSessionDetail(
+          cached?.selectedSession,
+          summary,
+        ),
         queuedItems: cached?.queuedItems ?? [],
         sessionSkills: [],
         commandPanel: undefined,
         settingsSection: undefined,
         ...takeSessionDraft(stashSessionDraft(state), sessionId),
       }))
-      connectEvents(selection, cached?.execution.lastSeq ?? 0, {
-        blockUntilReplay: cached === undefined,
-      })
+      if (retained !== undefined) retained.activate(selection.revision)
+      else connectEvents(selection, 0)
       void get().refreshQueuedInputs()
       loadSessionSkills(sessionId)
     },
@@ -3588,7 +3643,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       if (
         execution === undefined ||
         execution.pendingQuestionIds.includes(toolCallId) ||
-        execution.entries.some(
+        executionEntries(execution).some(
           (entry) =>
             entry.kind === "user_input" && entry.questionId === toolCallId,
         )
@@ -4592,6 +4647,33 @@ function withSidebarStatus(
     active: status.active === true,
     ...(status.status === undefined ? {} : { status: status.status }),
     ...(latestCompletionSeq > 0 ? { latestCompletionSeq } : {}),
+  }
+}
+
+function retainedSessionDetail(
+  detail: ApiSessionDetail | undefined,
+  summary: ApiSessionSummary | undefined,
+): ApiSessionDetail | undefined {
+  if (detail === undefined || summary === undefined) return detail
+  const {
+    archived: _archived,
+    sectionId: _sectionId,
+    sectionPosition: _sectionPosition,
+    title: _title,
+    goal: _goal,
+    ...base
+  } = detail
+  return {
+    ...base,
+    ...(summary.archived === undefined ? {} : { archived: summary.archived }),
+    ...(summary.sectionId === undefined
+      ? {}
+      : { sectionId: summary.sectionId }),
+    ...(summary.sectionPosition === undefined
+      ? {}
+      : { sectionPosition: summary.sectionPosition }),
+    ...(summary.title === undefined ? {} : { title: summary.title }),
+    ...(summary.goal === undefined ? {} : { goal: summary.goal }),
   }
 }
 

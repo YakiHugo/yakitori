@@ -300,6 +300,64 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
   },
 })
 
+test("opens an unread background result without another history request", async ({
+  page,
+  renderingApp,
+}) => {
+  const historyRequests: string[] = []
+  let returningTo: string | undefined
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const peer = socket.connectToServer()
+    socket.onMessage((message) => {
+      if (returningTo !== undefined && typeof message === "string") {
+        const frame = JSON.parse(message) as {
+          method?: string
+          params?: { sessionId?: string }
+        }
+        if (
+          frame.params?.sessionId === returningTo &&
+          (frame.method === "session/subscribe" ||
+            frame.method === "session/open" ||
+            frame.method === "session/turns/list" ||
+            frame.method === "session/read")
+        )
+          historyRequests.push(frame.method)
+      }
+      peer.send(message)
+    })
+  })
+  await page.reload()
+
+  const prompt = "Finish this conversation in the background."
+  const answer = "The background result is ready."
+  await renderingApp.send(prompt)
+  await expect(
+    page.getByRole("button", { name: "Interrupt", exact: true }),
+  ).toBeVisible()
+  const selected = page.locator(
+    '[data-sidebar-drag="session"][aria-current="true"]',
+  )
+  await expect(selected).toBeVisible()
+  const sessionId = await selected.getAttribute("data-drag-id")
+  if (!sessionId) throw new Error("Missing background session.")
+  await page.getByRole("button", { name: "New session", exact: true }).click()
+  const row = page.locator(`[data-drag-id="${sessionId}"]`)
+  await expect(row).toHaveAttribute("aria-current", "false")
+  await renderingApp.callTool(prompt, "read_file", { path: "missing-file.ts" })
+  await renderingApp.append(prompt, answer)
+  await renderingApp.finish(prompt)
+  await expect(row.getByRole("status", { name: "Unread result" })).toBeVisible()
+
+  returningTo = sessionId
+  await row.click()
+  await expect(page.getByText(answer, { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(
+    page.getByRole("button", { name: /Read missing-file.ts/ }),
+  ).toBeVisible()
+  expect(historyRequests).toEqual([])
+})
+
 async function expectLoadedPNG(image: Locator) {
   await expect(image).toBeVisible()
   await expect
@@ -1521,11 +1579,12 @@ test("async questions recover partial answers as editable references and reveal 
   await renderingApp.finish(followUp)
   const client = createAppRpcClient({ apiBase: new URL(page.url()).origin })
   try {
-    const { session } = await client.request("session/read", { sessionId })
-    const { events } = await client.request("session/history", {
+    const page = await client.request("session/turns/list", {
       sessionId,
-      before: session.seq + 1,
+      view: "summary",
     })
+    if (page.view !== "summary") throw new Error("Turn summaries are missing.")
+    const events = page.turns.flatMap((turn) => turn.events)
     const input = events.find(
       (event) =>
         event.type === "input.admitted" && event.data.content.text === followUp,

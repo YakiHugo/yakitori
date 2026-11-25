@@ -205,22 +205,16 @@ describe("thread server handlers", () => {
     } finally {
       secondConnection.close()
     }
-    expect(
-      reverted.value.events.some(
-        (event) =>
-          isKernelEvent(event) &&
-          event.type === "input.admitted" &&
-          event.data.inputId === firstInputId,
-      ),
-    ).toBe(true)
+    expect(reverted.value).not.toHaveProperty("events")
     const replay = await handlers.readSessionEvents({ sessionId })
     if (!replay.ok) throw new Error(replay.error.message)
-    expect(reverted.value.events).toEqual(
-      replay.value.events.filter(
-        ({ seq }) => seq <= reverted.value.session.seq,
-      ),
+    expect(replay.value.events).toContainEqual(
+      expect.objectContaining({
+        type: "input.admitted",
+        data: expect.objectContaining({ inputId: firstInputId }),
+      }),
     )
-    expect(reverted.value.events).toContainEqual(
+    expect(replay.value.events).toContainEqual(
       expect.objectContaining({
         type: "item.completed",
         data: expect.objectContaining({

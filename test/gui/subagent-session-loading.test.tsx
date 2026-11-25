@@ -72,65 +72,58 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-it.each([
-  0, 1, 2,
-])("retries interrupted replay after its %i delivered events, not the snapshot watermark", async (delivered) => {
+it("retries a failed history page with a new live snapshot and renders each Turn once", async () => {
   vi.stubGlobal("WebSocket", WebSocket)
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
   await once(server, "listening")
   const address = server.address()
   if (typeof address === "string" || address === null)
     throw new Error("Missing fixture server address")
-  const cursors: number[] = []
-  const replayPages: (() => void)[] = []
+  const reads: unknown[] = []
+  let attempt = 0
   server.on("connection", (socket) => {
+    const title = `Review child attempt ${++attempt}`
     socket.on("message", (bytes) => {
       const message = JSON.parse(bytes.toString()) as {
         id: number
         method: string
-        params: { after: number }
+        params: unknown
       }
-      if (message.method !== "session/subscribe") {
-        socket.send(JSON.stringify({ id: message.id, result: {} }))
-        return
-      }
-      cursors.push(message.params.after)
-      socket.send(
-        JSON.stringify({
-          id: message.id,
-          result: {
-            session: {
-              ...snapshot,
-              title: `Review child attempt ${cursors.length}`,
-            },
-          },
-        }),
-      )
-      const first = cursors.length === 1
-      replayPages.push(() => {
-        const events = first
-          ? envelopes.slice(0, delivered)
-          : envelopes.filter((event) => event.seq > message.params.after)
-        for (const event of events)
+      const reply = (result: unknown) =>
+        socket.send(JSON.stringify({ id: message.id, result }))
+      if (message.method === "session/open") {
+        reads.push(message.params)
+        if (attempt === 1) {
           socket.send(
             JSON.stringify({
-              method: "session/event",
-              params: { sessionId: "child", seq: event.seq, event },
+              id: message.id,
+              error: { code: -32603, message: "History page unavailable" },
             }),
           )
-        // The real subscription sends its snapshot before awaiting the first
-        // history page; a failed page reports this terminal notification.
-        socket.send(
-          JSON.stringify({
-            method: first
-              ? "session/subscriptionError"
-              : "session/replayComplete",
-            params: first
-              ? { sessionId: "child", message: "Session event replay failed." }
-              : { sessionId: "child", seq: snapshot.seq },
-          }),
-        )
-      })
+          return
+        }
+        reply({
+          session: { ...snapshot, title },
+          watermarkSeq: snapshot.seq,
+          history: {
+            view: "summary",
+            rolloutId: snapshot.rolloutId,
+            seq: snapshot.seq,
+            turns: [
+              {
+                turnId: "turn",
+                completionSeq: 4,
+                completedAt: at,
+                outcome: "completed",
+                activityCount: 0,
+                events: envelopes,
+              },
+            ],
+          },
+        })
+        return
+      }
+      reply({})
     })
   })
   try {
@@ -143,16 +136,17 @@ it.each([
         onOpenAgent={() => {}}
       />,
     )
-    await screen.findByText("Review child attempt 1")
-    replayPages[0]?.()
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "History page unavailable",
+    )
+    expect(screen.queryByText("Review child attempt 1")).toBeNull()
     fireEvent.click(await screen.findByRole("button", { name: "Retry" }))
-    await screen.findByText("Review child attempt 2")
-    replayPages[1]?.()
+    expect(await screen.findByText("Review child attempt 2")).toBeDefined()
     expect(
-      await screen.findByText("The full history was recovered."),
-    ).toBeDefined()
+      await screen.findAllByText("The full history was recovered."),
+    ).toHaveLength(1)
     expect(await screen.findByText("Completed")).toBeDefined()
-    expect(cursors).toEqual([0, delivered])
+    expect(reads).toEqual([{ sessionId: "child" }, { sessionId: "child" }])
   } finally {
     cleanup()
     for (const socket of server.clients) socket.terminate()

@@ -419,6 +419,11 @@ it("keeps the edited draft until replacement history is activated in the same se
     completeRevert({
       session: replacement,
       historyEndSeqExclusive: 2,
+    })
+    await response
+    await Promise.resolve()
+    fakeRef.current.streams.at(-1)?.emitSnapshot({
+      session: replacement,
       events: [
         createEventEnvelope({
           sessionId: source.id,
@@ -436,7 +441,6 @@ it("keeps the edited draft until replacement history is activated in the same se
         }),
       ],
     })
-    await response
   })
   expect(useAppStore.getState().selection.sessionId).toBe("session_source")
   expect(screen.queryByRole("textbox", { name: "Edit message" })).toBeNull()

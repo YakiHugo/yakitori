@@ -17,6 +17,10 @@ const configRead: RequestSerializationScope = {
   kind: "globalSharedRead",
   name: "config",
 }
+const sessionRead: RequestSerializationScope = {
+  kind: "sessionSharedRead",
+  sessionId: "s1",
+}
 
 describe("RequestSerializationQueues", () => {
   it("runs exclusive tasks for a key strictly FIFO, one at a time", async () => {
@@ -86,11 +90,17 @@ describe("RequestSerializationQueues", () => {
     firstRelease.resolve()
   })
 
-  it("serializes shared reads against exclusive writes of the same global name", async () => {
+  it.each([
+    { read: configRead, write: configWrite },
+    { read: sessionRead, write: sessionScope },
+  ])("serializes $read.kind against writes to the same resource", async ({
+    read,
+    write,
+  }) => {
     const queues = new RequestSerializationQueues()
     const firstReadStarted = deferred<void>()
     const firstReadRelease = deferred<void>()
-    queues.enqueue(configRead, async () => {
+    queues.enqueue(read, async () => {
       firstReadStarted.resolve()
       await firstReadRelease.promise
     })
@@ -99,14 +109,14 @@ describe("RequestSerializationQueues", () => {
     let writerRan = false
     const writerStarted = deferred<void>()
     const writerRelease = deferred<void>()
-    queues.enqueue(configWrite, async () => {
+    queues.enqueue(write, async () => {
       writerRan = true
       writerStarted.resolve()
       await writerRelease.promise
     })
     let laterReadRan = false
     const laterReadStarted = deferred<void>()
-    queues.enqueue(configRead, async () => {
+    queues.enqueue(read, async () => {
       laterReadRan = true
       laterReadStarted.resolve()
     })

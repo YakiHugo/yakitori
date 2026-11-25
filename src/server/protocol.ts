@@ -11,7 +11,6 @@ export {
   type ApiCreateSessionRequest,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
-  type ApiDisplayWindowResponse,
   ApiErrorCode,
   type ApiErrorResponse,
   type ApiRevertSessionRequest,

@@ -22,6 +22,7 @@ import {
   InputRole,
 } from "../../src/kernel/events.ts"
 import type { ApiSearchSessionOccurrencesResponse } from "../../src/server/protocol.ts"
+import { turnHistoryFixture } from "../fixtures/turn-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "./input-fixtures.ts"
 
@@ -231,6 +232,24 @@ it("reveals an older logical message inside a closed disclosure before jumping",
 it("loads an unloaded search target before highlighting and jumping", async () => {
   useAppStore.setState({
     selection: { sessionId: "session" },
+    selectedSession: {
+      id: "session",
+      rolloutId: "rollout_original",
+      conversationId: "session",
+      seq: 10,
+      createdAt: "",
+      updatedAt: "",
+      pendingInputs: [],
+      pendingPermissions: [],
+      counts: {
+        inputs: 0,
+        pendingInputs: 0,
+        turns: 0,
+        items: 0,
+        permissions: 0,
+        tools: 0,
+      },
+    },
     historyBefore: 10,
   })
   request.mockImplementation(async (method) => {
@@ -240,24 +259,22 @@ it("loads an unloaded search target before highlighting and jumping", async () =
           { ...hits[0], itemId: "input_older", snippet: "Historical needle" },
         ],
       }
-    if (method === "session/history")
-      return {
-        events: [
-          createEventEnvelope({
-            sessionId: "session",
-            seq: 2,
-            event: {
-              type: EventType.InputAdmitted,
-              data: {
-                requestId: "request_older",
-                inputId: "input_older",
-                role: InputRole.User,
-                content: inputFixture(inputParts("Historical needle")),
-              },
+    if (method === "session/turns/list")
+      return turnHistoryFixture([
+        createEventEnvelope({
+          sessionId: "session",
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_older",
+              inputId: "input_older",
+              role: InputRole.User,
+              content: inputFixture(inputParts("Historical needle")),
             },
-          }),
-        ],
-      }
+          },
+        }),
+      ])
     throw new Error(`Unexpected request ${method}`)
   })
   render(<PagedFixture />)
@@ -266,10 +283,11 @@ it("loads an unloaded search target before highlighting and jumping", async () =
     target: { value: "needle" },
   })
   await waitFor(() => expect(jump).toHaveBeenCalled())
-  expect(request).toHaveBeenCalledWith("session/history", {
+  expect(request).toHaveBeenCalledWith("session/turns/list", {
     sessionId: "session",
     before: 10,
-    transcript: true,
+    rolloutId: "rollout_original",
+    view: "summary",
   })
   expect(
     document

@@ -209,7 +209,7 @@ describe("websocket RPC transport", () => {
         clientInfo: { name: "test-client", version: "0.0.0" },
       })
       await client.request("session/subscribe", { sessionId: "session_1" })
-      await client.waitFor((frame) => frame.method === "session/replayComplete")
+      await client.waitFor((frame) => frame.method === "session/liveReady")
 
       // Stall the peer at the TCP level so the server-side socket buffer
       // fills and notifications pile up in the outbound queue. The payload
@@ -248,7 +248,7 @@ describe("websocket RPC transport", () => {
         clientInfo: { name: "test-client", version: "0.0.0" },
       })
       await client.request("session/subscribe", { sessionId: "session_1" })
-      await client.waitFor((frame) => frame.method === "session/replayComplete")
+      await client.waitFor((frame) => frame.method === "session/liveReady")
       const socket = (client.ws as unknown as { _socket: Socket })._socket
       socket.pause()
       const padding = "x".repeat(256 * 1024)
@@ -295,7 +295,7 @@ describe("websocket RPC transport", () => {
         clientInfo: { name: "test-client", version: "0.0.0" },
       })
       await first.request("session/subscribe", { sessionId: "session_1" })
-      await first.waitFor((frame) => frame.method === "session/replayComplete")
+      await first.waitFor((frame) => frame.method === "session/liveReady")
 
       const second = connect(port)
       await second.open
@@ -303,7 +303,7 @@ describe("websocket RPC transport", () => {
         clientInfo: { name: "test-client", version: "0.0.0" },
       })
       await second.request("session/subscribe", { sessionId: "session_1" })
-      await second.waitFor((frame) => frame.method === "session/replayComplete")
+      await second.waitFor((frame) => frame.method === "session/liveReady")
 
       eventHub.publishDurable([makeTurnStarted("session_1", 2, "turn_2")])
       await first.waitFor((frame) => frame.method === "session/event")

@@ -71,12 +71,13 @@ describe("runtime terminal delivery", () => {
           const created = await handlers.createSession()
           if (!created.ok) throw new Error(created.error.message)
           const sessionId = created.value.session.id
-          expect(
-            await client.sendRequest("session/subscribe", { sessionId }),
-          ).toHaveProperty("result")
+          const subscription = await client.sendRequest("session/subscribe", {
+            sessionId,
+          })
+          expect(subscription).toMatchObject({ result: { watermarkSeq: 1 } })
           await client.waitForFrame(
             (frame) =>
-              "method" in frame && frame.method === "session/replayComplete",
+              "method" in frame && frame.method === "session/liveReady",
           )
           const turnId = "request_terminal"
           const admitted = await handlers.admitInput({
@@ -175,7 +176,9 @@ describe("runtime terminal delivery", () => {
               (frame) => (frame.params as { event: StoredEventEnvelope }).event,
             )
           expect(durable).toEqual(
-            failure === "append" ? durableBeforeTerminal : history.value.events,
+            failure === "append"
+              ? durableBeforeTerminal
+              : history.value.events.filter(({ seq }) => seq > 1),
           )
           expect(
             history.value.events.some(
@@ -237,8 +240,7 @@ describe("runtime terminal delivery", () => {
       const sessionId = created.value.session.id
       await client.sendRequest("session/subscribe", { sessionId })
       await client.waitForFrame(
-        (frame) =>
-          "method" in frame && frame.method === "session/replayComplete",
+        (frame) => "method" in frame && frame.method === "session/liveReady",
       )
       const admitted = await handlers.admitInput({
         sessionId,
@@ -298,8 +300,7 @@ describe("runtime terminal delivery", () => {
         await client.sendRequest("session/subscribe", { sessionId }),
       ).toHaveProperty("result")
       await client.waitForFrame(
-        (frame) =>
-          "method" in frame && frame.method === "session/replayComplete",
+        (frame) => "method" in frame && frame.method === "session/liveReady",
       )
       const turnId = "request_unreadable_history"
       const admitted = await handlers.admitInput({
@@ -439,8 +440,7 @@ describe("runtime terminal delivery", () => {
         await client.sendRequest("session/subscribe", { sessionId }),
       ).toHaveProperty("result")
       await client.waitForFrame(
-        (frame) =>
-          "method" in frame && frame.method === "session/replayComplete",
+        (frame) => "method" in frame && frame.method === "session/liveReady",
       )
       const admitted = await handlers.admitInput({
         sessionId,
@@ -565,8 +565,7 @@ describe("runtime terminal delivery", () => {
       const sessionId = created.value.session.id
       await client.sendRequest("session/subscribe", { sessionId })
       await client.waitForFrame(
-        (frame) =>
-          "method" in frame && frame.method === "session/replayComplete",
+        (frame) => "method" in frame && frame.method === "session/liveReady",
       )
       const admitted = await handlers.admitInput({
         sessionId,

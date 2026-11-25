@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
 import { createEventEnvelope, EventType } from "../../../src/kernel/index.ts"
-import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import type { LiveRuntimeWarning } from "../../../src/runtime/live-events.ts"
 import {
   createSessionEventHub,
@@ -14,7 +13,6 @@ import type {
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
 import {
   INTERNAL_ERROR,
-  type JsonRpcNotification,
   type JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
 import { PendingServerRequests } from "../../../src/server/rpc/pending-requests.ts"
@@ -37,7 +35,6 @@ import {
   makeTurnStarted,
   okResult,
   openTestConnection,
-  pagedEventsHandler,
   type TestConnection,
   waitForCondition,
 } from "./testkit.ts"
@@ -45,37 +42,25 @@ import {
 const sessionId = "session_1"
 
 function subscribeSetup(options: {
-  events: readonly AppSessionEventEnvelope[]
   detail?: Partial<ApiSessionDetail>
-  blockFirstPage?: {
+  capture?: {
     gate: ReturnType<typeof deferred<void>>
     calls: { count: number }
   }
 }) {
   const handlers = createFakeHandlers({
-    readSession: async () =>
-      okResult({ session: makeSessionDetail(sessionId, options.detail) }),
-    readSessionEvents: async (input) => {
-      if (options.blockFirstPage !== undefined) {
-        options.blockFirstPage.calls.count += 1
-        if (options.blockFirstPage.calls.count === 1) {
-          await options.blockFirstPage.gate.promise
-        }
-      }
-      return pagedEventsHandler(options.events)(input)
+    readSession: async () => {
+      if (options.capture !== undefined && ++options.capture.calls.count === 1)
+        await options.capture.gate.promise
+      return okResult({ session: makeSessionDetail(sessionId, options.detail) })
     },
   })
-  const { processor, eventHub } = createTestProcessor({ handlers })
-  return { processor, eventHub }
+  return createTestProcessor({ handlers })
 }
 
-async function subscribe(
-  connection: TestConnection,
-  after?: number,
-): Promise<JsonRpcResponse> {
+async function subscribe(connection: TestConnection): Promise<JsonRpcResponse> {
   const response = await connection.sendRequest("session/subscribe", {
     sessionId,
-    ...(after === undefined ? {} : { after }),
   })
   expect(response).toHaveProperty("result")
   return response as JsonRpcResponse
@@ -178,89 +163,6 @@ describe("buffered turn lifecycle", () => {
 })
 
 describe("session/subscribe", () => {
-  it("embeds the display window without replaying it as notifications", async () => {
-    const calls = { events: 0 }
-    const windowEvent = makeTurnStarted(sessionId, 9, "turn_latest")
-    const handlers = createFakeHandlers({
-      readSessionEvents: async () => {
-        calls.events += 1
-        return okResult({ events: [] })
-      },
-      readDisplayWindow: async () =>
-        okResult({
-          session: makeSessionDetail(sessionId, { seq: 9 }),
-          events: [windowEvent],
-          historyBefore: 8,
-        }),
-    })
-    const { processor } = createTestProcessor({ handlers })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-    const response = await connection.sendRequest("session/subscribe", {
-      sessionId,
-      recent: true,
-    })
-    await flush()
-    expect(response).toMatchObject({
-      result: { historyBefore: 8, events: [windowEvent] },
-    })
-    expect(
-      connection.notifications("session/event").map((frame) => frame.params),
-    ).toEqual([])
-    expect(calls.events).toBe(0)
-  })
-
-  it.each([
-    5, 8,
-  ])("resumes a cached view after %s with a bounded snapshot and complete catch-up", async (after) => {
-    const calls = { snapshot: 0, events: 0 }
-    const older = makeTurnStarted(sessionId, 6, "turn_previous")
-    const latest = makeTurnStarted(sessionId, 9, "turn_latest")
-    const handlers = createFakeHandlers({
-      readSession: async () => {
-        calls.snapshot += 1
-        throw new Error("Cached display reads must not load all history.")
-      },
-      readSessionEvents: async () => {
-        calls.events += 1
-        return okResult({ events: [older, latest] })
-      },
-      readDisplayWindow: async () =>
-        okResult({
-          session: makeSessionDetail(sessionId, { seq: 9 }),
-          events: [latest],
-          historyBefore: 8,
-        }),
-    })
-    const { processor } = createTestProcessor({ handlers })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-    const response = await connection.sendRequest("session/subscribe", {
-      sessionId,
-      after,
-      recent: true,
-    })
-    await flush()
-    expect(response).toMatchObject({
-      result: { session: { id: sessionId, seq: 9 } },
-    })
-    if (!("result" in response)) throw new Error("Session subscription failed.")
-    expect(response.result).not.toHaveProperty("historyBefore")
-    expect(
-      connection.notifications("session/event").map((frame) => frame.params),
-    ).toEqual(
-      (after === 5 ? [older, latest] : [latest]).map((event) => ({
-        sessionId,
-        seq: event.seq,
-        event,
-      })),
-    )
-    expect(calls).toEqual({
-      snapshot: 0,
-      events: after === 5 ? 1 : 0,
-    })
-  })
-
   it.each([
     false,
     true,
@@ -312,23 +214,19 @@ describe("session/subscribe", () => {
           }),
         })
       },
-      readSessionEvents: pagedEventsHandler([
-        makeTurnStarted(sessionId, 1, "turn_1"),
-        progress,
-      ]),
     })
     const { processor, eventHub } = createTestProcessor({ handlers })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
     await subscribe(connection)
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
     await flush()
 
-    // The duplicate progress is deduplicated after replay. Its earlier retry
-    // must also be discarded; a retry that followed it still describes live work.
-    expect(connection.notifications("session/event")).toHaveLength(2)
+    // Snapshot progress is already covered by the watermark. Only a retry
+    // published after that progress still describes live work.
+    expect(connection.notifications("session/event")).toHaveLength(0)
     expect(
       connection
         .notifications("session/transient")
@@ -341,7 +239,7 @@ describe("session/subscribe", () => {
   })
 
   it("does not retire another interaction using a permission snapshot", async () => {
-    const { processor } = subscribeSetup({ events: [], detail: { seq: 0 } })
+    const { processor } = subscribeSetup({ detail: { seq: 0 } })
     const request = processor.pendingServerRequests.register({
       sessionId,
       method: "session/elicitation/request",
@@ -350,7 +248,7 @@ describe("session/subscribe", () => {
     await initializeConnection(connection)
     await subscribe(connection)
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
     expect(
       processor.pendingServerRequests.resolve(request.id, { action: "cancel" }),
@@ -358,92 +256,15 @@ describe("session/subscribe", () => {
     await expect(request.response).resolves.toEqual({ action: "cancel" })
   })
 
-  it("sends the snapshot response, replays durable events to the watermark, then marks replay complete", async () => {
-    const events = [
-      makeTurnStarted(sessionId, 1, "turn_1"),
-      makeTurnCompleted(sessionId, 2, "turn_1"),
-      makeTurnStarted(sessionId, 3, "turn_2"),
-      makeTurnStarted(sessionId, 4, "turn_3"),
-      makeTurnStarted(sessionId, 5, "turn_4"),
-    ]
-    const { processor } = subscribeSetup({ events, detail: { seq: 3 } })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-    const framesBeforeSubscribe = connection.frames.length
-
-    await subscribe(connection)
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-
-    const [first, ...rest] = connection.frames.slice(framesBeforeSubscribe)
-    expect(first).toMatchObject({
-      result: { session: { id: sessionId, seq: 3 } },
-    })
-    const eventFrames = rest.filter(
-      (frame): frame is JsonRpcNotification =>
-        "method" in frame && frame.method === "session/event",
-    )
-    // Replay stops at the snapshot watermark: events 4 and 5 stay unread.
-    expect(eventFrames.map((frame) => frame.params)).toEqual([
-      { sessionId, seq: 1, event: events[0] },
-      { sessionId, seq: 2, event: events[1] },
-      { sessionId, seq: 3, event: events[2] },
-    ])
-    const replayComplete = connection.notifications("session/replayComplete")
-    expect(replayComplete.map((frame) => frame.params)).toEqual([
-      { sessionId, seq: 3 },
-    ])
-  })
-
-  it("replays only events after the client cursor", async () => {
-    const events = [
-      makeTurnStarted(sessionId, 1, "turn_1"),
-      makeTurnStarted(sessionId, 2, "turn_2"),
-      makeTurnStarted(sessionId, 3, "turn_3"),
-    ]
-    const { processor } = subscribeSetup({ events, detail: { seq: 3 } })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-
-    await subscribe(connection, 2)
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-
-    expect(
-      connection
-        .notifications("session/event")
-        .map((frame) => (frame.params as { seq: number }).seq),
-    ).toEqual([3])
-  })
-
-  it("pages the durable replay", async () => {
-    const events = Array.from({ length: 600 }, (_, index) =>
-      makeTurnStarted(sessionId, index + 1, `turn_${index + 1}`),
-    )
-    const { processor } = subscribeSetup({ events, detail: { seq: 600 } })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-
-    await subscribe(connection)
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-
-    expect(connection.notifications("session/event")).toHaveLength(600)
-  })
-
   it("delivers live durable and transient events after replay-complete; transient carries no cursor", async () => {
     const { processor, eventHub } = subscribeSetup({
-      events: [],
       detail: { seq: 0, activeTurnId: "turn_1" },
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
     await subscribe(connection)
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
 
     const event = makeTurnStarted(sessionId, 1, "turn_1")
@@ -463,27 +284,26 @@ describe("session/subscribe", () => {
   })
 
   it("delivers live events published during replay after replay-complete in arrival order", async () => {
-    const blockFirstPage = {
+    const capture = {
       gate: deferred<void>(),
       calls: { count: 0 },
     }
-    const events = [makeTurnStarted(sessionId, 1, "turn_1")]
     const { processor, eventHub } = subscribeSetup({
-      events,
       detail: { seq: 1, activeTurnId: "turn_1" },
-      blockFirstPage,
+      capture,
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
-    await subscribe(connection)
-    await waitForCondition(() => blockFirstPage.calls.count === 1)
+    const subscribing = subscribe(connection)
+    await waitForCondition(() => capture.calls.count === 1)
 
     // The delta precedes the durable terminal in arrival order, as the
     // runtime flushes pending deltas before terminal Turn events.
     eventHub.publishTransient(makeAssistantDelta(sessionId, "turn_1", "hel"))
     const bufferedEvent = makeTurnCompleted(sessionId, 2, "turn_1")
     eventHub.publishDurable([bufferedEvent])
-    blockFirstPage.gate.resolve()
+    capture.gate.resolve()
+    await subscribing
     await connection.waitForFrame(
       (frame) =>
         "method" in frame &&
@@ -494,12 +314,12 @@ describe("session/subscribe", () => {
     const methods = connection.frames.map((frame) =>
       "method" in frame ? frame.method : "response",
     )
-    const replayCompleteAt = methods.indexOf("session/replayComplete")
+    const replayCompleteAt = methods.indexOf("session/liveReady")
     expect(replayCompleteAt).toBeGreaterThan(0)
     // The buffered transient and durable event follow replay-complete in
     // their original publish order.
     expect(methods.slice(replayCompleteAt)).toEqual([
-      "session/replayComplete",
+      "session/liveReady",
       "session/transient",
       "session/event",
     ])
@@ -507,28 +327,28 @@ describe("session/subscribe", () => {
       connection
         .notifications("session/event")
         .map((frame) => (frame.params as { seq: number }).seq),
-    ).toEqual([1, 2])
+    ).toEqual([2])
   })
 
   it("drops a stale buffered delta when the snapshot already shows the turn as terminal", async () => {
-    const blockFirstPage = {
+    const capture = {
       gate: deferred<void>(),
       calls: { count: 0 },
     }
     const { processor, eventHub } = subscribeSetup({
-      events: [makeTurnStarted(sessionId, 1, "turn_1")],
       // The snapshot is already terminal: no active turn.
       detail: { seq: 1 },
-      blockFirstPage,
+      capture,
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
-    await subscribe(connection)
-    await waitForCondition(() => blockFirstPage.calls.count === 1)
+    const subscribing = subscribe(connection)
+    await waitForCondition(() => capture.calls.count === 1)
 
     eventHub.publishTransient(makeAssistantDelta(sessionId, "turn_1", "stale"))
     eventHub.publishDurable([makeTurnCompleted(sessionId, 2, "turn_1")])
-    blockFirstPage.gate.resolve()
+    capture.gate.resolve()
+    await subscribing
     await connection.waitForFrame(
       (frame) =>
         "method" in frame &&
@@ -545,7 +365,6 @@ describe("session/subscribe", () => {
   it("replays a still-pending permission after replay-complete", async () => {
     const permission = makePendingPermission({ permissionRequestId: "perm_1" })
     const { processor } = subscribeSetup({
-      events: [],
       detail: { seq: 0, pendingPermissions: [permission] },
     })
     const connection = openTestConnection(processor)
@@ -564,29 +383,29 @@ describe("session/subscribe", () => {
     ).toEqual([{ sessionId, ...permission }])
     expect(
       frameIndex(connection, "session/permissionRequested"),
-    ).toBeGreaterThan(frameIndex(connection, "session/replayComplete"))
+    ).toBeGreaterThan(frameIndex(connection, "session/liveReady"))
   })
 
   it("does not replay a pending permission that already arrived live during replay", async () => {
-    const blockFirstPage = {
+    const capture = {
       gate: deferred<void>(),
       calls: { count: 0 },
     }
     const permission = makePendingPermission({ permissionRequestId: "perm_1" })
     const { processor, eventHub } = subscribeSetup({
-      events: [],
       detail: { seq: 0, pendingPermissions: [permission] },
-      blockFirstPage,
+      capture,
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
-    await subscribe(connection)
-    await waitForCondition(() => blockFirstPage.calls.count === 1)
+    const subscribing = subscribe(connection)
+    await waitForCondition(() => capture.calls.count === 1)
 
     eventHub.publishTransient(
       makePermissionRequested(sessionId, "turn_1", "perm_1"),
     )
-    blockFirstPage.gate.resolve()
+    capture.gate.resolve()
+    await subscribing
     await connection.waitForFrame(
       (frame) => "method" in frame && frame.method === "session/transient",
     )
@@ -680,7 +499,7 @@ describe("session/subscribe", () => {
               throw new Error("Snapshot read failed")
             return errorResult("not_found", "Session unavailable")
           }
-          return okResult({ session: makeSessionDetail(sessionId) })
+          return okResult({ session: makeSessionDetail(sessionId, { seq: 0 }) })
         },
       }),
       notify,
@@ -689,17 +508,15 @@ describe("session/subscribe", () => {
     const first = subscriptions.subscribe({
       connectionId: 1,
       sessionId,
-      after: 0,
     })
     const firstResult = first.catch((error: unknown) => error)
     const replacement = await subscriptions.subscribe({
       connectionId: 1,
       sessionId,
-      after: 0,
     })
     expect(replacement.ok).toBe(true)
     if (!replacement.ok) throw new Error("Expected replacement subscription")
-    await replacement.replay()
+    await replacement.startLiveDelivery()
     firstSnapshot.resolve()
     await firstResult
     expect(closedListeners[0]).toHaveBeenCalledOnce()
@@ -714,128 +531,6 @@ describe("session/subscribe", () => {
     subscriptions.removeConnection(1)
     expect(closedListeners[0]).toHaveBeenCalledOnce()
     expect(closedListeners[1]).toHaveBeenCalledOnce()
-  })
-
-  it.each([
-    "error result",
-    "rejection",
-  ])("terminates a failed replay with a subscription error (%s)", async (failureMode) => {
-    const pageGate = deferred<void>()
-    const reportOperationalFailure = vi.fn()
-    const { processor, eventHub } = createTestProcessor({
-      handlers: createFakeHandlers({
-        readSessionEvents: async () => {
-          await pageGate.promise
-          if (failureMode === "rejection") throw new Error("Replay read failed")
-          return errorResult("internal_error", "Replay read failed")
-        },
-      }),
-      reportOperationalFailure,
-    })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-    await subscribe(connection)
-    eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
-    eventHub.publishTransient(
-      makeAssistantDelta(sessionId, "turn_1", "buffered"),
-    )
-    pageGate.resolve()
-
-    await connection.waitForFrame(
-      (frame) =>
-        "method" in frame && frame.method === "session/subscriptionError",
-    )
-    eventHub.publishDurable([makeTurnCompleted(sessionId, 2, "turn_1")])
-    eventHub.publishTransient(makeAssistantDelta(sessionId, "turn_1", "late"))
-    await flush()
-
-    expect(connection.notifications("session/subscriptionError")).toEqual([
-      {
-        method: "session/subscriptionError",
-        params: { sessionId, message: "Session event replay failed." },
-      },
-    ])
-    expect(connection.notifications("session/replayComplete")).toHaveLength(0)
-    expect(connection.notifications("session/event")).toHaveLength(0)
-    expect(connection.notifications("session/transient")).toHaveLength(0)
-    expect(reportOperationalFailure).toHaveBeenCalledWith(
-      expect.objectContaining({
-        component: "session-subscriptions",
-        operation: "replay",
-        sessionId,
-        cause: expect.objectContaining({ message: "Replay read failed" }),
-      }),
-    )
-  })
-
-  it("keeps a replacement subscription alive when the old replay fails", async () => {
-    const oldPageGate = deferred<void>()
-    let readCount = 0
-    const reportOperationalFailure = vi.fn()
-    const { processor, eventHub } = createTestProcessor({
-      handlers: createFakeHandlers({
-        readSessionEvents: async () => {
-          readCount += 1
-          if (readCount === 1) {
-            await oldPageGate.promise
-            throw new Error("Old replay failed")
-          }
-          return okResult({ events: [] })
-        },
-      }),
-      reportOperationalFailure,
-    })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-    await subscribe(connection)
-    await waitForCondition(() => readCount === 1)
-    await subscribe(connection)
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-    oldPageGate.resolve()
-    await waitForCondition(
-      () => reportOperationalFailure.mock.calls.length === 1,
-    )
-
-    eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/event",
-    )
-    expect(connection.notifications("session/subscriptionError")).toHaveLength(
-      0,
-    )
-    expect(connection.notifications("session/event")).toHaveLength(1)
-  })
-
-  it("does not block same-session methods behind a slow replay", async () => {
-    const blockFirstPage = {
-      gate: deferred<void>(),
-      calls: { count: 0 },
-    }
-    const events = [makeTurnStarted(sessionId, 1, "turn_1")]
-    const { processor } = subscribeSetup({
-      events,
-      detail: { seq: 1 },
-      blockFirstPage,
-    })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-    await subscribe(connection)
-    await waitForCondition(() => blockFirstPage.calls.count === 1)
-
-    // The replay is still blocked on its first page, but it no longer holds
-    // the session queue: a Turn-critical method completes now.
-    const resolved = await connection.sendRequest("session/turn/cancel", {
-      sessionId,
-      turnId: "turn_1",
-    })
-    expect(resolved).toHaveProperty("result")
-
-    blockFirstPage.gate.resolve()
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
   })
 
   it("removes a subscription registered during the closeConnection drain window", async () => {
@@ -918,10 +613,9 @@ describe("session history reset", () => {
     const outcome = await subscriptions.subscribe({
       connectionId: 1,
       sessionId,
-      after: 0,
     })
     if (!outcome.ok) throw new Error("Expected permission subscription")
-    await outcome.replay()
+    await outcome.startLiveDelivery()
     const oldRequest = pendingRequests.pendingForSession(sessionId)[0]
     if (oldRequest === undefined) throw new Error("Expected pending permission")
     subscriptions.removeConnection(1)
@@ -935,143 +629,7 @@ describe("session history reset", () => {
     expect(resolvePermission).not.toHaveBeenCalled()
   })
 
-  it.each([
-    "old page",
-    "old error",
-  ])("closes live and replaying subscribers before new low-sequence history (%s)", async (oldPageResult) => {
-    const eventHub = createSessionEventHub()
-    const pendingRequests = new PendingServerRequests()
-    const oldPage = deferred<void>()
-    const resolvePermission = vi.fn(async () =>
-      okResult({
-        sessionId,
-        turnId: "turn_new",
-        permissionRequestId: "perm_1",
-        behavior: "allow" as const,
-      }),
-    )
-    const notify = vi.fn()
-    const sendRequest = vi.fn()
-    let reset = false
-    let reads = 0
-    const oldEvent = makeTurnStarted(sessionId, 90, "turn_old")
-    const newEvent = makeTurnStarted(sessionId, 1, "turn_new")
-    const subscriptions = createSessionSubscriptions({
-      eventHub,
-      pendingRequests,
-      notify,
-      sendRequest,
-      reportOperationalFailure: () => {},
-      handlers: createFakeHandlers({
-        readSession: async () =>
-          okResult({
-            session: makeSessionDetail(sessionId, {
-              seq: reset ? 1 : 90,
-              activeTurnId: reset ? "turn_new" : "turn_old",
-            }),
-          }),
-        readSessionEvents: async () => {
-          if (++reads === 2) {
-            await oldPage.promise
-            if (oldPageResult === "old error")
-              throw new Error("Old history read failed")
-            return okResult({ events: [oldEvent] })
-          }
-          return okResult({ events: [reset ? newEvent : oldEvent] })
-        },
-        resolvePermission,
-      }),
-    })
-    const live = await subscriptions.subscribe({
-      connectionId: 1,
-      sessionId,
-      after: 0,
-    })
-    if (!live.ok) throw new Error("Expected old live subscription")
-    await live.replay()
-    eventHub.publishTransient(
-      makePermissionRequested(sessionId, "turn_old", "perm_1"),
-    )
-    const oldRequest = pendingRequests.pendingForSession(sessionId)[0]
-    if (oldRequest === undefined) throw new Error("Expected old permission")
-
-    const replaying = await subscriptions.subscribe({
-      connectionId: 2,
-      sessionId,
-      after: 0,
-    })
-    if (!replaying.ok) throw new Error("Expected old replay subscription")
-    const oldReplay = replaying.replay()
-    eventHub.publishTransient(
-      makeAssistantDelta(sessionId, "turn_old", "old buffered display"),
-    )
-    notify.mockClear()
-    sendRequest.mockClear()
-
-    reset = true
-    eventHub.resetSession(sessionId)
-    expect(pendingRequests.size).toBe(0)
-    expect(pendingRequests.resolve(oldRequest.id, { behavior: "allow" })).toBe(
-      false,
-    )
-    expect(notify).not.toHaveBeenCalled()
-    // Reuse the replaying connection: an old page failure must not clean up
-    // this newly installed subscription.
-    const replacement = await subscriptions.subscribe({
-      connectionId: 2,
-      sessionId,
-      after: 0,
-    })
-    if (!replacement.ok) throw new Error("Expected new subscription")
-    expect(replacement.response.session.seq).toBe(1)
-    await replacement.replay()
-    eventHub.publishTransient(
-      makePermissionRequested(sessionId, "turn_new", "perm_1"),
-    )
-    const newRequest = pendingRequests.pendingForSession(sessionId)[0]
-    expect(newRequest).toBeDefined()
-    expect(newRequest?.id).not.toBe(oldRequest?.id)
-    oldPage.resolve()
-    await oldReplay
-    await flush()
-    expect(pendingRequests.size).toBe(1)
-    if (newRequest === undefined) throw new Error("Expected new permission")
-    expect(pendingRequests.resolve(newRequest.id, { behavior: "allow" })).toBe(
-      true,
-    )
-    await flush()
-    expect(resolvePermission).toHaveBeenCalledExactlyOnceWith({
-      sessionId,
-      turnId: "turn_new",
-      permissionRequestId: "perm_1",
-      behavior: "allow",
-    })
-    eventHub.publishDurable([makeTurnCompleted(sessionId, 2, "turn_new")])
-    expect(
-      notify.mock.calls
-        .filter(([, method]) => method === "session/event")
-        .map(([connectionId, , params]) => [connectionId, params.seq]),
-    ).toEqual([
-      [2, 1],
-      [2, 2],
-    ])
-    expect(
-      notify.mock.calls
-        .filter(([, method]) => method === "session/replayComplete")
-        .map(([connectionId, , params]) => [connectionId, params.seq]),
-    ).toEqual([[2, 1]])
-    expect(
-      notify.mock.calls
-        .filter(([, method]) => method === "session/transient")
-        .map(([, , params]) => params),
-    ).toEqual([makePermissionRequested(sessionId, "turn_new", "perm_1")])
-    expect(sendRequest).toHaveBeenCalledTimes(1)
-  })
-
-  it.each([
-    false,
-    true,
-  ])("rejects a snapshot crossing reset without disturbing its replacement (recent: %s)", async (recent) => {
+  it("rejects a snapshot crossing reset without disturbing its replacement", async () => {
     const eventHub = createSessionEventHub()
     const pendingRequests = new PendingServerRequests()
     const snapshotGate = deferred<void>()
@@ -1096,39 +654,29 @@ describe("session history reset", () => {
       sendRequest,
       handlers: createFakeHandlers({
         readSession: async () => okResult({ session: await snapshot() }),
-        readDisplayWindow: async () =>
-          okResult({
-            session: await snapshot(),
-            events: [],
-            historyBefore: 80,
-          }),
         readSessionEvents: async () => okResult({ events: [] }),
       }),
     })
     const initial = await subscriptions.subscribe({
       connectionId: 1,
       sessionId,
-      after: 0,
     })
     if (!initial.ok) throw new Error("Expected initial subscription")
-    await initial.replay()
+    await initial.startLiveDelivery()
     const oldRequest = pendingRequests.pendingForSession(sessionId)[0]
     expect(oldRequest).toBeDefined()
     const oldSnapshot = subscriptions.subscribe({
       connectionId: 2,
       sessionId,
-      after: 0,
-      recent,
     })
     expect(reads).toBe(2)
     eventHub.resetSession(sessionId)
     const replacement = await subscriptions.subscribe({
       connectionId: 2,
       sessionId,
-      after: 0,
     })
     if (!replacement.ok) throw new Error("Expected replacement subscription")
-    await replacement.replay()
+    await replacement.startLiveDelivery()
     const newRequest = pendingRequests.pendingForSession(sessionId)[0]
     expect(newRequest?.id).not.toBe(oldRequest?.id)
     snapshotGate.resolve()
@@ -1152,7 +700,6 @@ describe("session history reset", () => {
 describe("subscription fan-out", () => {
   it("delivers events to every subscribed connection and honors opt-outs", async () => {
     const { processor, eventHub } = subscribeSetup({
-      events: [],
       detail: { seq: 0 },
     })
     const connectionA = openTestConnection(processor)
@@ -1164,10 +711,10 @@ describe("subscription fan-out", () => {
     await subscribe(connectionA)
     await subscribe(connectionB)
     await connectionA.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
     await connectionB.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
 
     eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
@@ -1188,14 +735,13 @@ describe("subscription fan-out", () => {
 
   it("stops delivery after unsubscribe", async () => {
     const { processor, eventHub } = subscribeSetup({
-      events: [],
       detail: { seq: 0 },
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
     await subscribe(connection)
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
 
     const unsubscribed = await connection.sendRequest("session/unsubscribe", {
@@ -1212,7 +758,6 @@ describe("subscription fan-out", () => {
 
   it("removes subscriptions on closeConnection without affecting other connections", async () => {
     const { processor, eventHub } = subscribeSetup({
-      events: [],
       detail: { seq: 0 },
     })
     const connectionA = openTestConnection(processor)
@@ -1222,7 +767,7 @@ describe("subscription fan-out", () => {
     await subscribe(connectionA)
     await subscribe(connectionB)
     await connectionB.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
     const framesBefore = connectionA.frames.length
 
@@ -1297,7 +842,7 @@ describe("session/permission/request", () => {
   async function subscribeAndDrain(connection: TestConnection): Promise<void> {
     await subscribe(connection)
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
   }
 
@@ -1550,7 +1095,7 @@ describe("session/permission/request", () => {
     await initializeConnection(connection)
     await subscribe(connection)
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
     eventHub.publishTransient(
       makePermissionRequested(sessionId, "turn_1", "perm_1"),
@@ -1634,7 +1179,7 @@ describe("session/permission/request", () => {
 
 describe("application event projection", () => {
   it("advances an opaque native record's cursor without sending its payload", async () => {
-    const { processor, eventHub } = subscribeSetup({ events: [] })
+    const { processor, eventHub } = subscribeSetup({})
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
     await subscribe(connection)

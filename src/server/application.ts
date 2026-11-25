@@ -1467,22 +1467,10 @@ export async function createYakitoriApplication(
               broadcastNotification?.(sidebarChangedMethod, {}),
           })
         : undefined
-    // Retain the active-id signal and refresh authoritative sidebar summaries
-    // when a Turn starts or finishes.
-    let previousRunningSessionIds = new Set<string>()
     threadManager.subscribeRunningTurnCount(() => {
-      const runningSessionIds = threadManager.runningSessionIds
-      const running = new Set(runningSessionIds)
       broadcastNotification?.(sessionsActivityMethod, {
-        activeSessionIds: runningSessionIds,
+        activeSessionIds: threadManager.runningSessionIds,
       })
-      for (const sessionId of new Set([
-        ...previousRunningSessionIds,
-        ...running,
-      ]))
-        if (previousRunningSessionIds.has(sessionId) !== running.has(sessionId))
-          broadcastNotification?.(sidebarChangedMethod, { sessionId })
-      previousRunningSessionIds = running
     })
 
     const handlers = createThreadServerHandlers({

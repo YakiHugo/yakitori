@@ -8,6 +8,7 @@ import {
   createAppRpcClient,
   type SessionStreamHandlers,
 } from "../../src/gui/lib/rpc-client.ts"
+import { sessionDisplayEvents } from "../../src/gui/lib/session-turn-history.ts"
 
 type Listener = (event: { data?: string }) => void
 
@@ -68,6 +69,19 @@ async function flushMicrotasks(rounds = 20): Promise<void> {
 }
 
 // Drives the initialize handshake the client starts on socket open.
+async function replyLiveView(socket: FakeWebSocket, id: unknown, seq: number) {
+  const rolloutId = "rollout_1"
+  socket.emitMessage({
+    id,
+    result: {
+      session: { id: "session_1", rolloutId, seq },
+      watermarkSeq: seq,
+      history: { view: "summary", rolloutId, seq, turns: [] },
+    },
+  })
+  await flushMicrotasks()
+}
+
 function completeHandshake(socket: FakeWebSocket | undefined): FakeWebSocket {
   if (socket === undefined) throw new Error("Expected a WebSocket instance.")
   socket.emitOpen()
@@ -185,7 +199,7 @@ describe("app RPC client", () => {
       },
     })
     reconnected.emitMessage({
-      method: "session/replayComplete",
+      method: "session/liveReady",
       params: { sessionId: "background", seq: 5 },
     })
     expect(completed).toHaveBeenCalledOnce()
@@ -312,37 +326,47 @@ describe("app RPC client", () => {
     client.close()
   })
 
-  it("dispatches snapshot, events, transients, and replay-complete to the stream", async () => {
+  it("opens with one RPC and delivers buffered live traffic after the snapshot", async () => {
     const received: string[] = []
-    const snapshot = {
-      session: { id: "session_1", seq: 1 },
-    }
     const handlers: SessionStreamHandlers = {
       onSnapshot: (response) =>
-        received.push(`snapshot:${response.session.id}`),
+        received.push(
+          `snapshot:${[...sessionDisplayEvents(response)].map((event) => event.seq).join(",")}`,
+        ),
       onEvent: (event) => received.push(`event:${event.seq}`),
       onTransient: (event) => received.push(`transient:${event.type}`),
-      onReplayComplete: () => received.push("replayComplete"),
+      onReady: () => received.push("ready"),
     }
     const client = createAppRpcClient({ apiBase: "http://api.test" })
     client.openSessionStream("session_1", 0, handlers)
-    const socket = FakeWebSocket.instances[0]
-    completeHandshake(socket)
+    const socket = completeHandshake(FakeWebSocket.instances[0])
     await flushMicrotasks()
 
     expect(
-      socket
-        ?.sentFrames()
-        .find((frame) => frame.method === "session/subscribe"),
+      socket?.sentFrames().find((frame) => frame.method === "session/open"),
     ).toMatchObject({
-      method: "session/subscribe",
-      params: { sessionId: "session_1", after: 0 },
+      method: "session/open",
+      params: { sessionId: "session_1" },
     })
-    socket?.emitMessage({ id: 1, result: snapshot })
-    await flushMicrotasks()
+    socket.emitMessage({
+      id: 1,
+      result: {
+        session: { id: "session_1", rolloutId: "rollout_1", seq: 7 },
+        watermarkSeq: 7,
+        activeTurn: { turnId: "active", events: [{ seq: 7 }] },
+        history: {
+          rolloutId: "rollout_1",
+          seq: 7,
+          view: "summary",
+          turns: [
+            { turnId: "complete", events: [{ seq: 4 }], activityCount: 0 },
+          ],
+        },
+      },
+    })
     socket?.emitMessage({
       method: "session/event",
-      params: { sessionId: "session_1", seq: 2, event: { seq: 2 } },
+      params: { sessionId: "session_1", seq: 8, event: { seq: 8 } },
     })
     socket?.emitMessage({
       method: "session/transient",
@@ -359,20 +383,21 @@ describe("app RPC client", () => {
         createdAt: "2026-09-05T00:00:00.000Z",
       },
     })
-    socket?.emitMessage({
-      method: "session/replayComplete",
-      params: { sessionId: "session_1", seq: 1 },
-    })
+    expect(received).toEqual([])
     await flushMicrotasks()
 
     // The replayed pending permission surfaces as the same permission.requested
     // transient the live path delivers.
     expect(received).toEqual([
-      "snapshot:session_1",
-      "event:2",
+      "snapshot:4,7",
+      "event:8",
       "transient:assistant.delta",
       "transient:permission.requested",
-      "replayComplete",
+      "ready",
+    ])
+    expect(socket.sentFrames().map(({ method }) => method)).toEqual([
+      "initialize",
+      "session/open",
     ])
     client.close()
   })
@@ -420,29 +445,19 @@ describe("app RPC client", () => {
     client.close()
   })
 
-  it.each([
-    false,
-    true,
-  ])("reconnects with bounded backoff and rebuilds history from zero (recent: %s)", async (recent) => {
+  it("reconnects with bounded backoff and reads the new live watermark", async () => {
     vi.useFakeTimers()
     const snapshots: number[] = []
     const client = createAppRpcClient({ apiBase: "http://api.test" })
-    client.openSessionStream(
-      "session_1",
-      0,
-      {
-        onSnapshot: () => snapshots.push(1),
-        onEvent: () => {},
-        onTransient: () => {},
-        onReplayComplete: () => {},
-      },
-      { recent },
-    )
-    const first = FakeWebSocket.instances[0]
-    completeHandshake(first)
+    client.openSessionStream("session_1", 0, {
+      onSnapshot: () => snapshots.push(1),
+      onEvent: () => {},
+      onTransient: () => {},
+      onReady: () => {},
+    })
+    const first = completeHandshake(FakeWebSocket.instances[0])
     await flushMicrotasks()
-    first?.emitMessage({ id: 1, result: { session: { id: "session_1" } } })
-    await flushMicrotasks()
+    await replyLiveView(first, 1, 1)
     // The stream observes a durable event at seq 5.
     first?.emitMessage({
       method: "session/event",
@@ -457,27 +472,20 @@ describe("app RPC client", () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(FakeWebSocket.instances).toHaveLength(2)
 
-    const second = FakeWebSocket.instances[1]
-    completeHandshake(second)
+    const second = completeHandshake(FakeWebSocket.instances[1])
     await flushMicrotasks()
 
     // A reset could have happened while offline, even beyond the old cursor.
     const resubscribe = second
       ?.sentFrames()
-      .find((frame) => frame.method === "session/subscribe")
+      .find((frame) => frame.method === "session/open")
     expect(resubscribe).toMatchObject({
-      method: "session/subscribe",
+      method: "session/open",
       params: {
         sessionId: "session_1",
-        after: 0,
-        ...(recent ? { recent: true } : {}),
       },
     })
-    second?.emitMessage({
-      id: resubscribe?.id,
-      result: { session: { id: "session_1" } },
-    })
-    await flushMicrotasks()
+    await replyLiveView(second, resubscribe?.id, 6)
     expect(snapshots).toEqual([1, 1])
 
     // The successful reconnect reset the backoff: the next retry waits 250ms
@@ -502,43 +510,32 @@ describe("app RPC client", () => {
       onSnapshot: () => received.push("snapshot"),
       onEvent: () => received.push("event"),
       onTransient: () => received.push("transient"),
-      onReplayComplete: () => received.push("replayComplete"),
+      onReady: () => received.push("ready"),
       onHistoryReset: () => received.push("reset"),
     })
     const socket = completeHandshake(FakeWebSocket.instances[0])
     await flushMicrotasks()
-    socket.emitMessage({
-      id: 1,
-      result: { session: { id: "session_1", seq: 5 } },
-    })
-    await flushMicrotasks()
+    await replyLiveView(socket, 1, 5)
     socket.emitMessage({
       method: "session/historyReset",
       params: { sessionId: "session_1" },
     })
-    expect(received).toEqual(["snapshot", "reset"])
+    expect(received).toEqual(["snapshot", "ready", "reset"])
     await flushMicrotasks()
     const subscriptions = socket
       .sentFrames()
-      .filter((frame) => frame.method === "session/subscribe")
+      .filter((frame) => frame.method === "session/open")
     expect(subscriptions).toHaveLength(2)
     expect(subscriptions[1]).toMatchObject({
-      params: { sessionId: "session_1", after: 0 },
+      params: { sessionId: "session_1" },
     })
-    socket.emitMessage({
-      id: subscriptions[1]?.id,
-      result: { session: { id: "session_1", seq: 2 } },
-    })
-    await flushMicrotasks()
-    socket.emitMessage({
-      method: "session/replayComplete",
-      params: { sessionId: "session_1", seq: 2 },
-    })
+    await replyLiveView(socket, subscriptions[1]?.id, 2)
     expect(received).toEqual([
       "snapshot",
+      "ready",
       "reset",
       "snapshot",
-      "replayComplete",
+      "ready",
     ])
     client.close()
   })
@@ -551,7 +548,7 @@ describe("app RPC client", () => {
       onSnapshot: newSnapshot,
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete: () => {},
+      onReady: () => {},
     }
     client.openSessionStream("session_1", 5, {
       ...handlers,
@@ -569,17 +566,13 @@ describe("app RPC client", () => {
     await flushMicrotasks()
     const subscriptions = socket
       .sentFrames()
-      .filter((frame) => frame.method === "session/subscribe")
+      .filter((frame) => frame.method === "session/open")
     expect(subscriptions).toHaveLength(2)
     expect(subscriptions[1]).toMatchObject({
-      params: { sessionId: "session_1", after: 0 },
+      params: { sessionId: "session_1" },
     })
     expect(oldReset).not.toHaveBeenCalled()
-    socket.emitMessage({
-      id: subscriptions[1]?.id,
-      result: { session: { id: "session_1", seq: 2 } },
-    })
-    await flushMicrotasks()
+    await replyLiveView(socket, subscriptions[1]?.id, 2)
     expect(newSnapshot).toHaveBeenCalledOnce()
     client.close()
   })
@@ -589,14 +582,14 @@ describe("app RPC client", () => {
     "error",
   ] as const)("ignores an old subscribe %s and replay notifications while replacement history is pending", async (oldResponse) => {
     const onSnapshot = vi.fn()
-    const onReplayComplete = vi.fn()
+    const onReady = vi.fn()
     const onError = vi.fn()
     const client = createAppRpcClient({ apiBase: "http://api.test" })
     client.openSessionStream("session_1", 5, {
       onSnapshot,
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete,
+      onReady,
       onError,
     })
     const socket = completeHandshake(FakeWebSocket.instances[0])
@@ -613,7 +606,7 @@ describe("app RPC client", () => {
     )
     await flushMicrotasks()
     socket.emitMessage({
-      method: "session/replayComplete",
+      method: "session/liveReady",
       params: { sessionId: "session_1", seq: 5 },
     })
     socket.emitMessage({
@@ -621,26 +614,60 @@ describe("app RPC client", () => {
       params: { sessionId: "session_1", message: "Old replay failed" },
     })
     expect(onSnapshot).not.toHaveBeenCalled()
-    expect(onReplayComplete).not.toHaveBeenCalled()
+    expect(onReady).not.toHaveBeenCalled()
     expect(onError).not.toHaveBeenCalled()
     const subscription = socket
       .sentFrames()
-      .filter((frame) => frame.method === "session/subscribe")
+      .filter((frame) => frame.method === "session/open")
       .at(-1)
+    await replyLiveView(socket, subscription?.id, 2)
+    expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        session: { id: "session_1", rolloutId: "rollout_1", seq: 2 },
+        completedTurns: [],
+      }),
+    )
+    expect(onReady).toHaveBeenCalledOnce()
+    expect(onError).not.toHaveBeenCalled()
+    client.close()
+  })
+
+  it("drops a pending open and buffered events when history is replaced", async () => {
+    const snapshots: number[] = []
+    const onEvent = vi.fn()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    client.openSessionStream("session_1", 0, {
+      onSnapshot: ({ session }) => snapshots.push(session.seq),
+      onEvent,
+      onTransient: () => {},
+      onReady: () => {},
+    })
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    const oldPage = socket.sentFrames().at(-1)
+    expect(oldPage?.method).toBe("session/open")
     socket.emitMessage({
-      id: subscription?.id,
-      result: { session: { id: "session_1", seq: 2 } },
+      method: "session/event",
+      params: { sessionId: "session_1", seq: 8, event: { seq: 8 } },
+    })
+    socket.emitMessage({
+      method: "session/historyReset",
+      params: { sessionId: "session_1" },
     })
     await flushMicrotasks()
+    const replacement = socket.sentFrames().at(-1)
+    expect(replacement?.method).toBe("session/open")
     socket.emitMessage({
-      method: "session/replayComplete",
-      params: { sessionId: "session_1", seq: 2 },
+      id: oldPage?.id,
+      result: {
+        session: { id: "session_1", rolloutId: "old", seq: 7 },
+        watermarkSeq: 7,
+        history: { view: "summary", rolloutId: "old", seq: 7, turns: [] },
+      },
     })
-    expect(onSnapshot).toHaveBeenCalledExactlyOnceWith({
-      session: { id: "session_1", seq: 2 },
-    })
-    expect(onReplayComplete).toHaveBeenCalledOnce()
-    expect(onError).not.toHaveBeenCalled()
+    await replyLiveView(socket, replacement?.id, 2)
+    expect(snapshots).toEqual([2])
+    expect(onEvent).not.toHaveBeenCalled()
     client.close()
   })
 
@@ -653,13 +680,12 @@ describe("app RPC client", () => {
       onSnapshot,
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete: () => {},
+      onReady: () => {},
       onDisconnected,
     })
     const first = completeHandshake(FakeWebSocket.instances[0])
     await flushMicrotasks()
-    first.emitMessage({ id: 1, result: { session: { id: "session_1" } } })
-    await flushMicrotasks()
+    await replyLiveView(first, 1, 1)
 
     await vi.advanceTimersByTimeAsync(15_000)
     expect(first.sentFrames().at(-1)).toMatchObject({
@@ -675,15 +701,11 @@ describe("app RPC client", () => {
     await flushMicrotasks()
     const subscribe = second
       .sentFrames()
-      .find((frame) => frame.method === "session/subscribe")
+      .find((frame) => frame.method === "session/open")
     expect(subscribe).toMatchObject({
-      params: { sessionId: "session_1", after: 0 },
+      params: { sessionId: "session_1" },
     })
-    second.emitMessage({
-      id: subscribe?.id,
-      result: { session: { id: "session_1" } },
-    })
-    await flushMicrotasks()
+    await replyLiveView(second, subscribe?.id, 1)
     expect(onSnapshot).toHaveBeenCalledTimes(2)
     client.close()
   })
@@ -733,7 +755,7 @@ describe("app RPC client", () => {
       onSnapshot: () => {},
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete: () => {},
+      onReady: () => {},
     })
     const socket = completeHandshake(FakeWebSocket.instances[0])
     await flushMicrotasks()
@@ -757,7 +779,7 @@ describe("app RPC client", () => {
       onSnapshot: () => {},
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete: () => {},
+      onReady: () => {},
       onDisconnected,
     })
     const socket = FakeWebSocket.instances[0]
@@ -775,13 +797,13 @@ describe("app RPC client", () => {
   it("reports a dropped session stream while keeping it available for reconnect", async () => {
     vi.useFakeTimers()
     const onDisconnected = vi.fn()
-    const onReplayComplete = vi.fn()
+    const onReady = vi.fn()
     const client = createAppRpcClient({ apiBase: "http://api.test" })
     client.openSessionStream("session_1", 0, {
       onSnapshot: () => {},
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete,
+      onReady,
       onDisconnected,
     })
     const first = completeHandshake(FakeWebSocket.instances[0])
@@ -797,17 +819,10 @@ describe("app RPC client", () => {
     const second = completeHandshake(FakeWebSocket.instances[1])
     await flushMicrotasks()
     expect(
-      second
-        .sentFrames()
-        .filter((frame) => frame.method === "session/subscribe"),
+      second.sentFrames().filter((frame) => frame.method === "session/open"),
     ).toHaveLength(1)
-    second.emitMessage({ id: 2, result: { session: { id: "session_1" } } })
-    await flushMicrotasks()
-    second.emitMessage({
-      method: "session/replayComplete",
-      params: { sessionId: "session_1", seq: 0 },
-    })
-    expect(onReplayComplete).toHaveBeenCalledOnce()
+    await replyLiveView(second, 2, 0)
+    expect(onReady).toHaveBeenCalledOnce()
     client.close()
   })
 
@@ -818,7 +833,7 @@ describe("app RPC client", () => {
       onSnapshot: () => {},
       onEvent: () => {},
       onTransient: () => {},
-      onReplayComplete: () => {},
+      onReady: () => {},
       onError: (error) => failures.push(error),
     })
     const socket = FakeWebSocket.instances[0]
@@ -840,7 +855,7 @@ describe("app RPC client", () => {
     client.close()
   })
 
-  it("closes a failed replay stream and only subscribes again when explicitly reopened", async () => {
+  it("closes a failed live stream and only subscribes again when explicitly reopened", async () => {
     vi.useFakeTimers()
     const received: string[] = []
     const onError = vi.fn()
@@ -848,21 +863,20 @@ describe("app RPC client", () => {
       onSnapshot: () => received.push("snapshot"),
       onEvent: () => received.push("event"),
       onTransient: () => received.push("transient"),
-      onReplayComplete: () => received.push("replayComplete"),
+      onReady: () => received.push("ready"),
       onError,
     }
     const client = createAppRpcClient({ apiBase: "http://api.test" })
     const failedStream = client.openSessionStream("session_1", 0, handlers)
     const first = completeHandshake(FakeWebSocket.instances[0])
     await flushMicrotasks()
-    first.emitMessage({ id: 1, result: { session: { id: "session_1" } } })
-    await flushMicrotasks()
+    await replyLiveView(first, 1, 1)
 
     const failure = {
       method: "session/subscriptionError",
       params: {
         sessionId: "session_1",
-        message: "Session event replay failed.",
+        message: "Session live delivery could not start.",
       },
     }
     first.emitMessage(failure)
@@ -876,21 +890,19 @@ describe("app RPC client", () => {
       params: { type: "assistant.delta", sessionId: "session_1" },
     })
     first.emitMessage({
-      method: "session/replayComplete",
+      method: "session/liveReady",
       params: { sessionId: "session_1", seq: 1 },
     })
     expect(onError).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         name: "ApiRequestError",
-        message: "Session event replay failed.",
+        message: "Session live delivery could not start.",
       }),
     )
-    expect(received).toEqual(["snapshot"])
+    expect(received).toEqual(["snapshot", "ready"])
     await vi.advanceTimersByTimeAsync(10_000)
     expect(
-      first
-        .sentFrames()
-        .filter((frame) => frame.method === "session/subscribe"),
+      first.sentFrames().filter((frame) => frame.method === "session/open"),
     ).toHaveLength(1)
 
     first.emitClose()
@@ -898,9 +910,7 @@ describe("app RPC client", () => {
     const second = completeHandshake(FakeWebSocket.instances[1])
     await flushMicrotasks()
     expect(
-      second
-        .sentFrames()
-        .filter((frame) => frame.method === "session/subscribe"),
+      second.sentFrames().filter((frame) => frame.method === "session/open"),
     ).toHaveLength(0)
 
     client.openSessionStream("session_1", 0, handlers)
@@ -909,25 +919,17 @@ describe("app RPC client", () => {
     await flushMicrotasks()
     const reopened = second
       .sentFrames()
-      .find((frame) => frame.method === "session/subscribe")
+      .find((frame) => frame.method === "session/open")
     expect(reopened).toMatchObject({
-      params: { sessionId: "session_1", after: 0 },
+      params: { sessionId: "session_1" },
     })
     expect(
       second
         .sentFrames()
         .filter((frame) => frame.method === "session/unsubscribe"),
     ).toHaveLength(0)
-    second.emitMessage({
-      id: reopened?.id,
-      result: { session: { id: "session_1" } },
-    })
-    await flushMicrotasks()
-    second.emitMessage({
-      method: "session/replayComplete",
-      params: { sessionId: "session_1", seq: 0 },
-    })
-    expect(received).toEqual(["snapshot", "snapshot", "replayComplete"])
+    await replyLiveView(second, reopened?.id, 0)
+    expect(received).toEqual(["snapshot", "ready", "snapshot", "ready"])
     client.close()
   })
 })

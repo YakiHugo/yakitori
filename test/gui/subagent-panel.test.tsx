@@ -16,6 +16,7 @@ import {
   type TurnOutcome,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { turnHistoryFixture } from "../fixtures/turn-history.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
 import { inputParts } from "./input-fixtures.ts"
@@ -73,9 +74,11 @@ function mount() {
   stream = opened
   return result
 }
-function start() {
-  stream.emitSnapshot({ session: { ...snapshot, activeTurnId: "turn" } })
-  emit({
+const activeRecord = (seq: number, event: KernelEvent) =>
+  createEventEnvelope({ sessionId: "child", seq, createdAt: at, event })
+
+const activeRecords = () => [
+  activeRecord(1, {
     type: "input.admitted",
     data: {
       requestId: "request",
@@ -83,9 +86,20 @@ function start() {
       role: "user",
       content: inputFixture(inputParts("Review the renderer")),
     },
-  })
-  emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
-  stream.emitReplayComplete()
+  }),
+  activeRecord(2, {
+    type: "turn.started",
+    data: { turnId: "turn", inputId: "input" },
+  }),
+]
+
+function start() {
+  stream.emitSnapshot({ session: { ...snapshot, activeTurnId: "turn" } })
+  for (const record of activeRecords()) {
+    seq = record.seq
+    stream.emitEvent(record)
+  }
+  stream.emitReady()
 }
 function answer(itemId: string, text: string, turnId = "turn") {
   emit({
@@ -115,12 +129,104 @@ it("shows the child agent's initial task without treating it as the user's messa
         content: inputFixture(inputParts("Inspect the child task boundary")),
       },
     })
-    stream.emitReplayComplete()
+    stream.emitReady()
   })
   const task = screen.getByRole("article", { name: "Agent task" })
   expect(task.textContent).toContain("Inspect the child task boundary")
   expect(screen.queryByRole("button", { name: "Edit & resubmit" })).toBeNull()
   expect(useAppStore.getState().promptDraft).toEqual(inputParts("Parent draft"))
+})
+
+it("renders the recent child trace immediately and fetches older history on demand", async () => {
+  const input = (number: number, text: string) =>
+    createEventEnvelope({
+      sessionId: "child",
+      seq: number,
+      event: {
+        type: "input.admitted",
+        data: {
+          requestId: `request_${number}`,
+          inputId: `input_${number}`,
+          role: "user",
+          content: inputFixture(inputParts(text)),
+        },
+      },
+    })
+  rpc.respond = (method) => {
+    if (method === "session/turns/list")
+      return turnHistoryFixture([input(2, "Older task")])
+    throw new Error(`Unexpected request ${method}`)
+  }
+  mount()
+  act(() =>
+    stream.emitSnapshot({
+      session: { ...snapshot, seq: 6 },
+      events: [input(5, "Latest task")],
+      historyBefore: 4,
+    }),
+  )
+  expect(screen.getByText("Latest task")).toBeDefined()
+  expect(screen.queryByText("Older task")).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: /^Earlier$/ }))
+  await screen.findByText("Older task")
+  expect(rpc.requestsFor("session/turns/list")[0]?.params).toEqual({
+    sessionId: "child",
+    rolloutId: snapshot.rolloutId,
+    view: "summary",
+    before: 4,
+  })
+  expect(screen.queryByRole("button", { name: /^Earlier$/ })).toBeNull()
+})
+
+it("loads a completed child Turn's activity only when its disclosure opens", async () => {
+  rpc.respond = (method) => {
+    if (method !== "session/turn/activity")
+      throw new Error(`Unexpected request ${method}`)
+    return {
+      events: [
+        activeRecord(3, {
+          type: "item.completed",
+          data: {
+            turnId: "turn",
+            item: {
+              type: "reasoning",
+              itemId: "deferred",
+              text: "Loaded child tool trace",
+            },
+          },
+        }),
+      ],
+    }
+  }
+  mount()
+  act(() => {
+    stream.emitSnapshot({
+      session: { ...snapshot, seq: 4 },
+      activityTurnIds: ["turn"],
+      events: [
+        ...activeRecords(),
+        activeRecord(4, {
+          type: "turn.completed",
+          data: { turnId: "turn", outcome: { status: "completed" } },
+        }),
+      ],
+    })
+    stream.emitReady()
+  })
+  expect(rpc.requestsFor("session/turn/activity")).toEqual([])
+  fireEvent.click(screen.getByRole("button", { name: /Activity/ }))
+  fireEvent.click(await screen.findByRole("button", { name: "Reasoning" }))
+  expect(await screen.findByText("Loaded child tool trace")).toBeDefined()
+  expect(rpc.requestsFor("session/turn/activity")).toEqual([
+    {
+      method: "session/turn/activity",
+      params: {
+        sessionId: "child",
+        rolloutId: "rollout_child",
+        turnId: "turn",
+      },
+    },
+  ])
 })
 
 beforeEach(() => {
@@ -239,8 +345,24 @@ it("reconciles live output against an idle reconnect snapshot", () => {
   expect(screen.getByText("Partial result")).toBeDefined()
   expect(screen.getByText("Working")).toBeDefined()
   act(() => {
-    stream.emitSnapshot({ session: { ...snapshot, seq } })
-    stream.emitReplayComplete()
+    stream.emitSnapshot({
+      session: { ...snapshot, seq: 3 },
+      events: [
+        ...activeRecords(),
+        activeRecord(3, {
+          type: "item.completed",
+          data: {
+            turnId: "turn",
+            item: {
+              type: "agent_message",
+              itemId: "answer",
+              content: [{ type: "text", text: "Partial result" }],
+            },
+          },
+        }),
+      ],
+    })
+    stream.emitReady()
   })
   expect(screen.getByText("Interrupted")).toBeDefined()
   expect(screen.getByText(/Turn interrupted/)).toBeDefined()
@@ -289,51 +411,50 @@ it("joins completed live answer fragments at the last message while preserving p
 it("replays a continued code block as one completed answer", () => {
   const { container } = mount()
   act(() => {
-    stream.emitSnapshot({ session: { ...snapshot, seq: 5 } })
-    emit({
-      type: "input.admitted",
-      data: {
-        requestId: "request",
-        inputId: "input",
-        role: "user",
-        content: inputFixture(inputParts("Review the renderer")),
-      },
-    })
-    emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
+    const events = activeRecords()
     for (const [itemId, text, title] of [
       ["answer", "```text\nconst x = ", "First source"],
       ["answer_part_1", "1\n```\n\nDone.", "Second source"],
     ] as const) {
-      emit({
-        type: "item.completed",
+      events.push(
+        activeRecord(events.length + 1, {
+          type: "item.completed",
+          data: {
+            turnId: "turn",
+            item: {
+              type: "agent_message",
+              itemId,
+              source: { callId: "call", itemId: "answer" },
+              content: [
+                {
+                  type: "text",
+                  text,
+                  purpose: "final_answer",
+                  annotations: [
+                    {
+                      kind: "url",
+                      url: `https://example.com/${itemId}`,
+                      title,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+      )
+    }
+    events.push(
+      activeRecord(5, {
+        type: "turn.completed",
         data: {
           turnId: "turn",
-          item: {
-            type: "agent_message",
-            itemId,
-            source: { callId: "call", itemId: "answer" },
-            content: [
-              {
-                type: "text",
-                text,
-                purpose: "final_answer",
-                annotations: [
-                  { kind: "url", url: `https://example.com/${itemId}`, title },
-                ],
-              },
-            ],
-          },
+          outcome: { status: "completed", answerItemIds: ["answer"] },
         },
-      })
-    }
-    emit({
-      type: "turn.completed",
-      data: {
-        turnId: "turn",
-        outcome: { status: "completed", answerItemIds: ["answer"] },
-      },
-    })
-    stream.emitReplayComplete()
+      }),
+    )
+    stream.emitSnapshot({ session: { ...snapshot, seq: 5 }, events })
+    stream.emitReady()
   })
   expect(container.querySelector("pre code")?.textContent).toBe("const x = 1\n")
   expect(container.querySelectorAll("pre")).toHaveLength(1)
@@ -667,14 +788,17 @@ it("retries a terminal subscription failure from the last durable cursor", () =>
   const retry = rpc.streams[1]
   expect(retry?.after).toBe(2)
   act(() => {
-    retry?.emitSnapshot({ session: { ...snapshot, seq: 2 } })
-    retry?.emitReplayComplete()
+    retry?.emitSnapshot({
+      session: { ...snapshot, seq: 2 },
+      events: activeRecords(),
+    })
+    retry?.emitReady()
   })
   expect(screen.queryByRole("alert")).toBeNull()
   expect(screen.getByText("Review the renderer")).toBeDefined()
 })
 
-it("suspends a disconnected child trace and resumes after automatic replay", () => {
+it("suspends a disconnected child trace and resumes from the new snapshot", () => {
   mount()
   act(start)
   act(() =>
@@ -688,8 +812,9 @@ it("suspends a disconnected child trace and resumes after automatic replay", () 
   act(() => {
     stream.emitSnapshot({
       session: { ...snapshot, seq: 2, activeTurnId: "turn" },
+      events: activeRecords(),
     })
-    stream.emitReplayComplete()
+    stream.emitReady()
   })
   expect(screen.queryByRole("alert")).toBeNull()
   expect(screen.getByText("Working")).toBeDefined()

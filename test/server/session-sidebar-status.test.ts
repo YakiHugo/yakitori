@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
-import { SqliteThreadSearchProjection } from "../../src/core/sqlite-thread-search-projection.ts"
+import { SqliteThreadHistoryProjection } from "../../src/core/sqlite-thread-history-projection.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
@@ -225,7 +225,7 @@ describe("authoritative session sidebar status", () => {
     vi.spyOn(store, "readDisplayWindow").mockRejectedValue(
       new Error("Status reads must not load display history."),
     )
-    const rebuild = vi.spyOn(SqliteThreadSearchProjection.prototype, "rebuild")
+    const rebuild = vi.spyOn(SqliteThreadHistoryProjection.prototype, "rebuild")
     const { processor } = createTestProcessor({ handlers })
     const connection = openTestConnection(processor)
     try {
@@ -261,7 +261,7 @@ describe("authoritative session sidebar status", () => {
       start("turn_failure"),
       { type: "turn_completed", turnId: "turn_failure", outcome: "failed" },
     ])
-    const rebuild = vi.spyOn(SqliteThreadSearchProjection.prototype, "rebuild")
+    const rebuild = vi.spyOn(SqliteThreadHistoryProjection.prototype, "rebuild")
     for (let iteration = 0; iteration < 2; iteration++) {
       expect(await handlers.listSessions()).toMatchObject({
         ok: true,
@@ -296,11 +296,11 @@ describe("authoritative session sidebar status", () => {
       ],
       {
         beforeReopen(root) {
-          const cache = new DatabaseSync(join(root, "thread-search.sqlite"))
+          const cache = new DatabaseSync(join(root, "thread-history.sqlite"))
           try {
             cache
               .prepare(
-                "UPDATE search_threads SET status_json = ? WHERE thread_id = ?",
+                "UPDATE projection_threads SET status_json = ? WHERE thread_id = ?",
               )
               .run(
                 JSON.stringify({
@@ -332,7 +332,7 @@ describe("authoritative session sidebar status", () => {
       prompt("turn_question"),
       question("ask_first"),
     ])
-    expect(await handlers.readDisplayWindow({ sessionId })).toMatchObject({
+    expect(await handlers.readLiveSession({ sessionId })).toMatchObject({
       ok: true,
       value: { session: { status: "idle" } },
     })
