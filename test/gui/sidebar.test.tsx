@@ -117,7 +117,7 @@ describe("sidebar", () => {
 
     expect(createSession).not.toHaveBeenCalled()
     expect(
-      screen.getByRole("combobox", { name: "New session project" }),
+      screen.getByRole("button", { name: "New session project" }),
     ).toHaveProperty("disabled", false)
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(

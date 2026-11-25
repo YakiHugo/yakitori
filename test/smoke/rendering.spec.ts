@@ -650,11 +650,92 @@ test("workspace tabs and actions stay reachable at the minimum width", async ({
   await expect(selected).toHaveCount(0)
 })
 
+test("new session project picker searches, switches and creates projects without losing the draft", async ({
+  page,
+  renderingApp,
+}, testInfo) => {
+  const project = page.getByRole("button", { name: "New session project" })
+  const picker = page.getByRole("dialog", { name: "Choose a project" })
+  const search = picker.getByRole("textbox", { name: "Search projects" })
+  const composer = page.getByRole("textbox", { name: "Message the Mate" })
+  const heading = page.getByRole("main").getByRole("heading", {
+    name: /^What should we build/,
+  })
+  await expect(project).toHaveText("workspace")
+  await expect(heading).toHaveAccessibleName(
+    "What should we build in workspace?",
+  )
+  await page.screenshot({
+    path: testInfo.outputPath("new-session.png"),
+    animations: "disabled",
+  })
+  await composer.fill("Keep this draft while changing projects.")
+  await project.click()
+  await expect(search).toBeFocused()
+  await expect(
+    picker.getByRole("button", { name: "workspace", pressed: true }),
+  ).toBeVisible()
+  await search.fill("no match")
+  await expect(picker.getByRole("status")).toHaveText("No matching projects")
+  await search.press("Escape")
+  await expect(picker).toBeHidden()
+  await expect(project).toBeFocused()
+
+  await project.press("Enter")
+  await expect(search).toHaveValue("")
+  await picker.getByRole("button", { name: "Work without a project" }).click()
+  await expect(project).toHaveText("No project")
+  await expect(heading).toHaveAccessibleName("What should we build?")
+  await project.click()
+  await search.fill("WORK")
+  await search.press("ArrowDown")
+  const workspace = picker.getByRole("button", { name: "workspace" })
+  await expect(workspace).toBeFocused()
+  await workspace.press("ArrowUp")
+  await expect(search).toBeFocused()
+  await search.press("Enter")
+  await expect(project).toHaveText("workspace")
+
+  const docs = join(renderingApp.workspace, "docs")
+  await mkdir(docs)
+  await project.click()
+  await picker.getByRole("button", { name: "Create project" }).click()
+  const create = page.getByRole("dialog", { name: "Create project" })
+  await create.getByRole("textbox", { name: "Project name" }).fill("Docs")
+  await create.getByRole("textbox", { name: "Project path" }).fill(docs)
+  await create.getByRole("button", { name: "Create project" }).click()
+  await expect(create).toBeHidden()
+  await expect(project).toHaveText("Docs")
+  await expect(heading).toHaveAccessibleName("What should we build in Docs?")
+  await expect(composer).toHaveText("Keep this draft while changing projects.")
+  await expect(composer).toBeFocused()
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  await page.getByRole("combobox", { name: "Appearance" }).click()
+  await page.getByRole("option", { name: "Dark", exact: true }).click()
+  await page.getByRole("button", { name: "Back to app", exact: true }).click()
+  await page.setViewportSize({ width: 700, height: 440 })
+  await project.click()
+  await expect(search).toBeFocused()
+  await expect(
+    picker.getByRole("button", { name: "Docs", pressed: true }),
+  ).toBeInViewport({ ratio: 1 })
+  await expect(
+    picker.getByRole("button", { name: "Work without a project" }),
+  ).toBeInViewport({ ratio: 1 })
+  await page.screenshot({
+    path: testInfo.outputPath("project-picker-narrow.png"),
+    animations: "disabled",
+  })
+  await heading.click()
+  await expect(picker).toBeHidden()
+})
+
 test("new session composer stays centered in its draft and docks after the first input", async ({
   page,
   renderingApp,
 }) => {
-  const project = page.getByRole("combobox", { name: "New session project" })
+  const project = page.getByRole("button", { name: "New session project" })
   await expect(project).toBeEnabled()
   await page.evaluate(() => document.fonts.ready.then(() => undefined))
   const recording = await page

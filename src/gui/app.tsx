@@ -7,6 +7,7 @@ import {
   EngineSessionHeading,
 } from "./components/engine-session.tsx"
 import { HistoryMatchDialog } from "./components/history-match-dialog.tsx"
+import { NewSessionWelcome } from "./components/new-session-welcome.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { GoalBar, GoalEditor } from "./components/session-goal.tsx"
@@ -14,7 +15,6 @@ import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
 import { SidebarNameDialog } from "./components/sidebar-name-dialog.tsx"
 import { Transcript } from "./components/transcript.tsx"
-import { Select } from "./components/ui/select.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useChatInterrupt } from "./hooks/use-chat-interrupt.ts"
@@ -142,7 +142,7 @@ export function App() {
               <div className="flex min-w-0 flex-1 flex-col">
                 <Transcript
                   loading={hydrating}
-                  emptyState={emptySession ? <EmptyState /> : undefined}
+                  emptyState={emptySession ? <NewSessionWelcome /> : undefined}
                 >
                   {hydrating ? null : <ApprovalBar />}
                   {hydrating ? null : <QueuedInputs />}
@@ -275,43 +275,4 @@ function SessionRename() {
       }
     />
   ) : null
-}
-
-function EmptyState() {
-  const projects = useAppStore((state) => state.projects)
-  const currentProject = useAppStore((state) =>
-    state.selectedSession === undefined
-      ? state.currentProject
-      : state.selectedSession.projectId,
-  )
-  const hasSession = useAppStore(
-    (state) => state.selection.sessionId !== undefined,
-  )
-  const project = projects.find((candidate) => candidate.id === currentProject)
-  return (
-    <div className="mx-auto w-full max-w-3xl">
-      <h2 className="mb-3 text-center text-xl font-medium">
-        {project
-          ? `What would you like to build in ${project.name}?`
-          : "What would you like to work on?"}
-      </h2>
-      <div className="mb-7 flex justify-center gap-3">
-        <Select
-          aria-label="New session project"
-          disabled={hasSession}
-          value={currentProject ?? ""}
-          onValueChange={(projectId) =>
-            useAppStore.getState().setNewSessionProject(projectId || undefined)
-          }
-          options={[
-            { value: "", label: "No project" },
-            ...projects.map((entry) => ({
-              value: entry.id,
-              label: entry.name,
-            })),
-          ]}
-        />
-      </div>
-    </div>
-  )
 }

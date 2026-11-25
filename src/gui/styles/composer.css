@@ -12,6 +12,18 @@
 .prompt-editor .ProseMirror[aria-disabled="true"] {
   opacity: 0.5;
 }
+.conversation-surface[data-empty] .conversation-composer {
+  max-width: 42rem;
+}
+.conversation-surface[data-empty] .composer-card {
+  box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
+}
+.conversation-surface[data-empty] .composer-card:focus-within {
+  border-color: var(--input);
+}
+.conversation-surface[data-empty] .prompt-editor .ProseMirror {
+  min-height: 56px;
+}
 .prompt-editor .ProseMirror p {
   margin: 0;
 }

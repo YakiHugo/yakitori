@@ -855,10 +855,13 @@ test("edit and undo replace history in one session across open windows", async (
       .click()
     await expect(
       observer.getByRole("main").getByRole("heading", {
-        name: "What would you like to build in workspace?",
+        name: "What should we build in workspace?",
         exact: true,
       }),
     ).toBeVisible()
+    await expect(
+      observer.getByRole("button", { name: "New session project" }),
+    ).toHaveText("workspace")
   } finally {
     client?.close()
     await observer?.close()
@@ -2047,7 +2050,7 @@ test("window history restores sessions and drafts without creating duplicate con
       env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
     })
     await page.goto(server.url)
-    const project = page.getByRole("combobox", { name: "New session project" })
+    const project = page.getByRole("button", { name: "New session project" })
     await expect(project).not.toHaveText("No project")
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(project).toBeEnabled()
