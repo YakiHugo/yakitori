@@ -3,6 +3,8 @@ import type {
   NotificationDeliveryResult,
   NotificationPermissionState,
 } from "../desktop/completion-notification-types.ts"
+import { translators } from "./i18n/messages.ts"
+import { getLocale } from "./i18n/use-translation.ts"
 import type { AppRpcClient } from "./lib/rpc-client.ts"
 import { usePreferencesStore } from "./store/preferences-store.ts"
 
@@ -29,10 +31,11 @@ export function startCompletionNotifications(
     const { notificationMode, notificationSound } =
       usePreferencesStore.getState()
     if (notificationMode === "off") return
+    const t = translators[getLocale()]
     void showNotification(
       {
-        title: "Yakitori — task complete",
-        body: completion.title?.trim() || "Your task has finished.",
+        title: t("Yakitori — task complete"),
+        body: completion.title?.trim() || t("Your task has finished."),
         mode: notificationMode,
         sound: notificationSound,
       },
@@ -63,9 +66,10 @@ export async function sendTestNotification(): Promise<NotificationDeliveryResult
     const permission = await requestNotificationPermission()
     if (permission === "unsupported") return "unsupported"
     if (permission !== "granted") return "denied"
+    const t = translators[getLocale()]
     return showNotification({
-      title: "Yakitori — test notification",
-      body: "You'll be notified when a task finishes.",
+      title: t("Yakitori — test notification"),
+      body: t("You'll be notified when a task finishes."),
       mode: "always",
       sound: usePreferencesStore.getState().notificationSound,
     })

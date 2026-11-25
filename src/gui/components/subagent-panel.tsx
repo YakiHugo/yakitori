@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ArrowDown, ArrowLeft, ChevronRight } from "lucide-react"
 import {
   useCallback,
@@ -63,6 +64,7 @@ function ChildTrace({
   onBack,
   onOpenAgent,
 }: SubagentPanelProps) {
+  const { t } = useTranslation()
   const [execution, setExecution] = useState(createExecutionViewState)
   const [session, setSession] = useState<ApiSessionDetail>()
   const [loading, setLoading] = useState(true)
@@ -172,28 +174,28 @@ function ChildTrace({
         )
       : undefined
   const status = error
-    ? "Unavailable"
+    ? t("Unavailable")
     : loading
-      ? "Loading trace"
+      ? t("Loading trace")
       : pending.length > 0
-        ? "Awaiting approval"
+        ? t("Awaiting approval")
         : view.activeTurnId
           ? view.activeRetry
-            ? "Retrying"
-            : "Working"
+            ? t("Retrying")
+            : t("Working")
           : latestTerminal?.kind === "turn_terminal"
             ? latestTerminal.state === "failed"
-              ? "Failed"
+              ? t("Failed")
               : latestTerminal.state === "cancelled"
-                ? "Cancelled"
+                ? t("Cancelled")
                 : latestTerminal.state === "truncated"
                   ? "Completed · truncated"
                   : latestTerminal.state === "refused"
                     ? "Completed · refused"
-                    : "Interrupted"
+                    : t("Interrupted")
             : Object.values(view.turnTimings).some((turn) => turn.completedAt)
-              ? "Completed"
-              : "Idle"
+              ? t("Completed")
+              : t("Idle")
   const blocks = useMemo(() => {
     const assistants = new Map<
       string,
@@ -284,13 +286,13 @@ function ChildTrace({
   )
 
   return (
-    <section className="subagent-panel" aria-label="Child agent execution">
+    <section className="subagent-panel" aria-label={t("Child agent execution")}>
       <header className="subagent-panel-header">
         <button
           type="button"
           onClick={onBack}
           className="subagent-back"
-          aria-label="Back to agents"
+          aria-label={t("Back to agents")}
         >
           <ArrowLeft size={15} />
         </button>
@@ -313,7 +315,9 @@ function ChildTrace({
           <div ref={scroll.contentRef} className="subagent-trace">
             {view.entries.length === 0 ? (
               <p className="subagent-empty">
-                {loading ? "Loading child execution…" : "No execution yet."}
+                {loading
+                  ? t("Loading child execution…")
+                  : t("No execution yet.")}
               </p>
             ) : (
               blocks.map((block) =>
@@ -321,7 +325,7 @@ function ChildTrace({
                   <Collapsible key={block.key} className="subagent-activity">
                     <CollapsibleTrigger className="subagent-activity-trigger">
                       <ChevronRight size={14} />
-                      Activity
+                      {t("Activity")}
                       <span>
                         {block.entries.length}{" "}
                         {block.entries.length === 1 ? "step" : "steps"}
@@ -330,7 +334,7 @@ function ChildTrace({
                     <CollapsibleContent className="subagent-activity-content">
                       <ol
                         className="agent-timeline"
-                        aria-label="Subagent activity"
+                        aria-label={t("Subagent activity")}
                       >
                         {block.entries.map((entry) => (
                           <li
@@ -352,8 +356,12 @@ function ChildTrace({
             {view.activeRetry ? (
               <p role="status" className="subagent-notice">
                 {view.activeRetry.maxAttempts === undefined
-                  ? "Waiting for network. "
-                  : `Retrying · attempt ${view.activeRetry.nextAttempt} of ${view.activeRetry.maxAttempts}. `}
+                  ? t("Waiting for network.")
+                  : t(
+                      "Retrying · attempt {0} of {1}.",
+                      view.activeRetry.nextAttempt,
+                      view.activeRetry.maxAttempts,
+                    )}
                 {view.activeRetry.message}
               </p>
             ) : null}
@@ -363,11 +371,11 @@ function ChildTrace({
           <button
             type="button"
             className="subagent-jump"
-            aria-label="Jump to latest child output"
+            aria-label={t("Jump to latest child output")}
             onClick={scroll.jumpToBottom}
           >
             <ArrowDown size={15} />
-            Latest
+            {t("Latest")}
           </button>
         ) : null}
       </div>
@@ -378,7 +386,7 @@ function ChildTrace({
             type="button"
             onClick={() => setAttempt((value) => value + 1)}
           >
-            Retry
+            {t("Retry")}
           </button>
         </div>
       ) : null}
@@ -440,6 +448,7 @@ function TraceEntry({
   workspaceRoot: string | undefined
   onOpenAgent(sessionId: string): void
 }>) {
+  const { t } = useTranslation()
   const [openError, setOpenError] = useState<string>()
   switch (entry.kind) {
     case "agent_input":
@@ -447,7 +456,7 @@ function TraceEntry({
     case "user_input":
       return (
         <article className="subagent-task">
-          <h3>Task</h3>
+          <h3>{t("Task")}</h3>
           {inputDisplayParts(entry.content).map((part, index) =>
             part.type === "text" ? (
               <p // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this input ID.
@@ -479,7 +488,7 @@ function TraceEntry({
                     setOpenError(
                       error instanceof Error
                         ? error.message
-                        : "Could not open image",
+                        : t("Could not open image"),
                     ),
                   )
                 }}

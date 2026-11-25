@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Check } from "lucide-react"
 import { type FormEvent, useEffect, useRef, useState } from "react"
 import type {
@@ -56,6 +57,7 @@ export function ProviderEditor({
   onRemove(): void
   onAddAnother?(): void
 }>) {
+  const { t } = useTranslation()
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [openError, setOpenError] = useState<string>()
   const [modelsOpen, setModelsOpen] = useState(false)
@@ -98,11 +100,13 @@ export function ProviderEditor({
       ? preset.models
       : []
   const modelLoadHint = !draft.configuration.baseURL.trim()
-    ? "Enter the API base URL to discover this account's models."
+    ? t("Enter the API base URL to discover this account's models.")
     : authentication === "stored" && !canLoadModels
-      ? "Models will be discovered automatically after you enter an API key."
+      ? t("Models will be discovered automatically after you enter an API key.")
       : authentication === "environment" && !canLoadModels
-        ? "Models will be discovered automatically after you choose an environment variable."
+        ? t(
+            "Models will be discovered automatically after you choose an environment variable.",
+          )
         : undefined
   useEffect(() => {
     if (
@@ -158,7 +162,7 @@ export function ProviderEditor({
       title={
         draft.existing
           ? draft.configuration.name
-          : (preset?.name ?? "Custom provider")
+          : (preset?.name ?? t("Custom provider"))
       }
       className="provider-editor"
       dismissible={!pending || fetchingModels}
@@ -168,10 +172,10 @@ export function ProviderEditor({
         <ProviderLogo preset={draft.configuration.preset} />
         <p>
           {draft.existing
-            ? "Manage this account and its available models."
+            ? t("Manage this account and its available models.")
             : custom
-              ? "Connect an OpenAI, Anthropic or Gemini compatible API."
-              : "Add the API key for this account."}
+              ? t("Connect an OpenAI, Anthropic or Gemini compatible API.")
+              : t("Add the API key for this account.")}
         </p>
         {preset ? (
           <a
@@ -188,17 +192,17 @@ export function ProviderEditor({
                 setOpenError(
                   cause instanceof Error
                     ? cause.message
-                    : "Could not open API documentation.",
+                    : t("Could not open API documentation."),
                 ),
               )
             }}
           >
-            API docs ↗
+            {t("API docs ↗")}
           </a>
         ) : null}
       </div>
       <form
-        aria-label={draft.existing ? "Edit provider" : "New provider"}
+        aria-label={draft.existing ? t("Edit provider") : t("New provider")}
         onSubmit={(event) => {
           if (draft.existing) event.preventDefault()
           else onSubmit(event)
@@ -208,18 +212,15 @@ export function ProviderEditor({
           <FieldGroup>
             {draft.configuration.wireApi === "bedrock_converse" ? (
               <p className="provider-field-hint">
-                Nova 2 Lite only: static catalog, streamed responses, reasoning
-                off. Requires a Bedrock bearer API key for us-east-1 (not an AWS
-                access key) with bedrock:InvokeModelWithResponseStream
-                permission. No IAM/SigV4 or automatic key refresh. The US
-                inference profile can process data across US regions. Keys
-                expire; refresh them yourself. Requests can take up to 60
-                minutes and are not automatically retried. Catalog loading does
-                not verify the key.
+                {t(
+                  "Nova 2 Lite only: static catalog, streamed responses, reasoning off. Requires a Bedrock bearer API key for us-east-1 (not an AWS access key) with bedrock:InvokeModelWithResponseStream permission. No IAM/SigV4 or automatic key refresh. The US inference profile can process data across US regions. Keys expire; refresh them yourself. Requests can take up to 60 minutes and are not automatically retried. Catalog loading does not verify the key.",
+                )}
               </p>
             ) : null}
             <Field>
-              <FieldLabel htmlFor="provider-name">Account name</FieldLabel>
+              <FieldLabel htmlFor="provider-name">
+                {t("Account name")}
+              </FieldLabel>
               <Input
                 id="provider-name"
                 value={draft.configuration.name}
@@ -229,7 +230,7 @@ export function ProviderEditor({
 
             <Field>
               <FieldLabel htmlFor="provider-authentication">
-                Authentication
+                {t("Authentication")}
               </FieldLabel>
               <Select<NonNullable<ProviderConfiguration["authentication"]>>
                 id="provider-authentication"
@@ -241,13 +242,13 @@ export function ProviderEditor({
                     ? [
                         {
                           value: draft.configuration.authentication,
-                          label: "External CLI account",
+                          label: t("External CLI account"),
                         },
                       ]
                     : []),
-                  { value: "stored", label: "Saved API key" },
-                  { value: "environment", label: "Environment variable" },
-                  { value: "none", label: "No authentication" },
+                  { value: "stored", label: t("Saved API key") },
+                  { value: "environment", label: t("Environment variable") },
+                  { value: "none", label: t("No authentication") },
                 ]}
               />
             </Field>
@@ -259,7 +260,9 @@ export function ProviderEditor({
             ) : null}
             {(draft.configuration.authentication ?? "stored") === "stored" ? (
               <Field>
-                <FieldLabel htmlFor="provider-api-key">API key</FieldLabel>
+                <FieldLabel htmlFor="provider-api-key">
+                  {t("API key")}
+                </FieldLabel>
                 <Input
                   id="provider-api-key"
                   type="password"
@@ -268,8 +271,8 @@ export function ProviderEditor({
                   value={draft.apiKey}
                   placeholder={
                     draft.existing
-                      ? "Leave blank to keep the saved key"
-                      : "Paste your API key"
+                      ? t("Leave blank to keep the saved key")
+                      : t("Paste your API key")
                   }
                   onChange={(event) => {
                     const next = { ...draft, apiKey: event.target.value }
@@ -279,14 +282,18 @@ export function ProviderEditor({
                 />
                 <p className="provider-field-hint">
                   {draft.existing
-                    ? "Saved keys are never displayed. Paste a new key to replace it."
-                    : "Stored on this machine, separately from your configuration."}
+                    ? t(
+                        "Saved keys are never displayed. Paste a new key to replace it.",
+                      )
+                    : t(
+                        "Stored on this machine, separately from your configuration.",
+                      )}
                 </p>
               </Field>
             ) : draft.configuration.authentication === "environment" ? (
               <Field>
                 <FieldLabel htmlFor="provider-env-key">
-                  Environment variable
+                  {t("Environment variable")}
                 </FieldLabel>
                 <Input
                   id="provider-env-key"
@@ -295,19 +302,21 @@ export function ProviderEditor({
                   onChange={(event) => update({ envKey: event.target.value })}
                 />
                 <p className="provider-field-hint">
-                  This account uses only this variable. Missing credentials
-                  require reconnecting.
+                  {t(
+                    "This account uses only this variable. Missing credentials require reconnecting.",
+                  )}
                 </p>
               </Field>
             ) : draft.configuration.authentication === "codex_cli" ||
               draft.configuration.authentication === "grok_cli" ? (
               <p className="provider-field-hint">
-                Authentication is bound to this CLI account. Reconnect it if the
-                CLI changes accounts.
+                {t(
+                  "Authentication is bound to this CLI account. Reconnect it if the CLI changes accounts.",
+                )}
               </p>
             ) : (
               <p className="provider-field-hint">
-                No API key needed. Start the local server, then connect.
+                {t("No API key needed. Start the local server, then connect.")}
               </p>
             )}
             {!draft.existing ? (
@@ -315,16 +324,17 @@ export function ProviderEditor({
                 className="provider-model-selection"
                 onToggle={(event) => setModelsOpen(event.currentTarget.open)}
               >
-                <summary>Model defaults (optional)</summary>
+                <summary>{t("Model defaults (optional)")}</summary>
                 <p className="provider-field-hint">
-                  Connect to discover the models available to this account.
-                  Model defaults are optional; you can also manage them on the
-                  account's details page.
+                  {t(
+                    "Connect to discover the models available to this account. Model defaults are optional; you can also manage them on the account's details page.",
+                  )}
                 </p>
                 {serviceDefaults.length > 0 ? (
                   <p className="provider-field-hint">
-                    Service defaults shown below. Account access has not been
-                    checked.
+                    {t(
+                      "Service defaults shown below. Account access has not been checked.",
+                    )}
                   </p>
                 ) : null}
                 {error && canLoadModels && accountModels === undefined ? (
@@ -335,7 +345,7 @@ export function ProviderEditor({
                     disabled={pending || !canLoadModels}
                     onClick={onFetchModels}
                   >
-                    Retry models
+                    {t("Retry models")}
                   </Button>
                 ) : null}
                 {modelLoadHint ? (
@@ -357,7 +367,7 @@ export function ProviderEditor({
               </details>
             ) : null}
             <details className="provider-advanced">
-              <summary>Advanced settings</summary>
+              <summary>{t("Advanced settings")}</summary>
               <FieldGroup>
                 {!custom && !(draft.configuration.authentication === "none") ? (
                   <>
@@ -388,12 +398,12 @@ export function ProviderEditor({
                           update({ requestWarmup: event.target.checked })
                         }
                       />
-                      Prepare the next request while tools run
+                      {t("Prepare the next request while tools run")}
                     </label>
                     <p className="provider-field-hint">
-                      Optional OpenAI WebSocket warmup. Sends one non-generating
-                      request per turn and may incur API usage. Reported tokens
-                      are included in Usage. Does not save responses.
+                      {t(
+                        "Optional OpenAI WebSocket warmup. Sends one non-generating request per turn and may incur API usage. Reported tokens are included in Usage. Does not save responses.",
+                      )}
                     </p>
                   </Field>
                 ) : null}
@@ -406,7 +416,7 @@ export function ProviderEditor({
                         update({ enabled: event.target.checked })
                       }
                     />
-                    Enable this account
+                    {t("Enable this account")}
                   </label>
                 ) : null}
               </FieldGroup>
@@ -442,17 +452,20 @@ export function ProviderEditor({
               else onTest()
             }}
           >
-            {testing ? "Testing…" : "Test connection"}
+            {testing ? t("Testing…") : t("Test connection")}
           </Button>
           <p className="provider-field-hint">
-            Sends a small request to the first selected model; may incur API
-            charges.
+            {t(
+              "Sends a small request to the first selected model; may incur API charges.",
+            )}
           </p>
         </div>
         {confirmRemove ? (
           <div className="provider-remove-confirm">
             <p>
-              Remove this connection? Its models will no longer be available.
+              {t(
+                "Remove this connection? Its models will no longer be available.",
+              )}
             </p>
             <Button
               type="button"
@@ -461,7 +474,7 @@ export function ProviderEditor({
               disabled={pending}
               onClick={() => setConfirmRemove(false)}
             >
-              Keep connection
+              {t("Keep connection")}
             </Button>
             <Button
               type="button"
@@ -475,7 +488,7 @@ export function ProviderEditor({
                 })
               }}
             >
-              Remove
+              {t("Remove")}
             </Button>
           </div>
         ) : (
@@ -489,7 +502,7 @@ export function ProviderEditor({
                   disabled={pending}
                   onClick={() => setConfirmRemove(true)}
                 >
-                  Remove provider
+                  {t("Remove provider")}
                 </Button>
               ) : null}
               {onAddAnother ? (
@@ -500,7 +513,7 @@ export function ProviderEditor({
                   disabled={pending}
                   onClick={onAddAnother}
                 >
-                  Add another
+                  {t("Add another")}
                 </Button>
               ) : null}
             </div>
@@ -512,13 +525,13 @@ export function ProviderEditor({
                 disabled={pending && !fetchingModels}
                 onClick={onClose}
               >
-                {draft.existing ? "Done" : "Cancel"}
+                {draft.existing ? t("Done") : t("Cancel")}
               </Button>
               {!draft.existing ? (
                 <Button type="submit" size="sm" disabled={pending}>
                   {pending && !testing && !fetchingModels
-                    ? "Connecting…"
-                    : "Add account"}
+                    ? t("Connecting…")
+                    : t("Add account")}
                 </Button>
               ) : null}
             </div>
@@ -533,7 +546,7 @@ export function ProviderEditor({
             variant="ghost"
             onClick={() => void writer.flush()}
           >
-            Retry changes
+            {t("Retry changes")}
           </Button>
         </div>
       ) : null}
@@ -548,9 +561,10 @@ function ProtocolField({
   value: ProviderConfiguration["wireApi"]
   onChange(value: ProviderConfiguration["wireApi"]): void
 }>) {
+  const { t } = useTranslation()
   return (
     <Field>
-      <FieldLabel htmlFor="provider-protocol">API protocol</FieldLabel>
+      <FieldLabel htmlFor="provider-protocol">{t("API protocol")}</FieldLabel>
       <Select<ProviderConfiguration["wireApi"]>
         id="provider-protocol"
         value={value}
@@ -564,7 +578,7 @@ function ProtocolField({
           { value: "anthropic_messages", label: "Anthropic Messages" },
           {
             value: "bedrock_converse",
-            label: "Bedrock Converse (Nova API key)",
+            label: t("Bedrock Converse (Nova API key)"),
           },
           { value: "gemini_generate_content", label: "Gemini GenerateContent" },
           { value: "gemini_interactions", label: "Gemini Interactions" },
@@ -578,9 +592,10 @@ function EndpointField({
   value,
   onChange,
 }: Readonly<{ value: string; onChange(value: string): void }>) {
+  const { t } = useTranslation()
   return (
     <Field>
-      <FieldLabel htmlFor="provider-url">API base URL</FieldLabel>
+      <FieldLabel htmlFor="provider-url">{t("API base URL")}</FieldLabel>
       <Input
         id="provider-url"
         type="url"

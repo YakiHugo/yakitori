@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ArrowDown } from "lucide-react"
 import {
   type ReactNode,
@@ -50,6 +51,7 @@ export function Transcript({
   emptyState?: ReactNode
   loading?: boolean
 }>) {
+  const { t } = useTranslation()
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const historyRevision = useAppStore((state) =>
@@ -467,11 +469,11 @@ export function Transcript({
                 role="status"
                 className="py-12 text-center text-sm text-muted-foreground"
               >
-                Loading conversation…
+                {t("Loading conversation…")}
               </p>
             ) : view.entries.length === 0 && view.activeTurnId === undefined ? (
               <p className="py-12 text-center text-sm text-muted-foreground">
-                Conversation will appear here
+                {t("Conversation will appear here")}
               </p>
             ) : (
               <ConversationMessages
@@ -500,7 +502,7 @@ export function Transcript({
         {
           <button
             type="button"
-            aria-label="Jump to latest output"
+            aria-label={t("Jump to latest output")}
             onClick={scroll.jumpToBottom}
             data-visible={!scroll.atBottom}
             tabIndex={scroll.atBottom ? -1 : 0}

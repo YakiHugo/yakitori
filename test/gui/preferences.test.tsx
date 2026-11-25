@@ -15,6 +15,7 @@ beforeEach(() => {
   localStorage.clear()
   usePreferencesStore.setState(defaultPreferences)
   document.documentElement.classList.remove("dark")
+  vi.spyOn(navigator, "languages", "get").mockReturnValue(["en-US"])
 })
 
 afterEach(() => {
@@ -22,18 +23,21 @@ afterEach(() => {
   usePreferencesStore.setState(defaultPreferences)
   localStorage.clear()
   document.documentElement.classList.remove("dark")
+  document.documentElement.lang = "en"
 })
 
 describe("saved preferences", () => {
   it("persists partial updates and reloads them independently of current state", () => {
     usePreferencesStore.getState().updatePreferences({ appearance: "dark" })
     usePreferencesStore.getState().updatePreferences({
+      language: "zh-CN",
       sendShortcut: "mod-enter",
       notificationMode: "always",
       notificationSound: false,
     })
 
     const saved = {
+      language: "zh-CN",
       appearance: "dark",
       sendShortcut: "mod-enter",
       notificationMode: "always",
@@ -55,6 +59,7 @@ describe("saved preferences", () => {
     if (saved !== null) localStorage.setItem("yakitori.preferences", saved)
 
     expect(readPreferences()).toEqual({
+      language: "system",
       appearance: "light",
       sendShortcut: "enter",
       notificationMode: "unfocused",
@@ -66,6 +71,7 @@ describe("saved preferences", () => {
     localStorage.setItem(
       "yakitori.preferences",
       JSON.stringify({
+        language: "fr",
         appearance: "system",
         sendShortcut: "space",
         notificationMode: "off",
@@ -74,6 +80,7 @@ describe("saved preferences", () => {
       }),
     )
     expect(readPreferences()).toEqual({
+      language: "system",
       appearance: "system",
       sendShortcut: "enter",
       notificationMode: "off",
@@ -90,6 +97,7 @@ describe("saved preferences", () => {
       }),
     )
     expect(readPreferences()).toEqual({
+      language: "system",
       appearance: "light",
       sendShortcut: "mod-enter",
       notificationMode: "unfocused",
@@ -108,6 +116,39 @@ describe("saved preferences", () => {
     ).toThrow("Storage full")
     expect(usePreferencesStore.getState().appearance).toBe("dark")
     expect(readPreferences().appearance).toBe("dark")
+  })
+})
+
+describe("interface language", () => {
+  it("follows changes to supported system languages until the user overrides it", () => {
+    const languages = vi.spyOn(navigator, "languages", "get")
+    languages.mockReturnValue(["fr-FR", "zh-Hans-CN", "en-US"])
+    useAppStore.setState({ settingsSection: "general" })
+    render(
+      <>
+        <PreferencesEffects />
+        <SettingsPage />
+      </>,
+    )
+
+    expect(screen.getByRole("region", { name: "通用设置" })).toBeDefined()
+    expect(document.documentElement.lang).toBe("zh-CN")
+
+    act(() => {
+      languages.mockReturnValue(["zh-TW", "en-US"])
+      window.dispatchEvent(new Event("languagechange"))
+    })
+    expect(
+      screen.getByRole("region", { name: "General settings" }),
+    ).toBeDefined()
+    expect(document.documentElement.lang).toBe("en")
+
+    act(() =>
+      usePreferencesStore.getState().updatePreferences({ language: "zh-CN" }),
+    )
+    window.dispatchEvent(new Event("languagechange"))
+    expect(screen.getByRole("region", { name: "通用设置" })).toBeDefined()
+    expect(document.documentElement.lang).toBe("zh-CN")
   })
 })
 
@@ -199,6 +240,7 @@ describe("settings page", () => {
     await user.click(screen.getByRole("switch", { name: "Notification sound" }))
 
     expect(readPreferences()).toEqual({
+      language: "system",
       appearance: "system",
       sendShortcut: "mod-enter",
       notificationMode: "always",

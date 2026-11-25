@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ArrowRight } from "lucide-react"
 import type {
   GitStatusResponse,
@@ -11,11 +12,12 @@ export function ChangeStats({
 }: Readonly<{
   stats?: WorkspaceGitStats | undefined
 }>) {
+  const { t } = useTranslation()
   if (!stats) return null
   return (
     <span className="workspace-change-stats">
       {stats.binary ? (
-        <span className="workspace-change-binary">Binary</span>
+        <span className="workspace-change-binary">{t("Binary")}</span>
       ) : null}
       {!stats.binary || stats.additions > 0 || stats.deletions > 0 ? (
         <>
@@ -31,6 +33,7 @@ export function ChangeFileLabel({
   entry,
   staged,
 }: Readonly<{ entry: WorkspaceGitEntry; staged?: boolean }>) {
+  const { t } = useTranslation()
   const slash = entry.path.lastIndexOf("/")
   const filename = entry.path.slice(slash + 1)
   const directory = slash < 0 ? undefined : entry.path.slice(0, slash)
@@ -45,16 +48,16 @@ export function ChangeFileLabel({
   const label =
     (
       {
-        "?": "Untracked",
-        A: "Added",
-        M: "Modified",
-        D: "Deleted",
-        R: "Renamed",
-        C: "Copied",
-        U: "Unmerged",
-        T: "Type changed",
+        "?": t("Untracked"),
+        A: t("Added"),
+        M: t("Modified"),
+        D: t("Deleted"),
+        R: t("Renamed"),
+        C: t("Copied"),
+        U: t("Unmerged"),
+        T: t("Type changed"),
       } as Record<string, string>
-    )[code] ?? "Changed"
+    )[code] ?? t("Changed")
   return (
     <span className="workspace-change-file-label">
       <span className="workspace-change-filename">{filename}</span>
@@ -81,10 +84,11 @@ export function WorkspaceChangeSummary({
   status: GitStatusResponse
   onReview(path?: string, staged?: boolean): void
 }>) {
+  const { t } = useTranslation()
   if (!status.repository)
     return (
       <p className="workspace-change-summary-empty">
-        This workspace is not a Git repository.
+        {t("This workspace is not a Git repository.")}
       </p>
     )
   const files = status.entries.map((entry) => ({
@@ -122,13 +126,15 @@ export function WorkspaceChangeSummary({
           <span>
             {files.length} changed {files.length === 1 ? "file" : "files"}
           </span>
-          <span title="Staged + unstaged line changes">
+          <span title={t("Staged + unstaged line changes")}>
             <ChangeStats stats={totals} />
           </span>
         </div>
       ) : null}
       {status.entries.length === 0 ? (
-        <p className="workspace-change-summary-empty">Working tree clean</p>
+        <p className="workspace-change-summary-empty">
+          {t("Working tree clean")}
+        </p>
       ) : (
         <ul className="workspace-change-summary-files">
           {files.slice(0, 5).map(({ entry, stats }) => {
@@ -149,13 +155,13 @@ export function WorkspaceChangeSummary({
                   <span
                     title={
                       entry.stagedStats && entry.unstagedStats
-                        ? "Staged + unstaged line changes"
+                        ? t("Staged + unstaged line changes")
                         : undefined
                     }
                   >
                     {entry.stagedStats && entry.unstagedStats ? (
                       <span className="sr-only">
-                        Staged and unstaged totals:{" "}
+                        {t("Staged and unstaged totals:")}{" "}
                       </span>
                     ) : null}
                     <ChangeStats stats={stats} />
@@ -174,7 +180,7 @@ export function WorkspaceChangeSummary({
         <span>
           {status.entries.length > 0
             ? `Review all ${status.entries.length} ${status.entries.length === 1 ? "file" : "files"}`
-            : "View changes"}
+            : t("View changes")}
         </span>
         <ArrowRight size={13} aria-hidden="true" />
       </button>

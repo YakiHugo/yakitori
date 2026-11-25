@@ -1,6 +1,7 @@
 import { ArrowUpRight, Globe, Search } from "lucide-react"
 import { type Ref, useEffect, useState } from "react"
 import { normalizeBrowserUrl } from "../../desktop/workspace-browser-url.ts"
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import type { WorkspaceView } from "../store/workspace-store.ts"
@@ -41,6 +42,7 @@ export function WorkspaceLauncher({
   onOpenFile: (path: string, cwd: string) => void
   onOpenUrl: (url: string) => void
 }>) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState("")
   const [search, setSearch] = useState<{
     term: string
@@ -71,7 +73,7 @@ export function WorkspaceLauncher({
                 error:
                   error instanceof Error
                     ? error.message
-                    : "File search failed.",
+                    : translate("File search failed."),
               })
           },
         )
@@ -85,7 +87,7 @@ export function WorkspaceLauncher({
   return (
     <div className="workspace-launcher">
       <form
-        aria-label="Find files or open a URL"
+        aria-label={t("Find files or open a URL")}
         onSubmit={(event) => {
           event.preventDefault()
           if (searching) return
@@ -106,15 +108,17 @@ export function WorkspaceLauncher({
                 setQuery("")
               }
             }}
-            aria-label="Search files or enter a URL"
-            placeholder={cwd ? "Search files or enter a URL" : "Enter a URL"}
+            aria-label={t("Search files or enter a URL")}
+            placeholder={
+              cwd ? t("Search files or enter a URL") : t("Enter a URL")
+            }
             autoComplete="off"
             spellCheck={false}
           />
         </label>
         {term && (
           <div className="workspace-launcher-results">
-            {searching && <p role="status">Finding files…</p>}
+            {searching && <p role="status">{t("Finding files…")}</p>}
             {(addressError || result?.error) && (
               <p role="alert">{addressError || result?.error}</p>
             )}
@@ -125,8 +129,8 @@ export function WorkspaceLauncher({
               !url && (
                 <p role="status">
                   {cwd
-                    ? "No matching files"
-                    : "Select a project to search files"}
+                    ? t("No matching files")
+                    : t("Select a project to search files")}
                 </p>
               )}
             {cwd &&
@@ -154,7 +158,7 @@ export function WorkspaceLauncher({
       {!term && (
         <section
           className="workspace-launcher-actions"
-          aria-label="Open in workspace"
+          aria-label={t("Open in workspace")}
         >
           {(
             [
@@ -175,11 +179,11 @@ export function WorkspaceLauncher({
                 key={view}
                 type="button"
                 disabled={disabled}
-                title={disabled ? "Select a project first" : undefined}
+                title={disabled ? t("Select a project first") : undefined}
                 onClick={() => onOpenView(view)}
               >
                 <Icon size={18} aria-hidden="true" />
-                <span>{option.label}</span>
+                <span>{t(option.label)}</span>
               </button>
             )
           })}

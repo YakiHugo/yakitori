@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { Search } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { ApiSearchSessionsResponse } from "../../protocol/application.ts"
@@ -8,6 +9,7 @@ import { selectEngineSession, useEngineStore } from "../store/engine-store.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 
 export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
+  const { t } = useTranslation()
   const apiBase = useAppStore((state) => state.apiBase)
   const selectSession = useAppStore((state) => state.selectSession)
   const projects = useAppStore((state) => state.projects)
@@ -80,7 +82,11 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
           }))
       } catch (cause) {
         if (revision.current === requestRevision)
-          setError(cause instanceof Error ? cause.message : "Search failed.")
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : translate("Search failed."),
+          )
       } finally {
         if (revision.current === requestRevision) setLoading(false)
       }
@@ -124,13 +130,13 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
       })
   }
   return (
-    <SidebarDialog title="Search sessions" onClose={onClose}>
+    <SidebarDialog title={t("Search sessions")} onClose={onClose}>
       <div className="mb-3 flex items-center gap-2 rounded-lg border px-3">
         <Search size={16} className="text-muted-foreground" />
         <input
-          aria-label="Search sessions"
+          aria-label={t("Search sessions")}
           data-autofocus
-          placeholder="Search titles and messages"
+          placeholder={t("Search titles and messages")}
           value={query}
           onChange={(event) => {
             if (event.target.value.trim() !== term) revision.current += 1
@@ -169,12 +175,12 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
             setArchived(event.target.checked)
           }}
         />
-        Search archived conversations
+        {t("Search archived conversations")}
       </label>
       <section
         ref={list}
         className="max-h-[50vh] overflow-y-auto"
-        aria-label="Search results"
+        aria-label={t("Search results")}
       >
         {results.map((match, index) => {
           const session =
@@ -189,7 +195,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
               className="search-result"
             >
               <span className="block truncate font-medium">
-                {session.title ?? "Untitled session"}
+                {session.title ?? t("Untitled session")}
               </span>
               <span className="mt-1 block truncate text-xs text-muted-foreground">
                 {match.snippet}
@@ -198,10 +204,10 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
                 {"engineSession" in match
                   ? (engines.find(
                       (engine) => engine.id === match.engineSession.engineId,
-                    )?.label ?? "External engine")
+                    )?.label ?? t("External engine"))
                   : (projects.find(
                       (project) => project.id === session.projectId,
-                    )?.name ?? "No project")}
+                    )?.name ?? t("No project"))}
               </span>
             </button>
           )
@@ -209,23 +215,28 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
       </section>
       <p role="status" className="mt-3 text-xs text-muted-foreground">
         {loading
-          ? "Searching…"
+          ? t("Searching…")
           : (error ??
             (term === ""
-              ? "Find a session by its title or a phrase from the conversation."
+              ? t(
+                  "Find a session by its title or a phrase from the conversation.",
+                )
               : results.length === 0
                 ? observed?.nextOffset === undefined
-                  ? "No matching sessions"
-                  : "Search more sessions"
-                : "↑ ↓ to navigate · Enter to open"))}
+                  ? t("No matching sessions")
+                  : t("Search more sessions")
+                : t("↑ ↓ to navigate · Enter to open")))}
       </p>
       {result?.unavailableSessionCount ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          Partial results · {result.unavailableSessionCount}{" "}
           {result.unavailableSessionCount === 1
-            ? "conversation could"
-            : "conversations could"}{" "}
-          not be searched because saved history could not be read.
+            ? t(
+                "Partial results · 1 conversation could not be searched because saved history could not be read.",
+              )
+            : t(
+                "Partial results · {0} conversations could not be searched because saved history could not be read.",
+                result.unavailableSessionCount,
+              )}
         </p>
       ) : null}
       {error && (
@@ -234,7 +245,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
           className="sidebar-row mt-2"
           onClick={() => void fetchPage(++revision.current)}
         >
-          Retry search
+          {t("Retry search")}
         </button>
       )}
       {(result?.nextCursor || observed?.nextOffset !== undefined) && (
@@ -253,7 +264,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
             })
           }
         >
-          Show more results
+          {t("Show more results")}
         </button>
       )}
     </SidebarDialog>

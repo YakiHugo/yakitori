@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import {
   ArrowUpRight,
   Check,
@@ -53,9 +54,10 @@ export function ToolCell({
   separateMedia?: boolean
   apiBase?: string | undefined
 }>) {
+  const { t } = useTranslation()
   const storeApiBase = useAppStore((state) => state.apiBase)
   const apiBase = apiBaseOverride ?? storeApiBase
-  const presentation = presentTool(entry)
+  const presentation = presentTool(entry, t)
   const resultParts = separateMedia
     ? entry.resultContent?.filter((part) => part.type === "text")
     : entry.resultContent
@@ -81,9 +83,9 @@ export function ToolCell({
         presentation.subject)
       : presentation.subject
   const statusLabel = failed
-    ? "Failed"
+    ? t("Failed")
     : interrupted
-      ? "Interrupted"
+      ? t("Interrupted")
       : undefined
   const triggerLabel =
     subject === presentation.subject
@@ -303,6 +305,7 @@ function ResourceAction({
   recipient?: string | undefined
   compact?: boolean
 }>) {
+  const { t } = useTranslation()
   const [error, setError] = useState<string>()
   const [copiedPath, setCopiedPath] = useState<string>()
   const fileKey =
@@ -311,10 +314,10 @@ function ResourceAction({
     target.kind === "file"
       ? fileActionLabel()
       : target.kind === "url"
-        ? "Open in browser"
+        ? t("Open in browser")
         : recipient === undefined
-          ? "View trace"
-          : `View trace for ${recipient}`
+          ? t("View trace")
+          : t("View trace for {0}", recipient)
   const copied = label === "Copy path" && copiedPath === fileKey
   const iconOnly = target.kind === "file" && !copied && error === undefined
   const Icon = copied ? Check : label === "Copy path" ? Copy : ExternalLink
@@ -340,7 +343,7 @@ function ResourceAction({
               ? openUrlTarget(target)
               : onOpenSession?.(target.sessionId)
         if (action === undefined) {
-          setError("Child task is not available")
+          setError(t("Child task is not available"))
           return
         }
         await action
@@ -349,21 +352,23 @@ function ResourceAction({
           })
           .catch((reason: unknown) => {
             setError(
-              reason instanceof Error ? reason.message : "Could not open",
+              reason instanceof Error ? reason.message : t("Could not open"),
             )
           })
       }}
     >
       {target.kind === "session" ? (
         <>
-          <span>{compact ? "View trace" : (recipient ?? "View trace")}</span>
+          <span>
+            {compact ? t("View trace") : (recipient ?? t("View trace"))}
+          </span>
           <ArrowUpRight className="size-3.5" />
         </>
       ) : (
         <>
           <Icon aria-hidden="true" className="size-3.5" />
           <span aria-live="polite" className={iconOnly ? "sr-only" : undefined}>
-            {error === undefined ? (copied ? "Copied" : label) : "Retry"}
+            {error === undefined ? (copied ? t("Copied") : label) : t("Retry")}
           </span>
         </>
       )}

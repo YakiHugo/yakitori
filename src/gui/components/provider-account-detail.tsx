@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ArrowLeft } from "lucide-react"
 import type { ReactNode } from "react"
 import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
@@ -26,11 +27,12 @@ export function ProviderAccountDetail({
   onBack(): void
   actions: ReactNode
 }>) {
+  const { t } = useTranslation()
   return (
     <div className="provider-account-detail">
       <Button type="button" variant="ghost" size="sm" onClick={onBack}>
         <ArrowLeft data-icon="inline-start" />
-        Back to accounts
+        {t("Back to accounts")}
       </Button>
       <header className="provider-account-heading">
         <div>
@@ -39,7 +41,10 @@ export function ProviderAccountDetail({
         </div>
         <div className="provider-account-actions">{actions}</div>
       </header>
-      <section className="model-catalog-settings" aria-label="Account models">
+      <section
+        className="model-catalog-settings"
+        aria-label={t("Account models")}
+      >
         {modelsAvailable ? (
           <ModelCatalogSettings
             apiBase={apiBase}
@@ -48,7 +53,7 @@ export function ProviderAccountDetail({
           />
         ) : (
           <p className="provider-field-hint">
-            Reconnect this account to manage its models.
+            {t("Reconnect this account to manage its models.")}
           </p>
         )}
       </section>

@@ -1,16 +1,18 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Folder, FolderPlus, Plus, X } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 
 export function AddProjectButton() {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   return (
     <>
       <button
         type="button"
-        aria-label="Add project"
-        title="Add project"
+        aria-label={t("Add project")}
+        title={t("Add project")}
         onClick={() => setOpen(true)}
         className="sidebar-icon size-6"
       >
@@ -25,6 +27,7 @@ export function CreateProjectDialog({
   open,
   onClose,
 }: Readonly<{ open: boolean; onClose(): void }>) {
+  const { t } = useTranslation()
   const addProject = useAppStore((state) => state.addProject)
   const [name, setName] = useState("")
   const [path, setPath] = useState("")
@@ -65,7 +68,7 @@ export function CreateProjectDialog({
       setError(
         error instanceof Error
           ? error.message
-          : "Could not open the folder picker.",
+          : t("Could not open the folder picker."),
       )
     } finally {
       active.current = false
@@ -74,7 +77,7 @@ export function CreateProjectDialog({
   }
   return open ? (
     <SidebarDialog
-      title="Create project"
+      title={t("Create project")}
       className="create-project-dialog"
       dismissible={!pending}
       onClose={close}
@@ -96,7 +99,7 @@ export function CreateProjectDialog({
               } else {
                 setError(
                   useAppStore.getState().message ??
-                    "Could not create the project. Try again.",
+                    t("Could not create the project. Try again."),
                 )
               }
             })
@@ -112,8 +115,8 @@ export function CreateProjectDialog({
           </span>
           <input
             data-autofocus
-            aria-label="Project name"
-            placeholder="Project name"
+            aria-label={t("Project name")}
+            placeholder={t("Project name")}
             autoComplete="off"
             value={name}
             disabled={pending}
@@ -121,7 +124,7 @@ export function CreateProjectDialog({
           />
         </div>
         <div className="create-project-source">
-          <h3>Source folder</h3>
+          <h3>{t("Source folder")}</h3>
           {window.yakitoriDesktop ? (
             path ? (
               <div className="create-project-folder">
@@ -130,7 +133,7 @@ export function CreateProjectDialog({
                   type="button"
                   className="create-project-folder-path"
                   title={path}
-                  aria-label="Change source folder"
+                  aria-label={t("Change source folder")}
                   disabled={pending}
                   onClick={() => void choose()}
                 >
@@ -142,7 +145,7 @@ export function CreateProjectDialog({
                 <button
                   type="button"
                   className="sidebar-icon"
-                  aria-label="Remove source folder"
+                  aria-label={t("Remove source folder")}
                   disabled={pending}
                   onClick={() => {
                     setPath("")
@@ -160,14 +163,14 @@ export function CreateProjectDialog({
                 onClick={() => void choose()}
               >
                 <FolderPlus size={22} aria-hidden="true" />
-                <span>Add a folder Yakitori can read and edit</span>
+                <span>{t("Add a folder Yakitori can read and edit")}</span>
               </button>
             )
           ) : (
             <div className="create-project-path">
               <FolderPlus size={22} aria-hidden="true" />
               <input
-                aria-label="Project path"
+                aria-label={t("Project path")}
                 placeholder="/Users/you/Projects/my-project"
                 autoComplete="off"
                 spellCheck={false}
@@ -194,13 +197,13 @@ export function CreateProjectDialog({
         )}
         <div className="create-project-actions">
           <button type="button" disabled={pending} onClick={close}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button
             type="submit"
             disabled={pending || !path.trim() || !name.trim()}
           >
-            {pending ? "Creating…" : "Create project"}
+            {pending ? t("Creating…") : t("Create project")}
           </button>
         </div>
       </form>

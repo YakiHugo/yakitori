@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useMemo } from "react"
 import "./data-preview.css"
 
@@ -116,6 +117,7 @@ function parseCsv(content: string, truncated: boolean): CsvResult {
 }
 
 export function DataPreview({ kind, content, truncated }: DataPreviewProps) {
+  const { t } = useTranslation()
   const csv = useMemo(
     () => (kind === "csv" ? parseCsv(content, truncated) : undefined),
     [kind, content, truncated],
@@ -137,8 +139,10 @@ export function DataPreview({ kind, content, truncated }: DataPreviewProps) {
           <>
             <p className="data-preview-notice" role="status">
               {truncated
-                ? "Partial JSON content. The complete structure cannot be shown."
-                : "Invalid JSON. Showing the original content."}
+                ? t(
+                    "Partial JSON content. The complete structure cannot be shown.",
+                  )
+                : t("Invalid JSON. Showing the original content.")}
             </p>
             <pre className="data-preview-json">{content}</pre>
           </>
@@ -166,7 +170,7 @@ export function DataPreview({ kind, content, truncated }: DataPreviewProps) {
     <div className="data-preview">
       {truncated ? (
         <p className="data-preview-notice" role="status">
-          Partial CSV content. Only complete records are shown below.
+          {t("Partial CSV content. Only complete records are shown below.")}
         </p>
       ) : null}
       {csv?.issue ? (
@@ -177,9 +181,9 @@ export function DataPreview({ kind, content, truncated }: DataPreviewProps) {
       ) : null}
       {unequalRows ? (
         <p className="data-preview-notice" role="status">
-          Some records have a different number of fields than the header.
-          Missing fields are marked with a dash; extra fields have numbered
-          columns.
+          {t(
+            "Some records have a different number of fields than the header. Missing fields are marked with a dash; extra fields have numbered columns.",
+          )}
         </p>
       ) : null}
       {limited ? (
@@ -223,7 +227,7 @@ export function DataPreview({ kind, content, truncated }: DataPreviewProps) {
                       ) : (
                         <span
                           className="data-preview-missing"
-                          title="Missing field"
+                          title={t("Missing field")}
                         >
                           —
                         </span>
@@ -238,7 +242,9 @@ export function DataPreview({ kind, content, truncated }: DataPreviewProps) {
       ) : null}
       {csv?.remainder ? (
         <div className="data-preview-remainder">
-          <p>{csv.issue ? "Unparsed record" : "Incomplete final record"}</p>
+          <p>
+            {csv.issue ? t("Unparsed record") : t("Incomplete final record")}
+          </p>
           <pre>{csv.remainder}</pre>
         </div>
       ) : null}

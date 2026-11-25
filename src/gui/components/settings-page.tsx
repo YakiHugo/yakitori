@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ArrowLeft,
   Bell,
@@ -9,6 +10,7 @@ import {
   Server,
 } from "lucide-react"
 import { useEffect } from "react"
+import type { Message } from "../i18n/messages.ts"
 import { type SettingsSection, useAppStore } from "../store/app-store.ts"
 import { McpSettings } from "./mcp-settings.tsx"
 import { ProviderSettings } from "./provider-settings.tsx"
@@ -34,7 +36,7 @@ const sections = [
   icon: typeof Monitor
 }>[]
 
-const sectionAria: Record<SettingsSection, string> = {
+const sectionAria: Record<SettingsSection, Message> = {
   general: "General settings",
   runtime: "Runtime settings",
   notifications: "Notification settings",
@@ -45,6 +47,7 @@ const sectionAria: Record<SettingsSection, string> = {
 }
 
 export function SettingsPage() {
+  const { t } = useTranslation()
   const section = useAppStore((state) => state.settingsSection) ?? "general"
   const openSettings = useAppStore((state) => state.openSettings)
   const closeSettings = useAppStore((state) => state.closeSettings)
@@ -62,19 +65,19 @@ export function SettingsPage() {
 
   return (
     <div className="settings-page">
-      <aside className="settings-sidebar" aria-label="Settings navigation">
+      <aside className="settings-sidebar" aria-label={t("Settings navigation")}>
         <button
           type="button"
           className="settings-back"
-          aria-label="Back to app"
-          title="Back to app (Esc)"
+          aria-label={t("Back to app")}
+          title={t("Back to app (Esc)")}
           onClick={closeSettings}
         >
           <ArrowLeft size={16} />
-          <span>Back to app</span>
+          <span>{t("Back to app")}</span>
         </button>
         <div className="settings-nav-group">
-          <nav aria-label="Settings sections" className="settings-nav">
+          <nav aria-label={t("Settings sections")} className="settings-nav">
             {sections.map(({ id, label, icon: Icon }) => (
               <button
                 type="button"
@@ -83,7 +86,7 @@ export function SettingsPage() {
                 onClick={() => openSettings(id)}
               >
                 <Icon size={16} />
-                <span>{label}</span>
+                <span>{t(label)}</span>
               </button>
             ))}
           </nav>
@@ -97,7 +100,7 @@ export function SettingsPage() {
         ) : (
           <section
             className="settings-content"
-            aria-label={sectionAria[section]}
+            aria-label={t(sectionAria[section])}
           >
             <div className="settings-content-inner">
               {section === "general" ? (

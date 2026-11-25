@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Check, LoaderCircle, Monitor, RefreshCw, Unplug } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
 import {
@@ -18,6 +19,7 @@ export function ComputerPanel({
   apiBase: string
   active?: boolean
 }) {
+  const { t } = useTranslation()
   const [status, setStatus] = useState<ComputerUseStatus>()
   const [pending, setPending] = useState(false)
   const [takingOver, setTakingOver] = useState(false)
@@ -51,7 +53,7 @@ export function ComputerPanel({
             ("url" in part.file
               ? undefined
               : part.file.path.split("/").at(-1)) ??
-            "Screenshot",
+            t("Screenshot"),
         }
       : undefined
   const run = useCallback(
@@ -91,12 +93,12 @@ export function ComputerPanel({
           <span
             className={`size-1.5 rounded-full ${status?.connected ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
           />
-          {status?.connected ? "Connected" : "Not connected"}
+          {status?.connected ? t("Connected") : t("Not connected")}
         </span>
         <button
           type="button"
           className="sidebar-icon"
-          aria-label="Refresh computer connection"
+          aria-label={t("Refresh computer connection")}
           disabled={pending}
           onClick={() => void run("computer/status")}
         >
@@ -112,15 +114,16 @@ export function ComputerPanel({
             <Monitor size={21} strokeWidth={1.5} />
           </div>
           <div>
-            <h3 className="text-sm font-medium">Computer use</h3>
+            <h3 className="text-sm font-medium">{t("Computer use")}</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Work with apps on your Mac
+              {t("Work with apps on your Mac")}
             </p>
           </div>
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Let Yakitori inspect apps, click, type, and verify what happens on
-          screen. Describe the app and task in your conversation to get started.
+          {t(
+            "Let Yakitori inspect apps, click, type, and verify what happens on screen. Describe the app and task in your conversation to get started.",
+          )}
         </p>
         {status?.message && (
           <p className="text-xs leading-relaxed text-muted-foreground">
@@ -151,11 +154,11 @@ export function ComputerPanel({
           )}
           {pending
             ? takingOver
-              ? "Stopping computer input…"
-              : "Checking connection…"
+              ? t("Stopping computer input…")
+              : t("Checking connection…")
             : status?.connected
-              ? "Disconnect"
-              : "Connect computer"}
+              ? t("Disconnect")
+              : t("Connect computer")}
         </button>
         {(status?.connected || status?.inputOwner) && (
           <Button
@@ -164,13 +167,16 @@ export function ComputerPanel({
             disabled={pending}
             onClick={() => void run("computer/takeover")}
           >
-            {takingOver ? "Waiting for input release…" : "Take over computer"}
+            {takingOver
+              ? t("Waiting for input release…")
+              : t("Take over computer")}
           </Button>
         )}
         {status?.available && (
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Take over stops the turn using the computer and waits for its input
-            to be released. Reconnect to allow agent control again.
+            {t(
+              "Take over stops the turn using the computer and waits for its input to be released. Reconnect to allow agent control again.",
+            )}
           </p>
         )}
         {status?.connected && (
@@ -179,12 +185,13 @@ export function ComputerPanel({
               <Check size={14} />{" "}
               {status.permissions?.accessibility &&
               status.permissions.screenRecording
-                ? "Ready for your next message"
-                : "Connected · macOS access required"}
+                ? t("Ready for your next message")
+                : t("Connected · macOS access required")}
             </p>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              If macOS requests access, enable Screen Recording and
-              Accessibility for Yakitori Computer in System Settings.
+              {t(
+                "If macOS requests access, enable Screen Recording and Accessibility for Yakitori Computer in System Settings.",
+              )}
             </p>
           </div>
         )}
@@ -198,12 +205,12 @@ export function ComputerPanel({
       </div>
       <div className="mt-auto border-t p-4">
         <p className="mb-3 text-[11px] font-medium text-muted-foreground">
-          LATEST CAPTURE · THIS CONVERSATION
+          {t("LATEST CAPTURE · THIS CONVERSATION")}
         </p>
         {image ? (
           <button
             type="button"
-            aria-label="Enlarge computer screenshot"
+            aria-label={t("Enlarge computer screenshot")}
             onClick={() => setPreview(true)}
             className="block w-full rounded-lg border bg-muted/30 p-1"
           >
@@ -215,7 +222,7 @@ export function ComputerPanel({
           </button>
         ) : (
           <div className="rounded-lg border border-dashed px-5 py-9 text-center text-xs leading-relaxed text-muted-foreground">
-            Screenshots from computer actions will appear here.
+            {t("Screenshots from computer actions will appear here.")}
           </div>
         )}
       </div>

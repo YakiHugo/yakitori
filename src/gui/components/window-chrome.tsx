@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ArrowLeft, ArrowRight, House, PanelLeft, Settings } from "lucide-react"
 import { type ReactNode, useEffect } from "react"
 import { useNavigationHistory } from "../hooks/use-navigation-history.ts"
@@ -18,6 +19,7 @@ export function WindowChrome({
   workspaceToolbar?: ReactNode
   usageAccountId?: string | undefined
 }>) {
+  const { t } = useTranslation()
   const settingsOpen = useAppStore(
     (state) => state.settingsSection !== undefined,
   )
@@ -69,12 +71,15 @@ export function WindowChrome({
   return (
     <>
       <header className="window-titlebar" data-sidebar-open={sidebarOpen}>
-        <nav className="window-navigation" aria-label="History and sidebar">
+        <nav
+          className="window-navigation"
+          aria-label={t("History and sidebar")}
+        >
           <button
             type="button"
             className="sidebar-icon"
-            aria-label="Go back"
-            title="Go back (⌘[)"
+            aria-label={t("Go back")}
+            title={t("Go back (⌘[)")}
             disabled={!history.canGoBack}
             onClick={history.back}
           >
@@ -83,8 +88,8 @@ export function WindowChrome({
           <button
             type="button"
             className="sidebar-icon"
-            aria-label="Go forward"
-            title="Go forward (⌘])"
+            aria-label={t("Go forward")}
+            title={t("Go forward (⌘])")}
             disabled={!history.canGoForward}
             onClick={history.forward}
           >
@@ -93,8 +98,10 @@ export function WindowChrome({
           <button
             type="button"
             className="sidebar-icon"
-            aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            title={`${sidebarOpen ? "Hide" : "Show"} sidebar (⌘B)`}
+            aria-label={sidebarOpen ? t("Hide sidebar") : t("Show sidebar")}
+            title={
+              sidebarOpen ? t("Hide sidebar (⌘B)") : t("Show sidebar (⌘B)")
+            }
             aria-expanded={sidebarOpen}
             onClick={onToggleSidebar}
             disabled={settingsOpen}
@@ -105,12 +112,12 @@ export function WindowChrome({
         <div className="window-heading">{heading}</div>
         {workspaceToolbar}
       </header>
-      <nav className="window-rail" aria-label="App navigation">
+      <nav className="window-rail" aria-label={t("App navigation")}>
         <button
           type="button"
           className="window-rail-button"
-          aria-label="Chats"
-          title="Chats"
+          aria-label={t("Chats")}
+          title={t("Chats")}
           aria-current={!settingsOpen ? "page" : undefined}
           onClick={closeSettings}
         >
@@ -122,8 +129,8 @@ export function WindowChrome({
           <button
             type="button"
             className="window-rail-button"
-            aria-label="Settings"
-            title="Settings"
+            aria-label={t("Settings")}
+            title={t("Settings")}
             aria-current={settingsOpen ? "page" : undefined}
             onClick={() => openSettings()}
           >

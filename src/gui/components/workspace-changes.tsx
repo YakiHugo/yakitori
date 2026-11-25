@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   Check,
   Files,
@@ -33,6 +34,7 @@ export function WorkspaceChanges(props: ChangesProps) {
 }
 
 function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
+  const { t } = useTranslation()
   const { status, loading, error, refresh, revision } = useWorkspaceGitStatus({
     cwd,
     apiBase,
@@ -105,20 +107,20 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
   return (
     <div className="workspace-changes">
       <header className="changes-heading">
-        <h2 className="sr-only">Review changes</h2>
+        <h2 className="sr-only">{t("Review changes")}</h2>
         <div className="changes-repository-row">
           <div className="changes-branch" title={status?.root ?? cwd}>
             <GitBranch size={14} />
             <span>
               {status?.branch ??
-                (status?.repository ? "Detached HEAD" : "Working tree")}
+                (status?.repository ? t("Detached HEAD") : t("Working tree"))}
             </span>
           </div>
           <button
             type="button"
             className="changes-icon-button"
-            aria-label="Refresh changes"
-            title="Refresh changes"
+            aria-label={t("Refresh changes")}
+            title={t("Refresh changes")}
             onClick={refresh}
           >
             <RefreshCw
@@ -134,31 +136,35 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
           <span
             title={
               scope === "all"
-                ? "Staged + unstaged line changes"
+                ? t("Staged + unstaged line changes")
                 : `${scope} line changes`
             }
           >
             <ChangeStats stats={totals} />
           </span>
           <Select<typeof scope>
-            aria-label="Change scope"
+            aria-label={t("Change scope")}
             className="changes-scope-select"
             size="sm"
             variant="ghost"
             value={scope}
             onValueChange={setScope}
             options={[
-              { value: "all", label: "All changes" },
-              { value: "unstaged", label: "Unstaged" },
-              { value: "staged", label: "Staged" },
+              { value: "all", label: t("All changes") },
+              { value: "unstaged", label: t("Unstaged") },
+              { value: "staged", label: t("Staged") },
             ]}
           />
           <button
             type="button"
             className="changes-icon-button"
-            aria-label={showFiles ? "Hide changed files" : "Show changed files"}
+            aria-label={
+              showFiles ? t("Hide changed files") : t("Show changed files")
+            }
             aria-pressed={showFiles}
-            title={showFiles ? "Hide changed files" : "Show changed files"}
+            title={
+              showFiles ? t("Hide changed files") : t("Show changed files")
+            }
             onClick={() => {
               setShowFiles((value) => !value)
               setQuery("")
@@ -172,34 +178,37 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
         <div className="changes-message" role="alert">
           <p>{error}</p>
           <button type="button" onClick={refresh}>
-            Try again
+            {t("Try again")}
           </button>
         </div>
       ) : null}
       {loading && !status ? (
         <p className="changes-message" role="status">
-          Loading changes…
+          {t("Loading changes…")}
         </p>
       ) : null}
       {status?.repository === false ? (
         <p className="changes-message">
-          This workspace is not a Git repository.
+          {t("This workspace is not a Git repository.")}
         </p>
       ) : status?.repository && entries.length === 0 ? (
         <div className="changes-empty">
           <Check size={24} strokeWidth={1.5} />
-          <strong>Working tree clean</strong>
-          <p>Saved file changes will appear here.</p>
+          <strong>{t("Working tree clean")}</strong>
+          <p>{t("Saved file changes will appear here.")}</p>
         </div>
       ) : status?.repository ? (
         <div className="changes-layout" data-files={showFiles}>
           {showFiles ? (
-            <aside className="changes-navigator" aria-label="File navigation">
+            <aside
+              className="changes-navigator"
+              aria-label={t("File navigation")}
+            >
               <label className="changes-search">
                 <Search size={13} />
                 <input
-                  aria-label="Filter changed files"
-                  placeholder="Filter files…"
+                  aria-label={t("Filter changed files")}
+                  placeholder={t("Filter files…")}
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                 />
@@ -216,7 +225,7 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
                 />
                 {items.length === 0 ? (
                   <p className="changes-message">
-                    {query ? "No matching files" : `No ${scope} changes`}
+                    {query ? t("No matching files") : `No ${scope} changes`}
                   </p>
                 ) : null}
               </div>
@@ -224,7 +233,7 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
           ) : null}
           <section
             className="changes-reader"
-            aria-label="Selected file changes"
+            aria-label={t("Selected file changes")}
           >
             {selected ? (
               <SelectedChange
@@ -244,12 +253,12 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
               <div className="changes-empty">
                 <Search size={24} strokeWidth={1.5} />
                 <strong>
-                  {query ? "No matching files" : `No ${scope} changes`}
+                  {query ? t("No matching files") : `No ${scope} changes`}
                 </strong>
                 <p>
                   {query
-                    ? "Try a different filename or directory."
-                    : "Choose another change scope to continue reviewing."}
+                    ? t("Try a different filename or directory.")
+                    : t("Choose another change scope to continue reviewing.")}
                 </p>
               </div>
             )}
@@ -275,13 +284,14 @@ function SelectedChange({
   active: boolean
   onStageChanged(): void
 }>) {
+  const { t } = useTranslation()
   const [diff, setDiff] = useState<GitDiffResponse>()
   const [error, setError] = useState<string>()
   const [pending, setPending] = useState(false)
   const mounted = useRef(true)
   const code = staged ? entry.indexStatus : entry.worktreeStatus
   const stats = staged ? entry.stagedStats : entry.unstagedStats
-  const action = staged ? "Unstage" : "Stage"
+  const action = staged ? t("Unstage") : t("Stage")
   useEffect(() => {
     mounted.current = true
     return () => {
@@ -303,7 +313,9 @@ function SelectedChange({
         (cause: unknown) => {
           if (current)
             setError(
-              cause instanceof Error ? cause.message : "Could not load diff.",
+              cause instanceof Error
+                ? cause.message
+                : t("Could not load diff."),
             )
         },
       )
@@ -325,7 +337,9 @@ function SelectedChange({
     } catch (cause) {
       if (mounted.current)
         setError(
-          cause instanceof Error ? cause.message : "Could not update staging.",
+          cause instanceof Error
+            ? cause.message
+            : t("Could not update staging."),
         )
     } finally {
       if (mounted.current) setPending(false)
@@ -347,7 +361,11 @@ function SelectedChange({
         >
           <span>{entry.path}</span>
           <small>
-            {staged ? "Staged" : code === "?" ? "Untracked" : "Unstaged"}
+            {staged
+              ? t("Staged")
+              : code === "?"
+                ? t("Untracked")
+                : t("Unstaged")}
             {entry.originalPath
               ? ` · ${entry.originalPath} → ${entry.path}`
               : ""}
@@ -358,8 +376,8 @@ function SelectedChange({
           <button
             type="button"
             className="changes-icon-button changes-open-file"
-            aria-label={`Open ${entry.path}`}
-            title="Open file"
+            aria-label={t("Open {0}", entry.path)}
+            title={t("Open file")}
             onClick={() =>
               useWorkspaceStore.getState().openFile(entry.path, cwd)
             }
@@ -386,8 +404,8 @@ function SelectedChange({
         {diff ? (
           stats?.binary ? (
             <p className="changes-message">
-              Binary file {code === "D" ? "deleted" : "changed"}. A text diff is
-              unavailable.
+              {t("Binary file")} {code === "D" ? "deleted" : "changed"}
+              {t(". A text diff is unavailable.")}
             </p>
           ) : stats &&
             stats.additions === 0 &&
@@ -395,20 +413,21 @@ function SelectedChange({
             !diff.truncated ? (
             <p className="changes-message">
               {entry.originalPath
-                ? "Renamed without line changes."
-                : "File metadata changed. No line changes."}
+                ? t("Renamed without line changes.")
+                : t("File metadata changed. No line changes.")}
             </p>
           ) : diff.text ? (
             <DiffView diff={diff} path={entry.path} embedded />
           ) : (
             <p className="changes-message">
-              No line changes. This file may have been renamed or its
-              permissions changed.
+              {t(
+                "No line changes. This file may have been renamed or its permissions changed.",
+              )}
             </p>
           )
         ) : !error ? (
           <p role="status" className="changes-message">
-            Loading diff…
+            {t("Loading diff…")}
           </p>
         ) : null}
       </div>

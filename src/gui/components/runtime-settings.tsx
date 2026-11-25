@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useRef, useState } from "react"
 import type { ConfigurationSnapshot } from "../../protocol/configuration.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
@@ -21,6 +22,7 @@ function RuntimeConfiguration({
   apiBase,
   cwd,
 }: Readonly<{ apiBase: string; cwd: string | undefined }>) {
+  const { t } = useTranslation()
   const [configuration, setConfiguration] = useState<ConfigurationSnapshot>()
   const [enabled, setEnabled] = useState(false)
   const [error, setError] = useState<string>()
@@ -37,7 +39,7 @@ function RuntimeConfiguration({
         const user = snapshot.current?.layers.find(
           (layer) => layer.source === "user",
         )
-        if (!user) throw new Error("User configuration file is unavailable.")
+        if (!user) throw new Error(t("User configuration file is unavailable."))
         const response = await getAppRpcClient(apiBase).request(
           "config/write",
           {
@@ -89,7 +91,7 @@ function RuntimeConfiguration({
             setError(
               cause instanceof Error
                 ? cause.message
-                : "Could not load runtime settings.",
+                : t("Could not load runtime settings."),
             )
         },
       )
@@ -102,11 +104,11 @@ function RuntimeConfiguration({
       <>
         <p role="alert">{error}</p>
         <Button type="button" onClick={() => setRevision((value) => value + 1)}>
-          Retry
+          {t("Retry")}
         </Button>
       </>
     ) : (
-      <p role="status">Loading runtime settings…</p>
+      <p role="status">{t("Loading runtime settings…")}</p>
     )
   const origin = configuration.origins["agents.expose_model_overrides"]
   const projectOverride = origin?.source === "project"
@@ -115,17 +117,17 @@ function RuntimeConfiguration({
       <div className="settings-group">
         <div className="settings-row">
           <div>
-            <h4>Subagent model selection</h4>
+            <h4>{t("Subagent model selection")}</h4>
             <p id="subagent-model-selection-description">
-              Let the agent choose a model across connected providers and its
-              reasoning effort for subagents. When off, subagents inherit the
-              parent’s model and reasoning effort.
+              {t(
+                "Let the agent choose a model across connected providers and its reasoning effort for subagents. When off, subagents inherit the parent’s model and reasoning effort.",
+              )}
             </p>
           </div>
           <input
             type="checkbox"
             role="switch"
-            aria-label="Subagent model selection"
+            aria-label={t("Subagent model selection")}
             aria-describedby="subagent-model-selection-description"
             aria-checked={enabled}
             className="settings-switch"
@@ -140,12 +142,17 @@ function RuntimeConfiguration({
       </div>
       <p className="settings-hint">
         {projectOverride
-          ? `This project overrides the setting in ${origin.path}. Edit that file to change it.`
-          : "Saved to your user configuration. Changes apply at the next agent step."}
+          ? t(
+              "This project overrides the setting in {0}. Edit that file to change it.",
+              origin.path,
+            )
+          : t(
+              "Saved to your user configuration. Changes apply at the next agent step.",
+            )}
       </p>
       {writeState.pending ? (
         <p role="status" className="mt-3 text-xs text-muted-foreground">
-          Applying changes…
+          {t("Applying changes…")}
         </p>
       ) : null}
       {writeState.error ? (
@@ -171,13 +178,13 @@ function RuntimeConfiguration({
                         error:
                           cause instanceof Error
                             ? cause.message
-                            : "Could not load runtime settings.",
+                            : t("Could not load runtime settings."),
                       })
                   },
                 )
             }}
           >
-            Retry changes
+            {t("Retry changes")}
           </Button>
         </div>
       ) : null}

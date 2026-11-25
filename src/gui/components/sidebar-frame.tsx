@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { type CSSProperties, useEffect, useLayoutEffect, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import { startNewEngineSession } from "../store/engine-store.ts"
@@ -13,6 +14,7 @@ export function SidebarFrame({
   open,
   setOpen,
 }: Readonly<{ open: boolean; setOpen(value: boolean): void }>) {
+  const { t } = useTranslation()
   const [preferredWidth, setPreferredWidth] = useState(() => {
     const saved = Number(localStorage.getItem("yakitori.sidebarWidth"))
     return Number.isFinite(saved) && saved >= 240 && saved <= 520 ? saved : 275
@@ -87,7 +89,7 @@ export function SidebarFrame({
     <>
       <aside
         className="sidebar-frame"
-        aria-label="Sidebar"
+        aria-label={t("Sidebar")}
         data-open={open}
         data-resizing={resizing}
         style={{ "--sidebar-width": `${width}px` } as CSSProperties}
@@ -99,7 +101,7 @@ export function SidebarFrame({
         </div>
         <hr
           tabIndex={open ? 0 : -1}
-          aria-label="Sidebar width"
+          aria-label={t("Sidebar width")}
           aria-orientation="vertical"
           aria-valuemin={240}
           aria-valuemax={maximumWidth}

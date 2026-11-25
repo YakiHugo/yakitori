@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { startNewEngineSession } from "../store/engine-store.ts"
 import { EngineSelector, EngineSessionItems } from "./engine-session.tsx"
 import {
@@ -27,6 +28,7 @@ import { Button } from "./ui/button.tsx"
 import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
 
 export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
+  const { t } = useTranslation()
   const navRef = useSidebarMotion()
   const dragging = useContext(SidebarDragKind)
   const emptyPinned = useAppStore((state) => {
@@ -54,8 +56,8 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
         <div className="flex items-center">
           <button
             type="button"
-            aria-label="Search sessions"
-            title="Search sessions"
+            aria-label={t("Search sessions")}
+            title={t("Search sessions")}
             className="sidebar-icon"
             onClick={onSearch}
           >
@@ -69,12 +71,12 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
       <div className="relative px-2 pb-3">
         <button
           type="button"
-          aria-label="New session"
+          aria-label={t("New session")}
           className={cn("sidebar-row w-full", showPinTarget && "invisible")}
           onClick={startNewEngineSession}
         >
           <SquarePen size={16} />
-          <span className="flex-1 text-left">New session</span>
+          <span className="flex-1 text-left">{t("New session")}</span>
           <span className="text-xs text-muted-foreground">⌘ N</span>
         </button>
         {showPinTarget && (
@@ -82,10 +84,10 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
             className="sidebar-row absolute inset-x-2 top-0"
             data-sidebar-drop="section"
             data-drop-id="pinned"
-            data-drop-label="Pinned"
+            data-drop-label={t("Pinned")}
           >
             <Pin size={16} />
-            <span>Drop here to pin</span>
+            <span>{t("Drop here to pin")}</span>
           </div>
         )}
       </div>
@@ -93,7 +95,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
         className="sidebar-scroll min-h-0 flex-1 overflow-y-auto"
         data-sidebar-scroll-viewport
       >
-        <nav ref={navRef} aria-label="Sessions" className="px-2 pb-4">
+        <nav ref={navRef} aria-label={t("Sessions")} className="px-2 pb-4">
           <SidebarGroups
             pinnedProjects={projects
               .filter((project) => project.pinned)
@@ -122,7 +124,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
                   size={14}
                   className={cn("sidebar-chevron", showAll && "rotate-90")}
                 />
-                All sessions
+                {t("All sessions")}
               </button>
               {showAll && <SessionItems projectId={undefined} />}
             </div>
@@ -134,6 +136,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
 }
 
 function ProjectsSection() {
+  const { t } = useTranslation()
   const projects = useAppStore((state) => state.projects)
   const projectsError = useAppStore((state) => state.projectsError)
   const loadProjects = useAppStore((state) => state.loadProjects)
@@ -146,7 +149,7 @@ function ProjectsSection() {
         data-drop-label="Projects"
       >
         <span className="text-xs font-medium text-muted-foreground">
-          Projects
+          {t("Projects")}
         </span>
         <AddProjectButton />
       </div>
@@ -154,7 +157,7 @@ function ProjectsSection() {
         <div className="sidebar-list-note">
           <p>{projectsError}</p>
           <button type="button" onClick={() => void loadProjects()}>
-            Retry
+            {t("Retry")}
           </button>
         </div>
       )}
@@ -168,6 +171,7 @@ function ProjectsSection() {
 }
 
 function ProjectItem({ project }: { readonly project: ApiProject }) {
+  const { t } = useTranslation()
   const collapsed = useAppStore(
     (state) => state.collapsedProjects[project.id] === true,
   )
@@ -201,12 +205,12 @@ function ProjectItem({ project }: { readonly project: ApiProject }) {
         data-drop-label={projectLabel(project)}
       >
         <SidebarMenu
-          label={`Project actions for ${projectLabel(project)}`}
+          label={t("Project actions for {0}", projectLabel(project))}
           items={[
             ...(index > 0
               ? [
                   {
-                    label: "Move project up",
+                    label: t("Move project up"),
                     icon: <ArrowUp size={15} />,
                     action: () =>
                       void moveProject(
@@ -220,7 +224,7 @@ function ProjectItem({ project }: { readonly project: ApiProject }) {
             ...(index < siblings.length - 1
               ? [
                   {
-                    label: "Move project down",
+                    label: t("Move project down"),
                     icon: <ArrowDown size={15} />,
                     action: () =>
                       void moveProject(
@@ -232,17 +236,17 @@ function ProjectItem({ project }: { readonly project: ApiProject }) {
                 ]
               : []),
             {
-              label: project.pinned ? "Unpin" : "Pin",
+              label: project.pinned ? t("Unpin") : t("Pin"),
               icon: <Pin size={15} />,
               action: () => void toggleProjectPinned(project.id),
             },
             {
-              label: "Edit project",
+              label: t("Edit project"),
               icon: <Pencil size={15} />,
               action: () => setEditing(true),
             },
             {
-              label: "New session",
+              label: t("New session"),
               icon: <SquarePen size={15} />,
               action: () => startNewSession(project.id),
             },
@@ -272,7 +276,7 @@ function ProjectItem({ project }: { readonly project: ApiProject }) {
           </button>
           <button
             type="button"
-            aria-label={`New session in ${projectLabel(project)}`}
+            aria-label={t("New session in {0}", projectLabel(project))}
             className="sidebar-icon sidebar-row-action"
             onClick={() => startNewSession(project.id)}
           >
@@ -300,6 +304,7 @@ function EditProjectDialog({
   readonly project: ApiProject
   readonly onClose: () => void
 }) {
+  const { t } = useTranslation()
   const busy = useAppStore((state) => state.busy)
   const updateProject = useAppStore((state) => state.updateProject)
   const removeProject = useAppStore((state) => state.removeProject)
@@ -332,21 +337,21 @@ function EditProjectDialog({
 
   return (
     <SidebarDialog
-      title={`Edit project ${projectLabel(project)}`}
+      title={t("Edit project {0}", projectLabel(project))}
       onClose={onClose}
     >
       <div className="flex flex-col gap-4">
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
-          placeholder="Project name"
-          aria-label="Project name"
+          placeholder={t("Project name")}
+          aria-label={t("Project name")}
           data-autofocus
           className="h-9 rounded-md border bg-transparent px-3 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
         />
         <div className="flex flex-col gap-1">
           <span className="text-xs font-medium text-muted-foreground">
-            Source folders
+            {t("Source folders")}
           </span>
           <div className="flex flex-col rounded-md border">
             {roots.map((root, index) => (
@@ -360,7 +365,7 @@ function EditProjectDialog({
                 </span>
                 <button
                   type="button"
-                  aria-label={`Remove folder ${root}`}
+                  aria-label={t("Remove folder {0}", root)}
                   disabled={roots.length <= 1}
                   onClick={() =>
                     setRoots((current) => current.filter((_, i) => i !== index))
@@ -385,8 +390,8 @@ function EditProjectDialog({
               <input
                 value={rootDraft}
                 onChange={(event) => setRootDraft(event.target.value)}
-                placeholder="Add folder (absolute path)"
-                aria-label="Add folder"
+                placeholder={t("Add folder (absolute path)")}
+                aria-label={t("Add folder")}
                 className="h-6 min-w-0 flex-1 bg-transparent text-sm outline-none"
               />
             </form>
@@ -396,7 +401,7 @@ function EditProjectDialog({
           {confirmingRemove ? (
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">
-                Remove this project? Sessions are kept.
+                {t("Remove this project? Sessions are kept.")}
               </span>
               <Button
                 type="button"
@@ -409,7 +414,7 @@ function EditProjectDialog({
                   })
                 }}
               >
-                Confirm
+                {t("Confirm")}
               </Button>
               <Button
                 type="button"
@@ -417,7 +422,7 @@ function EditProjectDialog({
                 size="sm"
                 onClick={() => setConfirmingRemove(false)}
               >
-                Keep
+                {t("Keep")}
               </Button>
             </div>
           ) : (
@@ -428,12 +433,12 @@ function EditProjectDialog({
               onClick={() => setConfirmingRemove(true)}
               className="text-destructive hover:bg-destructive/10 hover:text-destructive"
             >
-              Remove project
+              {t("Remove project")}
             </Button>
           )}
           <div className="flex items-center gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={onClose}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               type="button"
@@ -441,7 +446,7 @@ function EditProjectDialog({
               disabled={!canSave}
               onClick={() => void save()}
             >
-              Save
+              {t("Save")}
             </Button>
           </div>
         </div>

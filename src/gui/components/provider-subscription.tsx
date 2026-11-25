@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { SubscriptionConnection } from "../../protocol/providers.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
@@ -22,6 +23,7 @@ export function ProviderSubscription({
   onClose(): void
   onError(message: string): void
 }>) {
+  const { t } = useTranslation()
   const [importing, setImporting] = useState(false)
   const [text, setText] = useState("")
   const [fileName, setFileName] = useState("")
@@ -53,7 +55,9 @@ export function ProviderSubscription({
         onChange(next)
       } catch (cause) {
         setError(
-          cause instanceof Error ? cause.message : "Could not start sign-in.",
+          cause instanceof Error
+            ? cause.message
+            : translate("Could not start sign-in."),
         )
       } finally {
         setPending(undefined)
@@ -81,7 +85,7 @@ export function ProviderSubscription({
         onError(
           cause instanceof Error
             ? cause.message
-            : "Could not return to Yakitori.",
+            : translate("Could not return to Yakitori."),
         ),
       )
     onConnected()
@@ -99,7 +103,7 @@ export function ProviderSubscription({
       else setImporting(true)
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not cancel sign-in.",
+        cause instanceof Error ? cause.message : t("Could not cancel sign-in."),
       )
     } finally {
       setPending(undefined)
@@ -123,7 +127,7 @@ export function ProviderSubscription({
       setError(
         cause instanceof Error
           ? cause.message
-          : "Could not import the account.",
+          : t("Could not import the account."),
       )
     } finally {
       setPending(undefined)
@@ -131,7 +135,9 @@ export function ProviderSubscription({
   }
   return (
     <SidebarDialog
-      title={importing ? `Import ${connection.name} account` : connection.name}
+      title={
+        importing ? t("Import {0} account", connection.name) : connection.name
+      }
       dismissible={pending === undefined}
       onClose={() => {
         if (running)
@@ -141,7 +147,7 @@ export function ProviderSubscription({
               onError(
                 cause instanceof Error
                   ? cause.message
-                  : "Could not cancel sign-in.",
+                  : t("Could not cancel sign-in."),
               ),
             )
         onClose()
@@ -151,21 +157,26 @@ export function ProviderSubscription({
         <>
           <p className="provider-field-hint">
             {connection.id === "codex"
-              ? "Choose Codex auth.json or a ChatGPT account export, or paste its JSON below. The account is checked with ChatGPT before it is connected."
-              : "Connect the account already signed in through the Grok CLI on this computer."}
+              ? t(
+                  "Choose Codex auth.json or a ChatGPT account export, or paste its JSON below. The account is checked with ChatGPT before it is connected.",
+                )
+              : t(
+                  "Connect the account already signed in through the Grok CLI on this computer.",
+                )}
           </p>
           {connection.id === "codex" ? (
             <>
               <p className="provider-field-hint">
-                Importing refreshes the account's sign-in. The tool the file
-                came from may need to sign in again.
+                {t(
+                  "Importing refreshes the account's sign-in. The tool the file came from may need to sign in again.",
+                )}
               </p>
               <div className="provider-account-file">
                 <input
                   ref={file}
                   type="file"
                   accept=".json,application/json"
-                  aria-label="Account file"
+                  aria-label={t("Account file")}
                   hidden
                   onChange={(event) => {
                     const selected = event.target.files?.[0]
@@ -183,7 +194,7 @@ export function ProviderSubscription({
                           setError(
                             cause instanceof Error
                               ? cause.message
-                              : "Could not read the account file.",
+                              : t("Could not read the account file."),
                           ),
                       )
                       .finally(() => setPending(undefined))
@@ -195,14 +206,14 @@ export function ProviderSubscription({
                   disabled={pending !== undefined}
                   onClick={() => file.current?.click()}
                 >
-                  Choose file…
+                  {t("Choose file…")}
                 </Button>
                 <span>{fileName}</span>
               </div>
               <textarea
-                aria-label="Account JSON"
+                aria-label={t("Account JSON")}
                 className="provider-import-input"
-                placeholder="…or paste account JSON here"
+                placeholder={t("…or paste account JSON here")}
                 autoComplete="off"
                 spellCheck={false}
                 value={text}
@@ -217,8 +228,8 @@ export function ProviderSubscription({
           {pending === "import" ? (
             <p role="status">
               {text.trim()
-                ? "Checking account with ChatGPT…"
-                : "Looking for the local CLI account…"}
+                ? t("Checking account with ChatGPT…")
+                : t("Looking for the local CLI account…")}
             </p>
           ) : null}
           <div className="provider-editor-footer">
@@ -228,7 +239,7 @@ export function ProviderSubscription({
               disabled={pending !== undefined}
               onClick={() => void importAccount()}
             >
-              Use local CLI account
+              {t("Use local CLI account")}
             </Button>
             {connection.id === "codex" ? (
               <Button
@@ -236,7 +247,7 @@ export function ProviderSubscription({
                 disabled={pending !== undefined || !text.trim()}
                 onClick={() => void importAccount(text)}
               >
-                Import account
+                {t("Import account")}
               </Button>
             ) : null}
           </div>
@@ -246,13 +257,14 @@ export function ProviderSubscription({
           {pending === "login" || running ? (
             <p role="status">
               {pending === "login"
-                ? "Checking the local account…"
-                : "Waiting for browser sign-in…"}
+                ? t("Checking the local account…")
+                : t("Waiting for browser sign-in…")}
             </p>
           ) : connection.available ? (
             <p className="provider-message" role="status">
-              Account connected. Its models are available in the conversation
-              model picker.
+              {t(
+                "Account connected. Its models are available in the conversation model picker.",
+              )}
             </p>
           ) : (
             <p className="provider-field-hint">
@@ -276,12 +288,12 @@ export function ProviderSubscription({
                   setError(
                     cause instanceof Error
                       ? cause.message
-                      : "Could not open sign-in page.",
+                      : t("Could not open sign-in page."),
                   ),
                 )
               }}
             >
-              Open sign-in page ↗
+              {t("Open sign-in page ↗")}
             </a>
           ) : null}
           {connection.login?.state === "failed" && connection.login.message ? (
@@ -298,7 +310,7 @@ export function ProviderSubscription({
                 else setImporting(true)
               }}
             >
-              Import existing account…
+              {t("Import existing account…")}
             </Button>
             {running ? (
               <Button
@@ -307,7 +319,7 @@ export function ProviderSubscription({
                 disabled={pending !== undefined}
                 onClick={() => void cancel(true)}
               >
-                Cancel sign-in
+                {t("Cancel sign-in")}
               </Button>
             ) : (
               <Button
@@ -315,13 +327,17 @@ export function ProviderSubscription({
                 disabled={pending !== undefined}
                 onClick={() => void signIn(connection.available)}
               >
-                {connection.available ? "Sign in again" : "Connect account"}
+                {connection.available
+                  ? t("Sign in again")
+                  : t("Connect account")}
               </Button>
             )}
           </div>
         </>
       )}
-      {pending === "cancel" ? <p role="status">Cancelling sign-in…</p> : null}
+      {pending === "cancel" ? (
+        <p role="status">{t("Cancelling sign-in…")}</p>
+      ) : null}
       {error ? <p role="alert">{error}</p> : null}
     </SidebarDialog>
   )

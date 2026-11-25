@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import {
@@ -28,6 +29,7 @@ export function SelectionActions({
   onAddToConversation(excerpt: ContextExcerpt, sideChatId?: string): void
   onAskInSideChat?(excerpt: ContextExcerpt, sideChatId?: string): void
 }>) {
+  const { t } = useTranslation()
   const [captured, setCaptured] = useState<CapturedSelection>()
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const menu = useRef<HTMLDivElement>(null)
@@ -221,20 +223,20 @@ export function SelectionActions({
               className="selection-actions"
               style={position}
               role="toolbar"
-              aria-label="Selected text actions"
+              aria-label={t("Selected text actions")}
               onPointerDown={(event) => event.preventDefault()}
             >
               <button
                 type="button"
                 onClick={() => actOnSelection("conversation")}
               >
-                Add to chat
+                {t("Add to chat")}
               </button>
               {onAskInSideChat === undefined ? null : (
                 <>
                   <span className="selection-actions-divider" />
                   <button type="button" onClick={() => actOnSelection("side")}>
-                    Ask in side chat
+                    {t("Ask in side chat")}
                   </button>
                 </>
               )}

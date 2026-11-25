@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import {
   ArrowDownToLine,
   LoaderCircle,
@@ -14,6 +15,7 @@ type UpdateAction = "getState" | "check" | "download" | "install"
 type TransportError = { message: string; retry: UpdateAction }
 
 export function AppUpdate() {
+  const { t } = useTranslation()
   const bridge = window.yakitoriDesktop?.updates
   const [state, setState] = useState<DesktopUpdateState>()
   const [error, setError] = useState<TransportError>()
@@ -44,7 +46,7 @@ export function AppUpdate() {
             message:
               failure instanceof Error
                 ? failure.message
-                : "Could not load update status.",
+                : translate("Could not load update status."),
             retry: "getState",
           })
       },
@@ -116,7 +118,7 @@ export function AppUpdate() {
           message:
             failure instanceof Error
               ? failure.message
-              : "Could not complete the update request.",
+              : t("Could not complete the update request."),
           retry: action,
         })
     } finally {
@@ -136,16 +138,16 @@ export function AppUpdate() {
     state?.phase === "preparing" ||
     state?.phase === "installing"
   const title = failed
-    ? "Update failed"
+    ? t("Update failed")
     : ready
-      ? "Restart to update"
+      ? t("Restart to update")
       : state?.phase === "downloading"
-        ? "Downloading update"
+        ? t("Downloading update")
         : state?.phase === "preparing"
-          ? "Preparing update"
+          ? t("Preparing update")
           : state?.phase === "installing"
-            ? "Installing update"
-            : "Update available"
+            ? t("Installing update")
+            : t("Update available")
   const current = state && "current" in state ? state.current : undefined
   const release = state && "release" in state ? state.release : undefined
   const percent =
@@ -213,22 +215,22 @@ export function AppUpdate() {
             {current && (
               <dl className="app-update-builds">
                 <div>
-                  <dt>Current</dt>
+                  <dt>{t("Current")}</dt>
                   <dd>
                     {current.commit.slice(0, 7)} ·{" "}
                     {current.channel === "local"
-                      ? "Local build"
-                      : `Build ${current.buildNumber}`}
+                      ? t("Local build")
+                      : t("Build {0}", current.buildNumber)}
                   </dd>
                 </div>
                 {release && (
                   <div>
-                    <dt>New</dt>
+                    <dt>{t("New")}</dt>
                     <dd>
                       {release.commit.slice(0, 7)} ·{" "}
                       {release.source === "local"
-                        ? "Local source"
-                        : `Build ${release.buildNumber}`}
+                        ? t("Local source")
+                        : t("Build {0}", release.buildNumber)}
                     </dd>
                   </div>
                 )}
@@ -238,8 +240,9 @@ export function AppUpdate() {
               current.dirty &&
               release?.source !== "local" && (
                 <p className="app-update-warning">
-                  This local build has uncommitted changes. Updating replaces
-                  this local build.
+                  {t(
+                    "This local build has uncommitted changes. Updating replaces this local build.",
+                  )}
                 </p>
               )}
             {failed ? (
@@ -255,13 +258,15 @@ export function AppUpdate() {
                     if (retry) void run(retry)
                   }}
                 >
-                  {pending ? "Retrying…" : "Retry"}
+                  {pending ? t("Retrying…") : t("Retry")}
                 </button>
               </>
             ) : ready ? (
               <>
                 <p>
-                  The update is ready. Restart Yakitori to finish installing.
+                  {t(
+                    "The update is ready. Restart Yakitori to finish installing.",
+                  )}
                 </p>
                 <button
                   type="button"
@@ -269,7 +274,7 @@ export function AppUpdate() {
                   disabled={pending !== undefined}
                   onClick={() => void run("install")}
                 >
-                  Restart and update
+                  {t("Restart and update")}
                 </button>
               </>
             ) : busy ? (
@@ -278,16 +283,16 @@ export function AppUpdate() {
                   {state?.phase === "downloading"
                     ? `Downloading update${percent === undefined ? "…" : ` · ${percent}%`}`
                     : state?.phase === "installing"
-                      ? "Restarting Yakitori…"
+                      ? t("Restarting Yakitori…")
                       : release?.source === "local"
-                        ? "Building local update…"
-                        : "Preparing update…"}
+                        ? t("Building local update…")
+                        : t("Preparing update…")}
                 </p>
                 {state?.phase === "downloading" &&
                   (state.reusedBytes ?? 0) > 0 && (
                     <p>
-                      {Math.round((state.reusedBytes ?? 0) / 1024 / 1024)} MiB
-                      reused from this device
+                      {Math.round((state.reusedBytes ?? 0) / 1024 / 1024)}{" "}
+                      {t("MiB reused from this device")}
                     </p>
                   )}
                 <progress aria-label={title} max={100} value={percent} />
@@ -299,8 +304,8 @@ export function AppUpdate() {
                 onClick={() => void run("download")}
               >
                 {release?.source === "local"
-                  ? "Build local update"
-                  : "Download update"}
+                  ? t("Build local update")
+                  : t("Download update")}
               </button>
             )}
           </div>,

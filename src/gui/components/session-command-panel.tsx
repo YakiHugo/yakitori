@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { Gauge, Server } from "lucide-react"
 import { useEffect, useState } from "react"
 import type { ApiSubscriptionProvider } from "../../protocol/application.ts"
@@ -24,6 +25,7 @@ export function SessionCommandPanel() {
 }
 
 function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
+  const { locale, t } = useTranslation()
   const apiBase = useAppStore((state) => state.apiBase)
   const session = useAppStore((state) => state.selectedSession)
   const selectedId = useAppStore((state) => state.selection.sessionId)
@@ -94,7 +96,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
                 setMcpError(
                   cause instanceof Error
                     ? cause.message
-                    : "Could not load MCP servers.",
+                    : translate("Could not load MCP servers."),
                 )
             },
           )
@@ -131,7 +133,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
               error:
                 cause instanceof Error
                   ? cause.message
-                  : "Could not load usage limits.",
+                  : translate("Could not load usage limits."),
             })
         },
       )
@@ -142,7 +144,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
 
   return (
     <section
-      aria-label={kind === "mcp" ? "MCP status" : "Session status"}
+      aria-label={kind === "mcp" ? t("MCP status") : t("Session status")}
       className="max-h-[min(19rem,35vh)] overflow-y-auto px-4 py-3 text-sm"
     >
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -158,14 +160,14 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
               className="size-4 text-muted-foreground"
             />
           )}
-          {kind === "mcp" ? "MCP servers" : "Status"}
+          {kind === "mcp" ? t("MCP servers") : t("Status")}
         </h3>
         <button
           type="button"
           onClick={close}
           className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
         >
-          Close
+          {t("Close")}
         </button>
       </div>
       {error && (
@@ -177,11 +179,13 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
         servers === undefined ? (
           error ? null : (
             <p role="status" className="text-muted-foreground">
-              Loading MCP servers…
+              {t("Loading MCP servers…")}
             </p>
           )
         ) : servers.length === 0 ? (
-          <p className="text-muted-foreground">No MCP servers configured.</p>
+          <p className="text-muted-foreground">
+            {t("No MCP servers configured.")}
+          </p>
         ) : (
           <ul className="space-y-3">
             {servers.map((server) => (
@@ -195,10 +199,12 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
                   </span>
                 </div>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {server.transport === "http" ? "HTTP" : "Local process"} ·{" "}
+                  {server.transport === "http" ? "HTTP" : t("Local process")} ·{" "}
                   {server.toolCount} tools
-                  {server.authenticated ? " · Signed in" : ""}
-                  {server.loginState === "pending" ? " · Sign-in pending" : ""}
+                  {server.authenticated ? ` ${t("· Signed in")}` : ""}
+                  {server.loginState === "pending"
+                    ? ` ${t("· Sign-in pending")}`
+                    : ""}
                 </p>
                 {server.error && (
                   <p className="mt-1 text-xs text-destructive">
@@ -212,21 +218,27 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
       ) : (
         <div className="space-y-3">
           <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2">
-            <dt className="text-muted-foreground">Conversation</dt>
+            <dt className="text-muted-foreground">{t("Conversation")}</dt>
             <dd className="min-w-0 break-all font-mono text-xs">
-              {session?.id ?? "No conversation selected"}
+              {session?.id ?? t("No conversation selected")}
             </dd>
-            <dt className="text-muted-foreground">Context</dt>
+            <dt className="text-muted-foreground">{t("Context")}</dt>
             <dd>
               {activeTokens === undefined
-                ? "Available after a model response"
-                : `${number.format(activeTokens)} tokens in the last model context`}
+                ? t("Available after a model response")
+                : t(
+                    "{0} tokens in the last model context",
+                    number.format(activeTokens),
+                  )}
               {capacity !== undefined && (
                 <span className="text-muted-foreground">
                   {" "}
-                  / {number.format(capacity)} model window
+                  / {number.format(capacity)} {t("model window")}
                   {usedPercent !== undefined &&
-                    ` · ${Math.max(0, Math.round(100 - usedPercent))}% remaining`}
+                    t(
+                      "· {0}% remaining",
+                      Math.max(0, Math.round(100 - usedPercent)),
+                    )}
                 </span>
               )}
               {usedPercent !== undefined && (
@@ -246,31 +258,33 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
             <h4 className="mb-2 text-xs font-medium text-muted-foreground">
               {subscriptionProvider
                 ? subscription?.financials
-                  ? `${subscription.displayName} balance and usage`
-                  : `${subscriptionProvider} usage limits`
-                : "Usage limits"}
+                  ? t("{0} balance and usage", subscription.displayName)
+                  : t("{0} usage limits", subscriptionProvider)
+                : t("Usage limits")}
             </h4>
             {subscription?.financials ? (
               <AccountFinancials financials={subscription.financials} />
             ) : null}
             {subscriptionProvider === undefined ? (
               <p className="text-xs text-muted-foreground">
-                This provider does not report subscription limits here.
+                {t("This provider does not report subscription limits here.")}
               </p>
             ) : subscription === undefined ? (
               <p role="status" className="text-xs text-muted-foreground">
-                {error ? "Usage limits unavailable." : "Loading usage limits…"}
+                {error
+                  ? t("Usage limits unavailable.")
+                  : t("Loading usage limits…")}
               </p>
             ) : subscription.usage.status !== "available" ? (
               subscription.financials ? null : (
                 <p className="text-xs text-muted-foreground">
-                  Usage limits unavailable for this connection.
+                  {t("Usage limits unavailable for this connection.")}
                 </p>
               )
             ) : subscription.usage.buckets.length === 0 ? (
               subscription.financials ? null : (
                 <p className="text-xs text-muted-foreground">
-                  No usage limits reported.
+                  {t("No usage limits reported.")}
                 </p>
               )
             ) : (
@@ -282,9 +296,10 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
                       <div className="mb-1 flex justify-between gap-3 text-xs">
                         <span>{bucket.name}</span>
                         <span className="text-right text-muted-foreground">
-                          {Math.round(remaining)}% remaining
+                          {Math.round(remaining)}
+                          {t("% remaining")}
                           {bucket.resetsAt
-                            ? ` · resets ${new Date(bucket.resetsAt).toLocaleString()}`
+                            ? ` · resets ${new Date(bucket.resetsAt).toLocaleString(locale)}`
                             : ""}
                         </span>
                       </div>
@@ -304,7 +319,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
             {subscription?.financials &&
             currentSubscriptionResult?.fetchedAt !== undefined ? (
               <p className="mt-2 text-xs text-muted-foreground">
-                Updated{" "}
+                {t("Updated")}{" "}
                 <time
                   dateTime={new Date(
                     currentSubscriptionResult.fetchedAt,
@@ -312,7 +327,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
                 >
                   {new Date(
                     currentSubscriptionResult.fetchedAt,
-                  ).toLocaleTimeString([], {
+                  ).toLocaleTimeString(locale, {
                     hour: "numeric",
                     minute: "2-digit",
                   })}

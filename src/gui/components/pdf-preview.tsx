@@ -1,8 +1,10 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import type { PDFDocumentProxy } from "pdfjs-dist"
 import { useEffect, useRef, useState } from "react"
 
 export function PdfPreview({ base64 }: Readonly<{ base64: string }>) {
+  const { t } = useTranslation()
   const canvas = useRef<HTMLCanvasElement>(null)
   const [document, setDocument] = useState<PDFDocumentProxy>()
   const [page, setPage] = useState(1)
@@ -28,7 +30,11 @@ export function PdfPreview({ base64 }: Readonly<{ base64: string }>) {
       if (current) setDocument(loaded)
     })().catch((cause: unknown) => {
       if (current)
-        setError(cause instanceof Error ? cause.message : "Could not open PDF.")
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : translate("Could not open PDF."),
+        )
     })
     return () => {
       current = false
@@ -69,7 +75,9 @@ export function PdfPreview({ base64 }: Readonly<{ base64: string }>) {
         )
       )
         setError(
-          cause instanceof Error ? cause.message : "Could not render PDF page.",
+          cause instanceof Error
+            ? cause.message
+            : translate("Could not render PDF page."),
         )
     })
     return () => {
@@ -89,18 +97,18 @@ export function PdfPreview({ base64 }: Readonly<{ base64: string }>) {
         <div className="file-preview-pdf-controls">
           <button
             type="button"
-            aria-label="Previous page"
+            aria-label={t("Previous page")}
             disabled={page === 1}
             onClick={() => setPage(page - 1)}
           >
             <ChevronLeft size={16} />
           </button>
           <span>
-            Page {page} of {document.numPages}
+            {t("Page")} {page} of {document.numPages}
           </span>
           <button
             type="button"
-            aria-label="Next page"
+            aria-label={t("Next page")}
             disabled={page === document.numPages}
             onClick={() => setPage(page + 1)}
           >
@@ -109,10 +117,10 @@ export function PdfPreview({ base64 }: Readonly<{ base64: string }>) {
         </div>
       ) : !error ? (
         <p role="status" className="px-4 py-3 text-muted-foreground">
-          Loading PDF…
+          {t("Loading PDF…")}
         </p>
       ) : null}
-      <canvas ref={canvas} aria-label={`PDF page ${page}`} />
+      <canvas ref={canvas} aria-label={t("PDF page {0}", page)} />
     </div>
   )
 }

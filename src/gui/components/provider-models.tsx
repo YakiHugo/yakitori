@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { Type } from "lucide-react"
 import { useState } from "react"
 import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
@@ -26,6 +27,7 @@ export function ProviderModels({
   titleModel?: string | undefined
   onTitleModelChange?: ((modelId: string | undefined) => void) | undefined
 }>) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState("")
   const overrides = new Map(
     configuration.models.map((model) => [model.id.toLowerCase(), model]),
@@ -46,12 +48,12 @@ export function ProviderModels({
   )
   return (
     <fieldset className="provider-models">
-      <legend className="sr-only">Available models</legend>
+      <legend className="sr-only">{t("Available models")}</legend>
       <div className="provider-model-toolbar">
         <Input
           type="search"
-          aria-label="Filter models"
-          placeholder="Filter models"
+          aria-label={t("Filter models")}
+          placeholder={t("Filter models")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
@@ -59,7 +61,7 @@ export function ProviderModels({
           {choices.length} {choices.length === 1 ? "model" : "models"}
         </span>
       </div>
-      {fetchingModels ? <p role="status">Loading models…</p> : null}
+      {fetchingModels ? <p role="status">{t("Loading models…")}</p> : null}
       <div className="provider-model-list">
         {filtered.map((model) => {
           const isTitleModel =
@@ -68,8 +70,8 @@ export function ProviderModels({
             model.contextWindowTokens
               ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(model.contextWindowTokens)} ${model.contextWindowScope === "input" ? "input" : "context"}`
               : undefined,
-            model.inputModalities?.includes("image") ? "Images" : undefined,
-            model.efforts?.length ? "Reasoning" : undefined,
+            model.inputModalities?.includes("image") ? t("Images") : undefined,
+            model.efforts?.length ? t("Reasoning") : undefined,
           ]
             .filter(Boolean)
             .join(" · ")
@@ -78,7 +80,9 @@ export function ProviderModels({
               <span className="provider-model-name">
                 {model.displayName ?? model.id}
                 {isTitleModel ? (
-                  <span className="provider-model-title">Title model</span>
+                  <span className="provider-model-title">
+                    {t("Title model")}
+                  </span>
                 ) : null}
               </span>
               <code className="provider-model-id" title={model.id}>
@@ -97,7 +101,7 @@ export function ProviderModels({
                 <button
                   type="button"
                   className="provider-model-main"
-                  aria-label={`Edit settings for ${model.id}`}
+                  aria-label={t("Edit settings for {0}", model.id)}
                   onClick={() => onEditModel(model)}
                 >
                   {identity}
@@ -108,7 +112,7 @@ export function ProviderModels({
               <button
                 type="button"
                 role="switch"
-                aria-label={`Enable ${model.displayName ?? model.id}`}
+                aria-label={t("Enable {0}", model.displayName ?? model.id)}
                 aria-checked={model.visible !== false}
                 className="provider-switch provider-model-switch"
                 onClick={() =>
@@ -136,10 +140,10 @@ export function ProviderModels({
             <div className="provider-model-item" key={model.id}>
               {onTitleModelChange ? (
                 <SidebarMenu
-                  label={`Model actions for ${model.id}`}
+                  label={t("Model actions for {0}", model.id)}
                   items={[
                     {
-                      label: "Set as title model",
+                      label: t("Set as title model"),
                       icon: <Type size={14} />,
                       checked: isTitleModel,
                       action: () => onTitleModelChange(model.id),
@@ -147,7 +151,7 @@ export function ProviderModels({
                     ...(isTitleModel
                       ? [
                           {
-                            label: "Use automatic selection",
+                            label: t("Use automatic selection"),
                             action: () => onTitleModelChange(undefined),
                           },
                         ]
@@ -165,8 +169,9 @@ export function ProviderModels({
         {!filtered.length && !fetchingModels ? (
           <p className="provider-field-hint">
             {query
-              ? "No matching models."
-              : (emptyMessage ?? "No models are available for this account.")}
+              ? t("No matching models.")
+              : (emptyMessage ??
+                t("No models are available for this account."))}
           </p>
         ) : null}
       </div>

@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ChevronDown } from "lucide-react"
 import { useAppStore } from "../store/app-store.ts"
 import "./telemetry-rail.css"
@@ -9,6 +10,7 @@ const compact = new Intl.NumberFormat("en", {
 const exact = new Intl.NumberFormat("en")
 
 export function TelemetryRail() {
+  const { t } = useTranslation()
   const historyBefore = useAppStore((state) => state.historyBefore)
   const telemetry = useAppStore((state) => state.execution.telemetry)
   const usage = useAppStore((state) => state.execution.lastTurnUsage)
@@ -24,21 +26,31 @@ export function TelemetryRail() {
   const total = telemetry.inputTokens + telemetry.outputTokens
   return (
     <details className="telemetry-rail">
-      <summary aria-label="Session telemetry">
-        <span className="telemetry-caption">Session</span>
-        <span title="Average time to first token across measured model calls">
-          Avg TTFT{" "}
+      <summary aria-label={t("Session telemetry")}>
+        <span className="telemetry-caption">{t("Session")}</span>
+        <span
+          title={t("Average time to first token across measured model calls")}
+        >
+          {t("Avg TTFT")}{" "}
           <strong>{duration(telemetry.averageTimeToFirstTokenMs)}</strong>
         </span>
         {historyBefore === undefined ? (
-          <span title={`${exact.format(total)} total input and output tokens`}>
-            Tokens <strong>{compact.format(total)}</strong>
+          <span
+            title={t("{0} total input and output tokens", exact.format(total))}
+          >
+            {t("Tokens")} <strong>{compact.format(total)}</strong>
           </span>
         ) : null}
-        <span title="Provider-reported cached input tokens / all input tokens">
-          Cache hit <strong>{cacheHit}</strong>
+        <span
+          title={t("Provider-reported cached input tokens / all input tokens")}
+        >
+          {t("Cache hit")} <strong>{cacheHit}</strong>
         </span>
-        <span title="Last completed turn: output tokens / model time, including first-token wait">
+        <span
+          title={t(
+            "Last completed turn: output tokens / model time, including first-token wait",
+          )}
+        >
           TPS <strong>{tps}</strong>
         </span>
         <ChevronDown
@@ -47,43 +59,46 @@ export function TelemetryRail() {
           aria-hidden="true"
         />
       </summary>
-      <section className="telemetry-dashboard" aria-label="Session metrics">
+      <section
+        className="telemetry-dashboard"
+        aria-label={t("Session metrics")}
+      >
         <div className="telemetry-dashboard-heading">
-          <span>Token usage</span>
+          <span>{t("Token usage")}</span>
           <span>
-            {telemetry.turns} completed turns · {telemetry.steps} steps
+            {telemetry.turns} {t("completed turns ·")} {telemetry.steps} steps
           </span>
         </div>
         <dl>
           <div>
-            <dt>Input</dt>
+            <dt>{t("Input")}</dt>
             <dd>{exact.format(telemetry.inputTokens)}</dd>
           </div>
           <div>
-            <dt>Output</dt>
+            <dt>{t("Output")}</dt>
             <dd>{exact.format(telemetry.outputTokens)}</dd>
           </div>
           <div>
-            <dt>Cache read</dt>
+            <dt>{t("Cache read")}</dt>
             <dd>{exact.format(telemetry.cacheReadInputTokens)}</dd>
           </div>
           <div>
-            <dt>Cache write</dt>
+            <dt>{t("Cache write")}</dt>
             <dd>{exact.format(telemetry.cacheWriteInputTokens)}</dd>
           </div>
           <div>
-            <dt>Model time</dt>
+            <dt>{t("Model time")}</dt>
             <dd>{duration(telemetry.modelDurationMs)}</dd>
           </div>
           <div>
-            <dt>Tool time</dt>
+            <dt>{t("Tool time")}</dt>
             <dd>{duration(telemetry.toolDurationMs)}</dd>
           </div>
         </dl>
         <p>
-          Tokens include cached input. Timing updates when a turn finishes. TPS
-          is output tokens per second of model time in the last completed turn,
-          including the first-token wait; tool time is excluded.
+          {t(
+            "Tokens include cached input. Timing updates when a turn finishes. TPS is output tokens per second of model time in the last completed turn, including the first-token wait; tool time is excluded.",
+          )}
         </p>
       </section>
     </details>

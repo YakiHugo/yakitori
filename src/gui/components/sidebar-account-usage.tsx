@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ArrowUpRight,
   ChartNoAxesColumnIncreasing,
@@ -41,6 +42,7 @@ function AccountUsagePopover({
   apiBase,
   currentAccountId,
 }: Readonly<{ apiBase: string; currentAccountId: string | undefined }>) {
+  const { locale, t } = useTranslation()
   const accounts = useAppStore((state) => state.accounts)
   const recentAccountIds = useAppStore(
     (state) => state.usage.summary?.recentAccountIds,
@@ -113,7 +115,7 @@ function AccountUsagePopover({
           <button
             type="button"
             className="window-rail-button account-usage-trigger"
-            aria-label="Account usage"
+            aria-label={t("Account usage")}
             aria-haspopup="dialog"
             aria-expanded={open}
             aria-controls={id}
@@ -123,9 +125,13 @@ function AccountUsagePopover({
           </button>
         </TooltipTrigger>
         <TooltipContent side="right" sideOffset={9}>
-          {currentName ?? "Account usage"}
+          {currentName ?? t("Account usage")}
           {tightest && viewed?.name === current?.name
-            ? ` · ${remainingPercent(tightest.usedPercent)}% remaining (${tightest.name})`
+            ? ` ${t(
+                "· {0}% remaining ({1})",
+                remainingPercent(tightest.usedPercent),
+                tightest.name,
+              )}`
             : ""}
         </TooltipContent>
       </Tooltip>
@@ -150,37 +156,37 @@ function AccountUsagePopover({
         <header className="account-usage-heading">
           <p>
             {viewed?.name === current?.name && viewed
-              ? "Next message"
-              : "Account usage"}
+              ? t("Next message")
+              : t("Account usage")}
           </p>
           <h2 id={`${id}-title`}>
-            {viewed?.displayName ?? viewed?.name ?? "Usage limits"}
+            {viewed?.displayName ?? viewed?.name ?? t("Usage limits")}
           </h2>
           {subscription?.plan && (
-            <span>{formatPlan(subscription.plan)} plan</span>
+            <span>{t("{0} plan", formatPlan(subscription.plan))}</span>
           )}
         </header>
         <div className="account-usage-body">
           {!viewed ? (
             <p>
               {accounts.length
-                ? "The next account is undetermined."
-                : "Connect an account to view its usage."}
+                ? t("The next account is undetermined.")
+                : t("Connect an account to view its usage.")}
             </p>
           ) : viewed.availability === "requires_login" ||
             subscription?.availability === "requires_login" ? (
-            <p>Reconnect this account to check its usage.</p>
+            <p>{t("Reconnect this account to check its usage.")}</p>
           ) : !usage ? (
-            <p role="status">Checking usage…</p>
+            <p role="status">{t("Checking usage…")}</p>
           ) : "error" in usage ||
             (subscription?.usage.status === "unavailable" &&
               subscription.usage.reason === "temporarily_unavailable") ? (
-            <p role="status">Usage is temporarily unavailable.</p>
+            <p role="status">{t("Usage is temporarily unavailable.")}</p>
           ) : buckets.length === 0 && !subscription?.financials ? (
             <p>
               {subscription?.management === "chatgpt"
-                ? "View limits and balances in ChatGPT."
-                : "This connection doesn’t report usage limits."}
+                ? t("View limits and balances in ChatGPT.")
+                : t("This connection doesn’t report usage limits.")}
             </p>
           ) : (
             <>
@@ -197,16 +203,19 @@ function AccountUsagePopover({
                   >
                     <div>
                       <span>{bucket.name}</span>
-                      <strong>{remaining}% remaining</strong>
+                      <strong>
+                        {remaining}
+                        {t("% remaining")}
+                      </strong>
                     </div>
                     <progress
                       max={100}
                       value={remaining}
-                      aria-label={`${bucket.name} remaining`}
+                      aria-label={t("{0} remaining", bucket.name)}
                     />
                     {reset && Number.isFinite(reset.getTime()) && (
                       <time dateTime={reset.toISOString()}>
-                        Resets {formatResetTime(reset)}
+                        {t("Resets")} {formatResetTime(reset, locale)}
                       </time>
                     )}
                   </div>
@@ -230,11 +239,11 @@ function AccountUsagePopover({
                   setShowAccounts(!showAccounts)
                 }}
               >
-                {current ? "Other accounts" : "View accounts"}
+                {current ? t("Other accounts") : t("View accounts")}
                 <ChevronDown size={14} aria-hidden="true" />
               </button>
               {showAccounts && (
-                <ul id={`${id}-accounts`} aria-label="Provider accounts">
+                <ul id={`${id}-accounts`} aria-label={t("Provider accounts")}>
                   {accountChoices.map((account) => (
                     <li key={account.name}>
                       <button
@@ -250,7 +259,7 @@ function AccountUsagePopover({
                       >
                         {account.displayName ?? account.name}
                         {account.name === current?.name && (
-                          <small>Next message</small>
+                          <small>{t("Next message")}</small>
                         )}
                       </button>
                     </li>
@@ -269,7 +278,7 @@ function AccountUsagePopover({
                 openSettings(viewed ? "subscriptions" : "providers")
               }}
             >
-              {viewed ? "Manage usage" : "Manage accounts"}
+              {viewed ? t("Manage usage") : t("Manage accounts")}
               <ArrowUpRight size={14} aria-hidden="true" />
             </button>
           )}

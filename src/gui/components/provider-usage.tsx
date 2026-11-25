@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useState } from "react"
 import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
@@ -32,6 +33,7 @@ export function ProviderUsage({
   configuration?: ApiConfiguredProvider
   chatGPT: boolean
 }>) {
+  const { t } = useTranslation()
   const usage = useAppStore((state) => state.usage)
   const loadUsage = useAppStore((state) => state.loadUsage)
   const [subscription, setSubscription] = useState<SubscriptionUsageState>({
@@ -59,7 +61,9 @@ export function ProviderUsage({
           if (current)
             setSubscription({
               loading: false,
-              error: "Could not update this account's subscription usage.",
+              error: translate(
+                "Could not update this account's subscription usage.",
+              ),
             })
         },
       )
@@ -90,29 +94,29 @@ export function ProviderUsage({
   const knownCost = rows.reduce((sum, row) => sum + (row.cost ?? 0), 0)
   const unknown = rows.filter((row) => row.cost === undefined).length
   return (
-    <section aria-label="Provider usage">
+    <section aria-label={t("Provider usage")}>
       <div className="provider-usage-toolbar">
-        <h3>Usage</h3>
+        <h3>{t("Usage")}</h3>
         <Select<UsageRange>
           size="sm"
-          aria-label="Usage period"
+          aria-label={t("Usage period")}
           value={range}
           onValueChange={setRange}
           options={([7, 30, 90, 366, "all"] as const).map((value) => ({
             value,
-            label: value === "all" ? "All time" : `Last ${value} days`,
+            label: value === "all" ? t("All time") : t("Last {0} days", value),
           }))}
         />
       </div>
       <p className="provider-field-hint">
-        Recorded in Yakitori ·{" "}
+        {t("Recorded in Yakitori ·")}{" "}
         {compact.format(
           view ? rows.reduce((sum, row) => sum + totalTokens(row), 0) : 0,
         )}{" "}
-        tokens ·{" "}
+        {t("tokens ·")}{" "}
         {rows.length && unknown !== rows.length
           ? `${unknown ? "At least " : ""}${currency.format(knownCost)} estimated`
-          : "Cost unknown"}
+          : t("Cost unknown")}
       </p>
       {usage.error ? (
         <p role="alert" className="provider-message">
@@ -121,22 +125,24 @@ export function ProviderUsage({
       ) : null}
       {usage.loading && !view ? (
         <p role="status" className="provider-message">
-          Loading usage…
+          {t("Loading usage…")}
         </p>
       ) : view && !rows.length ? (
-        <p className="provider-message">No recorded usage in this period.</p>
+        <p className="provider-message">
+          {t("No recorded usage in this period.")}
+        </p>
       ) : null}
       {rows.length ? (
         <div className="provider-usage-scroll">
           <table className="provider-usage-table">
             <thead>
               <tr>
-                <th>Source / model</th>
-                <th>Input</th>
-                <th>Output</th>
-                <th>Cache read</th>
-                <th>Turns</th>
-                <th>Est. cost</th>
+                <th>{t("Source / model")}</th>
+                <th>{t("Input")}</th>
+                <th>{t("Output")}</th>
+                <th>{t("Cache read")}</th>
+                <th>{t("Turns")}</th>
+                <th>{t("Est. cost")}</th>
               </tr>
             </thead>
             <tbody>
@@ -165,11 +171,12 @@ export function ProviderUsage({
         </div>
       ) : null}
       <p className="provider-message provider-field-hint">
-        Estimates use current catalog or custom USD rates, not invoices. “—”
-        means pricing is unavailable.
+        {t(
+          "Estimates use current catalog or custom USD rates, not invoices. “—” means pricing is unavailable.",
+        )}
       </p>
       <div className="provider-usage-limits">
-        <h4>Balance and usage</h4>
+        <h4>{t("Balance and usage")}</h4>
         {chatGPT ? (
           <ChatGPTUsageLink />
         ) : (

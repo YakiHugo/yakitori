@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n/use-translation.ts"
 import { useId } from "react"
 import { citationURL } from "../../citation-sources.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
@@ -22,6 +23,7 @@ export function AssistantMessageCell({
   className?: string
   sourceLabel?: string
 }>) {
+  const { t } = useTranslation()
   const citationListId = useId()
   return (
     <div
@@ -42,7 +44,7 @@ export function AssistantMessageCell({
       <LiveTextNotice entry={entry} />
       {entry.refusal ? (
         <p className="mb-1 text-caption font-medium text-muted-foreground">
-          Provider refusal
+          {t("Provider refusal")}
         </p>
       ) : null}
       <MarkdownView
@@ -60,10 +62,10 @@ export function AssistantMessageCell({
       />
       {entry.sources?.length ? (
         <section
-          aria-label="Sources"
+          aria-label={t("Sources")}
           className="mt-3 text-caption text-muted-foreground"
         >
-          <div className="mb-1 font-medium">Sources</div>
+          <div className="mb-1 font-medium">{t("Sources")}</div>
           <ol className="flex flex-wrap gap-x-4 gap-y-1">
             {entry.sources.map((source, index) => {
               const url = citationURL(source.url)
@@ -88,7 +90,9 @@ export function AssistantMessageCell({
                   {source.location ? <span> · {source.location}</span> : null}
                   {source.citedTexts?.length ? (
                     <details className="mt-1">
-                      <summary className="cursor-pointer">Cited text</summary>
+                      <summary className="cursor-pointer">
+                        {t("Cited text")}
+                      </summary>
                       {source.citedTexts.map((text) => (
                         <blockquote
                           key={text}

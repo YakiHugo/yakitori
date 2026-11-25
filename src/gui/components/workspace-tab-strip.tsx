@@ -1,5 +1,6 @@
 import { Plus, X } from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
+import { useTranslation } from "../i18n/use-translation.ts"
 import type { WorkspaceTab } from "../store/workspace-store.ts"
 import { workspaceTabPresentation } from "./workspace-views.ts"
 
@@ -16,6 +17,7 @@ export function WorkspaceTabStrip({
   onClose: (tab: WorkspaceTab) => void
   onNewTab: () => void
 }>) {
+  const { t } = useTranslation()
   const selectedTab = useRef<HTMLDivElement>(null)
   const launcherActive = tabs.some(
     (tab) => tab.id === activeId && tab.kind === "launcher",
@@ -38,11 +40,11 @@ export function WorkspaceTabStrip({
       <div
         className="workspace-tabs"
         role="tablist"
-        aria-label="Workspace views"
+        aria-label={t("Workspace views")}
       >
         {tabs.map((tab, index) => {
           const { id } = tab
-          const { label, icon: Icon, title } = workspaceTabPresentation(tab)
+          const { label, icon: Icon, title } = workspaceTabPresentation(tab, t)
           const selected = id === activeId
           return (
             <div
@@ -87,7 +89,7 @@ export function WorkspaceTabStrip({
               <button
                 type="button"
                 className="workspace-tab-close"
-                aria-label={`Close ${label}`}
+                aria-label={t("Close {0}", label)}
                 tabIndex={selected ? 0 : -1}
                 onClick={() => onClose(tab)}
               >
@@ -101,8 +103,8 @@ export function WorkspaceTabStrip({
         <button
           type="button"
           className="sidebar-icon workspace-add-tab"
-          aria-label="Add workspace tab"
-          title="New tab"
+          aria-label={t("Add workspace tab")}
+          title={t("New tab")}
           onClick={onNewTab}
         >
           <Plus size={17} />

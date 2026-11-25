@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ArrowLeft,
   ArrowRight,
@@ -34,6 +35,7 @@ export function BrowserPanel({
   onTitleChange,
   onSelection,
 }: BrowserPanelProps) {
+  const { t } = useTranslation()
   const bridge = window.yakitoriDesktop?.browser
   const [state, setState] = useState<WorkspaceBrowserState>({
     tabId,
@@ -77,7 +79,7 @@ export function BrowserPanel({
         observedUrl.current = next.url
         setAddress(next.url)
       }
-      callbacks.current.onTitleChange?.(next.title || next.url || "Browser")
+      callbacks.current.onTitleChange?.(next.title || next.url)
     }
     const unsubscribe = bridge.onState(update)
     const unselect = bridge.onSelection((selection) => {
@@ -233,7 +235,7 @@ export function BrowserPanel({
   }
 
   return (
-    <section aria-label="Browser" className="flex min-h-0 flex-1 flex-col">
+    <section aria-label={t("Browser")} className="flex min-h-0 flex-1 flex-col">
       <form
         className="flex shrink-0 items-center gap-1 border-b p-2"
         onSubmit={(event) => {
@@ -244,7 +246,7 @@ export function BrowserPanel({
         <button
           type="button"
           className="sidebar-icon"
-          aria-label="Back"
+          aria-label={t("Back")}
           disabled={!bridge || !state.canGoBack}
           onClick={() => browserAction("back")}
         >
@@ -253,7 +255,7 @@ export function BrowserPanel({
         <button
           type="button"
           className="sidebar-icon"
-          aria-label="Forward"
+          aria-label={t("Forward")}
           disabled={!bridge || !state.canGoForward}
           onClick={() => browserAction("forward")}
         >
@@ -262,16 +264,16 @@ export function BrowserPanel({
         <button
           type="button"
           className="sidebar-icon"
-          aria-label={state.loading ? "Stop loading" : "Reload page"}
+          aria-label={state.loading ? t("Stop loading") : t("Reload page")}
           disabled={!bridge || !state.url}
           onClick={() => browserAction(state.loading ? "stop" : "reload")}
         >
           {state.loading ? <X size={14} /> : <RotateCw size={14} />}
         </button>
         <input
-          aria-label="Browser address"
+          aria-label={t("Browser address")}
           className="h-8 min-w-0 flex-1 rounded-md border bg-muted/30 px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
-          placeholder="Enter a URL"
+          placeholder={t("Enter a URL")}
           value={address}
           onChange={(event) => setAddress(event.target.value)}
           onFocus={(event) => event.currentTarget.select()}
@@ -279,7 +281,7 @@ export function BrowserPanel({
         <button
           type="submit"
           className="sidebar-icon"
-          aria-label="Go to address"
+          aria-label={t("Go to address")}
           disabled={!address.trim()}
         >
           {state.loading ? (
@@ -292,8 +294,8 @@ export function BrowserPanel({
           <button
             type="button"
             className="sidebar-icon"
-            aria-label="Take over browser tab"
-            title="Stop the turn controlling this tab"
+            aria-label={t("Take over browser tab")}
+            title={t("Stop the turn controlling this tab")}
             disabled={!ready || takingOver}
             onClick={() =>
               void perform(async () => {
@@ -320,12 +322,12 @@ export function BrowserPanel({
       {bridge && state.url && (
         <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-[11px] text-muted-foreground">
           <span className="mr-auto truncate">
-            Select page text to discuss it
+            {t("Select page text to discuss it")}
           </span>
           <button
             type="button"
-            title="Add selected text to conversation"
-            aria-label="Add selected text to conversation"
+            title={t("Add selected text to conversation")}
+            aria-label={t("Add selected text to conversation")}
             className="sidebar-icon"
             onClick={() =>
               void perform(() => bridge.selection({ tabId, action: "add" }))
@@ -335,8 +337,8 @@ export function BrowserPanel({
           </button>
           <button
             type="button"
-            title="Ask about selected text in side chat"
-            aria-label="Ask about selected text in side chat"
+            title={t("Ask about selected text in side chat")}
+            aria-label={t("Ask about selected text in side chat")}
             className="sidebar-icon"
             onClick={() =>
               void perform(() => bridge.selection({ tabId, action: "chat" }))
@@ -366,10 +368,11 @@ export function BrowserPanel({
         {!bridge ? (
           <div className="workspace-empty h-full">
             <Globe size={28} strokeWidth={1.25} />
-            <strong>Open websites in the desktop app</strong>
+            <strong>{t("Open websites in the desktop app")}</strong>
             <p>
-              The desktop app displays websites here. In this browser, open the
-              page in a separate tab.
+              {t(
+                "The desktop app displays websites here. In this browser, open the page in a separate tab.",
+              )}
             </p>
             {state.url && (
               <a
@@ -379,24 +382,25 @@ export function BrowserPanel({
                 className="inline-flex items-center gap-2 text-foreground"
               >
                 <ExternalLink size={14} />
-                Open page
+                {t("Open page")}
               </a>
             )}
           </div>
         ) : !state.url && !state.loading ? (
           <div className="workspace-empty h-full">
             <Globe size={28} strokeWidth={1.25} />
-            <strong>A page beside your conversation</strong>
+            <strong>{t("A page beside your conversation")}</strong>
             <p>
-              Enter a website or local app URL above. Select text on a page to
-              add context or ask a question.
+              {t(
+                "Enter a website or local app URL above. Select text on a page to add context or ask a question.",
+              )}
             </p>
           </div>
         ) : state.error ? (
           <div className="workspace-empty h-full">
             <Globe size={28} strokeWidth={1.25} />
-            <strong>This page could not be loaded</strong>
-            <p>Check the address or reload the page to try again.</p>
+            <strong>{t("This page could not be loaded")}</strong>
+            <p>{t("Check the address or reload the page to try again.")}</p>
           </div>
         ) : null}
       </div>

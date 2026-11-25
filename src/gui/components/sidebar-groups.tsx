@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   Archive,
   ChevronRight,
@@ -18,10 +19,11 @@ import { Button } from "./ui/button.tsx"
 export function SidebarGroups({
   pinnedProjects,
 }: Readonly<{ pinnedProjects: readonly ReactNode[] }>) {
+  const { t } = useTranslation()
   const sections = useAppStore((state) => state.sidebar.sections)
   return (
     <>
-      <SidebarGroup id="pinned" name="Pinned">
+      <SidebarGroup id="pinned" name={t("Pinned")}>
         {pinnedProjects}
       </SidebarGroup>
       {sections.map((section) => (
@@ -32,6 +34,7 @@ export function SidebarGroups({
 }
 
 export function SidebarOptions() {
+  const { t } = useTranslation()
   const changeSidebar = useAppStore((state) => state.changeSidebar)
   const loadSessions = useAppStore((state) => state.loadSessions)
   const [creating, setCreating] = useState(false)
@@ -39,7 +42,7 @@ export function SidebarOptions() {
   return (
     <>
       <SidebarMenu
-        label="Sidebar options"
+        label={t("Sidebar options")}
         triggerContent={
           <>
             <span>Yakitori</span>
@@ -48,12 +51,12 @@ export function SidebarOptions() {
         }
         items={[
           {
-            label: "New section",
+            label: t("New section"),
             icon: <FolderPlus size={15} />,
             action: () => setCreating(true),
           },
           {
-            label: "Archived conversations",
+            label: t("Archived conversations"),
             icon: <Archive size={15} />,
             action: () => {
               setArchives(true)
@@ -66,14 +69,14 @@ export function SidebarOptions() {
       </SidebarMenu>
       {creating && (
         <SidebarNameDialog
-          title="New section"
+          title={t("New section")}
           onClose={() => setCreating(false)}
           onSave={(name) => changeSidebar({ type: "create-section", name })}
         />
       )}
       {archives && (
         <SidebarDialog
-          title="Archived conversations"
+          title={t("Archived conversations")}
           onClose={() => setArchives(false)}
         >
           <div className="max-h-[55vh] overflow-y-auto">
@@ -90,6 +93,7 @@ function SidebarGroup({
   name,
   children,
 }: Readonly<{ id: string; name: string; children?: ReactNode }>) {
+  const { t } = useTranslation()
   const open = useAppStore((state) => !state.collapsedSections[id])
   const setSectionOpen = useAppStore((state) => state.setSectionOpen)
   const [renaming, setRenaming] = useState(false)
@@ -157,17 +161,17 @@ function SidebarGroup({
           toggle
         ) : (
           <SidebarMenu
-            label={`Section actions for ${name}`}
+            label={t("Section actions for {0}", name)}
             items={[
               {
-                label: "Rename section",
+                label: t("Rename section"),
                 icon: <Pencil size={15} />,
                 action: () => setRenaming(true),
               },
               ...(index > 0
                 ? [
                     {
-                      label: "Move section up",
+                      label: t("Move section up"),
                       icon: <ChevronUp size={15} />,
                       action: () => void moveSidebarSection(id, "up"),
                     },
@@ -176,14 +180,14 @@ function SidebarGroup({
               ...(index < sections.length - 1
                 ? [
                     {
-                      label: "Move section down",
+                      label: t("Move section down"),
                       icon: <ChevronDown size={15} />,
                       action: () => void moveSidebarSection(id, "down"),
                     },
                   ]
                 : []),
               {
-                label: "Delete section",
+                label: t("Delete section"),
                 icon: <Trash2 size={15} />,
                 destructive: true,
                 action: () => setDeleting(true),
@@ -200,7 +204,7 @@ function SidebarGroup({
       </CollapsibleContent>
       {renaming && (
         <SidebarNameDialog
-          title="Rename section"
+          title={t("Rename section")}
           initialName={name}
           onClose={() => setRenaming(false)}
           onSave={(name) =>
@@ -210,15 +214,15 @@ function SidebarGroup({
       )}
       {deleting && (
         <SidebarDialog
-          title="Delete section?"
+          title={t("Delete section?")}
           onClose={() => setDeleting(false)}
         >
           <p className="text-sm text-muted-foreground">
-            Conversations return to their project or All sessions.
+            {t("Conversations return to their project or All sessions.")}
           </p>
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setDeleting(false)}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -232,7 +236,7 @@ function SidebarGroup({
                 })
               }}
             >
-              Delete section
+              {t("Delete section")}
             </Button>
           </div>
         </SidebarDialog>

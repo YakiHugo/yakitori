@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { ChevronRight } from "lucide-react"
 import { useEffect, useState } from "react"
 import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
@@ -11,6 +12,7 @@ export function ChatGPTAccountDialogs({
   connection,
   active,
 }: Readonly<{ connection: ChatGPTConnectionController; active: boolean }>) {
+  const { t } = useTranslation()
   const { state, pending, error } = connection
   const [label, setLabel] = useState("")
   useEffect(() => {
@@ -47,7 +49,7 @@ export function ChatGPTAccountDialogs({
           disabled={pending}
           onClick={() => void connection.close()}
         >
-          Cancel sign-in
+          {t("Cancel sign-in")}
         </Button>
       ) : null}
       {error && !connection.dialog && !welcome ? (
@@ -57,7 +59,7 @@ export function ChatGPTAccountDialogs({
             <>
               {" "}
               <button type="button" onClick={() => void connection.refresh()}>
-                Retry
+                {t("Retry")}
               </button>
             </>
           ) : null}
@@ -66,13 +68,14 @@ export function ChatGPTAccountDialogs({
       {welcome ? (
         <SidebarDialog
           key={error ?? "welcome"}
-          title="You’re using your ChatGPT plan"
+          title={t("You’re using your ChatGPT plan")}
           dismissible={!pending}
           onClose={() => void connection.acknowledge()}
         >
           <p className="provider-field-hint">
-            Eligible AI requests in Yakitori use your ChatGPT plan or available
-            credits. You can review usage and adjust limits in ChatGPT settings.
+            {t(
+              "Eligible AI requests in Yakitori use your ChatGPT plan or available credits. You can review usage and adjust limits in ChatGPT settings.",
+            )}
           </p>
           {error ? <p role="alert">{error}</p> : null}
           <div className="provider-editor-footer">
@@ -82,13 +85,13 @@ export function ChatGPTAccountDialogs({
               disabled={pending}
               onClick={() => void connection.acknowledge()}
             >
-              Got it
+              {t("Got it")}
             </Button>
           </div>
         </SidebarDialog>
       ) : connection.dialog && active ? (
         <SidebarDialog
-          title="Connect ChatGPT"
+          title={t("Connect ChatGPT")}
           dismissImmediately
           onClose={() => void connection.close()}
         >
@@ -96,12 +99,13 @@ export function ChatGPTAccountDialogs({
             <>
               <p role="status">
                 {waiting
-                  ? "Waiting for sign-in in your system browser…"
-                  : "Starting ChatGPT sign-in…"}
+                  ? t("Waiting for sign-in in your system browser…")
+                  : t("Starting ChatGPT sign-in…")}
               </p>
               <p className="provider-field-hint">
-                Choose your account and review plan usage permission in the
-                browser. You can cancel and return later.
+                {t(
+                  "Choose your account and review plan usage permission in the browser. You can cancel and return later.",
+                )}
               </p>
               <div className="provider-editor-footer">
                 <Button
@@ -109,31 +113,35 @@ export function ChatGPTAccountDialogs({
                   variant="outline"
                   onClick={() => void connection.close()}
                 >
-                  Cancel sign-in
+                  {t("Cancel sign-in")}
                 </Button>
               </div>
             </>
           ) : connection.dialog === "attempt" &&
             state?.attempt?.state === "identity_only" ? (
             <>
-              <p role="status">Signed in. ChatGPT plan usage wasn’t enabled.</p>
+              <p role="status">
+                {t("Signed in. ChatGPT plan usage wasn’t enabled.")}
+              </p>
               <p className="provider-field-hint">
-                You can keep this identity connection and reconnect later to
-                allow plan usage.
+                {t(
+                  "You can keep this identity connection and reconnect later to allow plan usage.",
+                )}
               </p>
               <Button type="button" onClick={() => void connection.close()}>
-                Done
+                {t("Done")}
               </Button>
             </>
           ) : connection.dialog === "attempt" &&
             state?.attempt?.state === "succeeded" ? (
             <>
               <p role="status">
-                ChatGPT connected. Its models are available in the model
-                selector.
+                {t(
+                  "ChatGPT connected. Its models are available in the model selector.",
+                )}
               </p>
               <Button type="button" onClick={() => void connection.close()}>
-                Done
+                {t("Done")}
               </Button>
             </>
           ) : (
@@ -144,11 +152,13 @@ export function ChatGPTAccountDialogs({
               }}
             >
               {state?.attempt?.state === "failed" ? (
-                <p role="alert">ChatGPT sign-in did not finish. Try again.</p>
+                <p role="alert">
+                  {t("ChatGPT sign-in did not finish. Try again.")}
+                </p>
               ) : null}
               {connection.reconnectingAccountId ? (
                 <p className="provider-field-hint">
-                  Reconnect{" "}
+                  {t("Reconnect")}{" "}
                   {accounts.find(
                     (account) =>
                       account.id === connection.reconnectingAccountId,
@@ -158,7 +168,7 @@ export function ChatGPTAccountDialogs({
               ) : (
                 <Field>
                   <FieldLabel htmlFor="chatgpt-account-label">
-                    Account label
+                    {t("Account label")}
                   </FieldLabel>
                   <Input
                     id="chatgpt-account-label"
@@ -167,7 +177,7 @@ export function ChatGPTAccountDialogs({
                     aria-describedby={
                       duplicateLabel ? "chatgpt-label-error" : undefined
                     }
-                    placeholder="Personal or Work"
+                    placeholder={t("Personal or Work")}
                     autoComplete="off"
                     data-autofocus
                     maxLength={80}
@@ -177,17 +187,18 @@ export function ChatGPTAccountDialogs({
               )}
               {duplicateLabel ? (
                 <p id="chatgpt-label-error" role="alert">
-                  Choose a different label for this connection.
+                  {t("Choose a different label for this connection.")}
                 </p>
               ) : null}
               <p className="provider-field-hint">
-                Use a distinct label for each saved connection, such as Personal
-                or Work. Even connections with the same email stay separate.
+                {t(
+                  "Use a distinct label for each saved connection, such as Personal or Work. Even connections with the same email stay separate.",
+                )}
               </p>
               <div className="provider-editor-footer">
                 <Button type="submit" disabled={duplicateLabel}>
                   <ProviderLogo preset="openai" />
-                  Continue with ChatGPT
+                  {t("Continue with ChatGPT")}
                 </Button>
               </div>
             </form>
@@ -206,6 +217,7 @@ export function ChatGPTAccountRows({
   connection: ChatGPTConnectionController
   onOpen(accountId: string): void
 }>) {
+  const { t } = useTranslation()
   return (
     <>
       {connection.state?.accounts.map((account) => (
@@ -221,17 +233,17 @@ export function ChatGPTAccountRows({
               {account.email ? <span>{account.email}</span> : null}
               <span>
                 {account.state === "connected"
-                  ? "ChatGPT plan usage enabled"
+                  ? t("ChatGPT plan usage enabled")
                   : account.state === "identity_only"
-                    ? "Signed in · plan usage not enabled"
-                    : "Signed out on this device"}
+                    ? t("Signed in · plan usage not enabled")
+                    : t("Signed out on this device")}
               </span>
             </span>
           </button>
           <button
             type="button"
             className="provider-connection-open"
-            aria-label={`Open ${account.label} details`}
+            aria-label={t("Open {0} details", account.label)}
             onClick={() => onOpen(account.id)}
           >
             <ChevronRight size={14} className="provider-connection-chevron" />
@@ -246,6 +258,7 @@ export function ChatGPTAccountActions({
   connection,
   accountId,
 }: Readonly<{ connection: ChatGPTConnectionController; accountId: string }>) {
+  const { t } = useTranslation()
   const account = connection.state?.accounts.find(
     (account) => account.id === accountId,
   )
@@ -256,14 +269,16 @@ export function ChatGPTAccountActions({
     <>
       {account.state === "identity_only" ? (
         <p className="provider-field-hint">
-          Your identity is connected. Reconnect and allow plan usage to use
-          models from this account.
+          {t(
+            "Your identity is connected. Reconnect and allow plan usage to use models from this account.",
+          )}
         </p>
       ) : null}
       {account.remoteRevocation === "unconfirmed" ? (
         <p role="status" className="chatgpt-revocation-warning">
-          Local credentials were removed. Remote revocation wasn’t confirmed.
-          Review this app’s access in ChatGPT settings.
+          {t(
+            "Local credentials were removed. Remote revocation wasn’t confirmed. Review this app’s access in ChatGPT settings.",
+          )}
         </p>
       ) : null}
       <div className="chatgpt-account-actions">
@@ -276,8 +291,8 @@ export function ChatGPTAccountActions({
           onClick={() => void connection.signIn({ accountId })}
         >
           {account.state === "identity_only"
-            ? "Enable plan usage"
-            : "Reconnect"}
+            ? t("Enable plan usage")
+            : t("Reconnect")}
         </Button>
         {account.state !== "signed_out" ? (
           <Button
@@ -285,10 +300,10 @@ export function ChatGPTAccountActions({
             variant="ghost"
             size="sm"
             disabled={blocked}
-            aria-label={`Sign out ${account.label}`}
+            aria-label={t("Sign out {0}", account.label)}
             onClick={() => void connection.signOut(accountId)}
           >
-            Sign out
+            {t("Sign out")}
           </Button>
         ) : null}
       </div>

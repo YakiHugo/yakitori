@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useRef, useState } from "react"
 import type {
   ModelCatalogResponse,
@@ -45,6 +46,7 @@ function AccountModels({
   provider: string
   titleModelConfigurable: boolean
 }>) {
+  const { t } = useTranslation()
   const [catalog, setCatalog] = useState<ModelCatalogResponse>()
   const [edits, setEdits] = useState<ModelEdits>({
     settings: {},
@@ -75,7 +77,8 @@ function AccountModels({
   const [writer] = useState(() =>
     createSettingsWriter<ModelEdits>({
       async write(next) {
-        if (!snapshot.current) throw new Error("Model settings are not loaded.")
+        if (!snapshot.current)
+          throw new Error(t("Model settings are not loaded."))
         const client = getAppRpcClient(apiBase)
         // Revisions retain edits queued during a save, and prevent conflict
         // retries from overwriting the other control's external changes.
@@ -156,7 +159,9 @@ function AccountModels({
         (cause: unknown) => {
           if (mounted.current && id === request.current)
             setError(
-              cause instanceof Error ? cause.message : "Could not load models.",
+              cause instanceof Error
+                ? cause.message
+                : t("Could not load models."),
             )
         },
       )
@@ -178,11 +183,11 @@ function AccountModels({
               type="button"
               onClick={() => setRevision((value) => value + 1)}
             >
-              Retry
+              {t("Retry")}
             </Button>
           </>
         ) : (
-          <p>Loading models…</p>
+          <p>{t("Loading models…")}</p>
         )}
       </div>
     )
@@ -278,13 +283,13 @@ function AccountModels({
                       setWriteError(
                         cause instanceof Error
                           ? cause.message
-                          : "Could not load models.",
+                          : t("Could not load models."),
                       )
                   },
                 )
             }}
           >
-            Retry changes
+            {t("Retry changes")}
           </Button>
         </div>
       ) : null}

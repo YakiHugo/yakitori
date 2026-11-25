@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useState } from "react"
 import type { PdfAttachment } from "../../protocol/asset-types.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
@@ -16,6 +17,7 @@ export function PdfAttachmentCard({
   attachment,
   apiBase,
 }: Readonly<{ attachment: PdfAttachment; apiBase: string }>) {
+  const { t } = useTranslation()
   const [error, setError] = useState<string>()
   const url = rolloutAssetUrl(attachment.file, apiBase)
   const downloadUrl = url === undefined ? undefined : new URL(url)
@@ -27,12 +29,14 @@ export function PdfAttachmentCard({
       return
     }
     void openUrlTarget({ kind: "url", url }).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : "Could not open PDF.")
+      setError(
+        reason instanceof Error ? reason.message : t("Could not open PDF."),
+      )
     })
   }
   return (
     <section
-      aria-label={`PDF attachment ${attachment.name}`}
+      aria-label={t("PDF attachment {0}", attachment.name)}
       className="rounded-lg border p-3 text-sm"
     >
       <p className="break-words font-medium">{attachment.name}</p>
@@ -45,17 +49,17 @@ export function PdfAttachmentCard({
           className="underline underline-offset-2"
           onClick={activate}
         >
-          Open PDF
+          {t("Open PDF")}
         </button>
         {downloadUrl === undefined ? (
-          <span>Download unavailable</span>
+          <span>{t("Download unavailable")}</span>
         ) : (
           <a
             className="underline underline-offset-2"
             href={downloadUrl.toString()}
             download={attachment.name}
           >
-            Download PDF
+            {t("Download PDF")}
           </a>
         )}
       </div>

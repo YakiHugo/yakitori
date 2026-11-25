@@ -7,6 +7,7 @@ import {
   Plus,
   Users,
 } from "lucide-react"
+import type { Message, Translate } from "../i18n/messages.ts"
 import type { WorkspaceTab, WorkspaceView } from "../store/workspace-store.ts"
 
 export const workspaceViews = {
@@ -19,15 +20,15 @@ export const workspaceViews = {
 } satisfies Record<
   WorkspaceView,
   {
-    label: string
+    label: Message
     icon: typeof Files
     needsProject?: boolean
     nativeOnly?: boolean
   }
 >
 
-export function workspaceTabPresentation(tab: WorkspaceTab) {
-  if (tab.kind === "launcher") return { label: "New tab", icon: Plus }
+export function workspaceTabPresentation(tab: WorkspaceTab, t: Translate) {
+  if (tab.kind === "launcher") return { label: t("New tab"), icon: Plus }
   if (tab.kind === "skill")
     return { label: tab.name, icon: Files, title: tab.path }
   if (tab.kind === "file")
@@ -41,7 +42,7 @@ export function workspaceTabPresentation(tab: WorkspaceTab) {
     label:
       (tab.kind === "browser" || tab.kind === "chat") && tab.title
         ? tab.title
-        : label,
+        : t(label),
     icon,
   }
 }

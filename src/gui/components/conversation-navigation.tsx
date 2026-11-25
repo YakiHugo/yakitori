@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { type RefObject, useLayoutEffect, useState } from "react"
 import type { ExecutionEntry } from "../execution-view.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
@@ -22,6 +23,7 @@ export function ConversationNavigation({
   viewportRef: RefObject<HTMLDivElement | null>
   contentRef: RefObject<HTMLDivElement | null>
 }>) {
+  const { t } = useTranslation()
   const [hovered, setHovered] = useState<number>()
   const [hasRoom, setHasRoom] = useState(false)
   useLayoutEffect(() => {
@@ -61,8 +63,8 @@ export function ConversationNavigation({
         text:
           entry.text ||
           (entry.kind === "user_input" && entry.contextAttachments?.length
-            ? "Referenced context"
-            : "Attached images"),
+            ? t("Referenced context")
+            : t("Attached images")),
         response: "",
       })
     else if (entry.kind === "assistant") {
@@ -73,7 +75,7 @@ export function ConversationNavigation({
   if (!hasRoom || messages.length < 2) return null
   return (
     <nav
-      aria-label="Conversation messages"
+      aria-label={t("Conversation messages")}
       className="conversation-navigation"
       onMouseLeave={() => setHovered(undefined)}
     >
@@ -96,7 +98,11 @@ export function ConversationNavigation({
           <button
             key={message.id}
             type="button"
-            aria-label={`Jump to request ${index + 1}: ${message.text.slice(0, 80)}`}
+            aria-label={t(
+              "Jump to request {0}: {1}",
+              index + 1,
+              message.text.slice(0, 80),
+            )}
             aria-current={active ? "location" : undefined}
             className="conversation-marker"
             onMouseEnter={() => setHovered(index)}

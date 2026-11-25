@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ArrowUp,
   CornerUpLeft,
@@ -36,6 +37,7 @@ export function ContextExcerpts({
   onRemove?(id: string): void
   onChange?(excerpt: ContextExcerpt): void
 }>) {
+  const { t } = useTranslation()
   const [summary, setSummary] = useState<{ pinned: boolean }>()
   const [editing, setEditing] = useState<{
     id: string
@@ -242,7 +244,7 @@ export function ContextExcerpts({
               className={`context-excerpt-popover ${active ? "context-excerpt-editor" : "context-excerpt-summary"}`}
               role="dialog"
               tabIndex={-1}
-              aria-label={active ? "Excerpt comment" : "Annotations"}
+              aria-label={active ? t("Excerpt comment") : t("Annotations")}
               style={position}
               onFocusCapture={() => {
                 clearTimeout(hoverTimer.current)
@@ -258,8 +260,8 @@ export function ContextExcerpts({
                 <>
                   <textarea
                     ref={input}
-                    aria-label="Excerpt comment (optional)"
-                    placeholder="Add an optional comment…"
+                    aria-label={t("Excerpt comment (optional)")}
+                    placeholder={t("Add an optional comment…")}
                     rows={2}
                     value={active.comment ?? ""}
                     onChange={(event) => {
@@ -289,8 +291,11 @@ export function ContextExcerpts({
                     {onRemove ? (
                       <button
                         type="button"
-                        aria-label={`Remove excerpt ${excerpts.indexOf(active) + 1}`}
-                        title="Remove annotation"
+                        aria-label={t(
+                          "Remove excerpt {0}",
+                          excerpts.indexOf(active) + 1,
+                        )}
+                        title={t("Remove annotation")}
                         onClick={() => {
                           onRemove(active.id)
                           setEditing(undefined)
@@ -302,8 +307,8 @@ export function ContextExcerpts({
                     ) : null}
                     <button
                       type="button"
-                      aria-label="Cancel comment"
-                      title="Cancel · Esc"
+                      aria-label={t("Cancel comment")}
+                      title={t("Cancel · Esc")}
                       onClick={cancel}
                     >
                       <X size={15} />
@@ -311,8 +316,8 @@ export function ContextExcerpts({
                     <button
                       type="button"
                       className="context-excerpt-save"
-                      aria-label="Save comment"
-                      title="Save · Enter"
+                      aria-label={t("Save comment")}
+                      title={t("Save · Enter")}
                       onClick={save}
                     >
                       <ArrowUp size={16} />
@@ -334,7 +339,10 @@ export function ContextExcerpts({
                           <button
                             type="button"
                             className="context-excerpt-source"
-                            aria-label={`Go to source for excerpt ${index + 1}`}
+                            aria-label={t(
+                              "Go to source for excerpt {0}",
+                              index + 1,
+                            )}
                             title={
                               excerpt.source.kind === "file"
                                 ? excerpt.source.path
@@ -357,8 +365,12 @@ export function ContextExcerpts({
                             <button
                               type="button"
                               className="context-excerpt-icon"
-                              aria-label={`Edit excerpt ${index + 1}: ${excerpt.source.label}`}
-                              title="Edit comment"
+                              aria-label={t(
+                                "Edit excerpt {0}: {1}",
+                                index + 1,
+                                excerpt.source.label,
+                              )}
+                              title={t("Edit comment")}
                               onClick={() => edit(excerpt)}
                             >
                               <Pencil size={13} />
@@ -368,8 +380,8 @@ export function ContextExcerpts({
                             <button
                               type="button"
                               className="context-excerpt-icon"
-                              aria-label={`Remove excerpt ${index + 1}`}
-                              title="Remove annotation"
+                              aria-label={t("Remove excerpt {0}", index + 1)}
+                              title={t("Remove annotation")}
                               onClick={() => {
                                 onRemove(excerpt.id)
                                 if (excerpts.length === 1) {
@@ -393,8 +405,9 @@ export function ContextExcerpts({
                         ) : null}
                         {excerpt.anchor && !located ? (
                           <p className="context-excerpt-notice">
-                            The original passage cannot be located precisely.
-                            Your excerpt is preserved.
+                            {t(
+                              "The original passage cannot be located precisely. Your excerpt is preserved.",
+                            )}
                           </p>
                         ) : null}
                       </li>

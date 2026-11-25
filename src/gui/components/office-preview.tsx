@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ChevronLeft,
   ChevronRight,
@@ -11,13 +12,19 @@ import "./office-preview.css"
 export function OfficePreview({
   document,
 }: Readonly<{ document: WorkspaceReadOfficeResponse }>) {
+  const { t } = useTranslation()
   const [selected, setSelected] = useState(0)
   if (document.kind === "docx")
     return (
       <div className="office-preview office-document">
-        <article aria-label="Document preview" className="office-document-page">
+        <article
+          aria-label={t("Document preview")}
+          className="office-document-page"
+        >
           {document.blocks.length === 0 ? (
-            <p className="office-preview-empty">No readable document text.</p>
+            <p className="office-preview-empty">
+              {t("No readable document text.")}
+            </p>
           ) : (
             document.blocks.map((block, index) =>
               block.kind === "paragraph" ? (
@@ -26,7 +33,7 @@ export function OfficePreview({
               ) : (
                 // biome-ignore lint/suspicious/noArrayIndexKey: document blocks are ordered positions.
                 <div className="office-document-table-scroll" key={index}>
-                  <table aria-label={`Document table ${index + 1}`}>
+                  <table aria-label={t("Document table {0}", index + 1)}>
                     <tbody>
                       {block.rows.map((row, rowIndex) => (
                         // biome-ignore lint/suspicious/noArrayIndexKey: table rows are ordered positions.
@@ -45,7 +52,9 @@ export function OfficePreview({
           )}
         </article>
         {document.truncated ? (
-          <p className="office-preview-limit">Document preview is partial.</p>
+          <p className="office-preview-limit">
+            {t("Document preview is partial.")}
+          </p>
         ) : null}
       </div>
     )
@@ -55,7 +64,7 @@ export function OfficePreview({
     const width = Math.max(0, ...(sheet?.rows ?? []).map((row) => row.length))
     return (
       <div className="office-preview office-workbook">
-        <nav className="office-sheet-tabs" aria-label="Worksheets">
+        <nav className="office-sheet-tabs" aria-label={t("Worksheets")}>
           <FileSpreadsheet size={15} aria-hidden="true" />
           {document.sheets.map((item, index) => (
             <button
@@ -70,7 +79,7 @@ export function OfficePreview({
         </nav>
         {sheet ? (
           <div className="office-sheet-scroll">
-            <table aria-label={`${sheet.name} worksheet`}>
+            <table aria-label={t("{0} worksheet", sheet.name)}>
               <thead>
                 <tr>
                   <th scope="col" className="office-sheet-corner">
@@ -97,14 +106,19 @@ export function OfficePreview({
             </table>
           </div>
         ) : (
-          <p className="office-preview-empty">No worksheets to preview.</p>
+          <p className="office-preview-empty">
+            {t("No worksheets to preview.")}
+          </p>
         )}
         <p className="office-preview-limit">
-          Raw cell values are shown. Dates, percentages, and formulas may look
-          different in Excel.
+          {t(
+            "Raw cell values are shown. Dates, percentages, and formulas may look different in Excel.",
+          )}
         </p>
         {document.truncated ? (
-          <p className="office-preview-limit">Worksheet preview is partial.</p>
+          <p className="office-preview-limit">
+            {t("Worksheet preview is partial.")}
+          </p>
         ) : null}
       </div>
     )
@@ -118,12 +132,12 @@ export function OfficePreview({
           <div className="office-slide-controls">
             <Presentation size={15} aria-hidden="true" />
             <span>
-              Slide {selected + 1} of {document.slides.length}
+              {t("Slide")} {selected + 1} of {document.slides.length}
             </span>
             <div>
               <button
                 type="button"
-                aria-label="Previous slide"
+                aria-label={t("Previous slide")}
                 disabled={selected === 0}
                 onClick={() => setSelected(selected - 1)}
               >
@@ -131,7 +145,7 @@ export function OfficePreview({
               </button>
               <button
                 type="button"
-                aria-label="Next slide"
+                aria-label={t("Next slide")}
                 disabled={selected === document.slides.length - 1}
                 onClick={() => setSelected(selected + 1)}
               >
@@ -141,10 +155,12 @@ export function OfficePreview({
           </div>
           <section
             className="office-slide"
-            aria-label={`Slide ${slide.number}`}
+            aria-label={t("Slide {0}", slide.number)}
           >
             {slide.paragraphs.length === 0 ? (
-              <p className="office-preview-empty">No readable slide text.</p>
+              <p className="office-preview-empty">
+                {t("No readable slide text.")}
+              </p>
             ) : (
               slide.paragraphs.map((paragraph, index) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: slide paragraphs are ordered positions.
@@ -153,8 +169,11 @@ export function OfficePreview({
             )}
           </section>
           {slide.notes.length > 0 ? (
-            <aside className="office-slide-notes" aria-label="Speaker notes">
-              <strong>Speaker notes</strong>
+            <aside
+              className="office-slide-notes"
+              aria-label={t("Speaker notes")}
+            >
+              <strong>{t("Speaker notes")}</strong>
               {slide.notes.map((note, index) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: note paragraphs are ordered positions.
                 <p key={index}>{note}</p>
@@ -163,10 +182,12 @@ export function OfficePreview({
           ) : null}
         </>
       ) : (
-        <p className="office-preview-empty">No slides to preview.</p>
+        <p className="office-preview-empty">{t("No slides to preview.")}</p>
       )}
       {document.truncated ? (
-        <p className="office-preview-limit">Presentation preview is partial.</p>
+        <p className="office-preview-limit">
+          {t("Presentation preview is partial.")}
+        </p>
       ) : null}
     </div>
   )

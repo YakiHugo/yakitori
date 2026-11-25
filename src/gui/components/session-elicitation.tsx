@@ -1,3 +1,4 @@
+import { translate, useTranslation } from "../i18n/use-translation.ts"
 import type { ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ExternalLink } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
@@ -30,6 +31,7 @@ function SessionRequests({
   apiBase,
   sessionId,
 }: Readonly<{ apiBase: string; sessionId: string }>) {
+  const { t } = useTranslation()
   const [requests, setRequests] = useState<readonly PendingElicitation[]>([])
   const [error, setError] = useState<string>()
   // Prevent a list response already in flight from restoring an answered card.
@@ -56,7 +58,7 @@ function SessionRequests({
           setError(
             error instanceof Error
               ? error.message
-              : "Could not load MCP requests.",
+              : translate("Could not load MCP requests."),
           )
       } finally {
         if (current) timer = setTimeout(() => void refresh(), delay)
@@ -71,7 +73,7 @@ function SessionRequests({
 
   if (!requests.length && error === undefined) return null
   return (
-    <section aria-label="MCP requests" className="flex flex-col gap-3">
+    <section aria-label={t("MCP requests")} className="flex flex-col gap-3">
       {error ? (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -106,6 +108,7 @@ function ElicitationCard({
   sessionId: string
   onAnswered: () => void
 }>) {
+  const { t } = useTranslation()
   const id = useId()
   const { params } = request
   const [schema] = useState(() =>
@@ -146,7 +149,7 @@ function ElicitationCard({
         setError(
           error instanceof Error
             ? error.message
-            : "Could not send your response.",
+            : t("Could not send your response."),
         )
     } finally {
       if (mounted.current) setBusy(false)
@@ -166,7 +169,7 @@ function ElicitationCard({
       aria-busy={busy}
     >
       <h3 id={`${id}-title`} className="text-sm font-medium">
-        {request.serverName} needs your input
+        {request.serverName} {t("needs your input")}
       </h3>
       <p className="mt-2 whitespace-pre-wrap text-sm">{params.message}</p>
       <form
@@ -189,7 +192,7 @@ function ElicitationCard({
           validUrl ? (
             <div className="flex flex-col items-start gap-2">
               <p className="text-xs text-muted-foreground">
-                Complete the request in your browser, then select Done.
+                {t("Complete the request in your browser, then select Done.")}
               </p>
               <Button
                 type="button"
@@ -205,18 +208,20 @@ function ElicitationCard({
                       setError(
                         error instanceof Error
                           ? error.message
-                          : "Could not open your browser.",
+                          : t("Could not open your browser."),
                       )
                   }
                 }}
               >
                 <ExternalLink data-icon="inline-start" />
-                Open {new URL(params.url).hostname}
+                {t("Open")} {new URL(params.url).hostname}
               </Button>
             </div>
           ) : (
             <p role="alert" className="text-sm text-destructive">
-              This request has an unsupported URL. You can decline or cancel it.
+              {t(
+                "This request has an unsupported URL. You can decline or cancel it.",
+              )}
             </p>
           )
         ) : schema?.error ? (
@@ -248,12 +253,12 @@ function ElicitationCard({
                       className="text-sm font-medium leading-5"
                     >
                       {field.label}
-                      {field.required ? " (required)" : ""}
+                      {field.required ? ` ${t("(required)")}` : ""}
                     </span>
                   ) : (
                     <FieldLabel htmlFor={fieldId}>
                       {field.label}
-                      {field.required ? " (required)" : ""}
+                      {field.required ? ` ${t("(required)")}` : ""}
                     </FieldLabel>
                   )}
                   {field.type === "array" && field.choices ? (
@@ -324,11 +329,11 @@ function ElicitationCard({
                         )
                       }
                       options={[
-                        { value: "", label: "Choose…" },
+                        { value: "", label: t("Choose…") },
                         ...(field.type === "boolean"
                           ? [
-                              { value: "true", label: "Yes" },
-                              { value: "false", label: "No" },
+                              { value: "true", label: t("Yes") },
+                              { value: "false", label: t("No") },
                             ]
                           : (field.choices?.map((choice, index) => ({
                               value: String(index),
@@ -399,7 +404,7 @@ function ElicitationCard({
               (params.mode === "url" ? !validUrl : schema?.fields === undefined)
             }
           >
-            {params.mode === "url" ? "Done" : "Submit"}
+            {params.mode === "url" ? t("Done") : t("Submit")}
           </Button>
           <Button
             type="button"
@@ -408,7 +413,7 @@ function ElicitationCard({
             disabled={busy}
             onClick={() => void answer({ action: "decline" })}
           >
-            Decline
+            {t("Decline")}
           </Button>
           <Button
             type="button"
@@ -417,7 +422,7 @@ function ElicitationCard({
             disabled={busy}
             onClick={() => void answer({ action: "cancel" })}
           >
-            Cancel
+            {t("Cancel")}
           </Button>
         </div>
       </form>

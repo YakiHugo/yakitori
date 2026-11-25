@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { flushSync } from "react-dom"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
@@ -27,18 +28,19 @@ import { SelectionActions } from "./selection-actions.tsx"
 import { Select } from "./ui/select.tsx"
 
 export function EngineSelector() {
+  const { t } = useTranslation()
   const id = useId()
   const engines = useEngineStore((state) => state.engines)
   const engineId = useEngineStore((state) => state.engineId)
   if (!engines.some((engine) => engine.kind === "acp")) return null
   return (
     <label htmlFor={id} className="text-xs text-muted-foreground">
-      Engine{" "}
+      {t("Engine")}{" "}
       <Select
         size="sm"
         variant="ghost"
         id={id}
-        aria-label="New session engine"
+        aria-label={t("New session engine")}
         value={engineId ?? "yakitori"}
         onValueChange={(value) =>
           chooseNewEngine(value === "yakitori" ? "" : value)
@@ -54,13 +56,14 @@ export function EngineSelector() {
 }
 
 export function EngineSessionItems() {
+  const { t } = useTranslation()
   const sessions = useEngineStore((state) => state.sessions)
   const selected = useEngineStore((state) => state.sessionId)
   if (sessions.length === 0) return null
   return (
-    <section aria-label="External engine sessions" className="mt-4">
+    <section aria-label={t("External engine sessions")} className="mt-4">
       <h2 className="px-2 py-1 text-xs text-muted-foreground">
-        External engines
+        {t("External engines")}
       </h2>
       {sessions.map((session) => (
         <button
@@ -71,7 +74,7 @@ export function EngineSessionItems() {
           onClick={() => void selectEngineSession(session)}
         >
           <span className="truncate">
-            {session.title ?? "Untitled session"}
+            {session.title ?? t("Untitled session")}
           </span>
           <span className="ml-auto text-xs text-muted-foreground">
             {session.engineId}
@@ -83,6 +86,7 @@ export function EngineSessionItems() {
 }
 
 export function EngineSessionHeading() {
+  const { t } = useTranslation()
   const state = useEngineStore()
   const descriptor = state.engines.find(
     (engine) => engine.id === state.engineId,
@@ -92,10 +96,10 @@ export function EngineSessionHeading() {
     <div className="window-session-heading">
       <h2 className="truncate text-sm font-semibold">
         {state.sessionId === undefined
-          ? "New session"
+          ? t("New session")
           : (state.snapshot?.session.title ??
             session?.title ??
-            "Untitled session")}
+            t("Untitled session"))}
       </h2>
       <span className="window-engine-label">
         {descriptor?.label ?? state.engineId}
@@ -105,6 +109,7 @@ export function EngineSessionHeading() {
 }
 
 export function EngineConversation() {
+  const { t } = useTranslation()
   const state = useEngineStore()
   const apiBase = useAppStore((app) => app.apiBase)
   const descriptor = state.engines.find(
@@ -163,14 +168,16 @@ export function EngineConversation() {
               node.scrollHeight - node.scrollTop - node.clientHeight < 64
         }}
         className="engine-transcript min-h-0 flex-1 overflow-y-auto px-5"
-        aria-label="Engine conversation"
+        aria-label={t("Engine conversation")}
       >
         <div className="mx-auto max-w-3xl space-y-5 py-5">
           <p className="text-xs text-muted-foreground">
-            Observed transcript. The engine owns its context.{" "}
+            {t("Observed transcript. The engine owns its context.")}{" "}
             {descriptor?.capabilities.resume || descriptor?.capabilities.load
-              ? "Existing engine sessions can reconnect."
-              : "This engine does not advertise reconnecting existing sessions."}
+              ? t("Existing engine sessions can reconnect.")
+              : t(
+                  "This engine does not advertise reconnecting existing sessions.",
+                )}
           </p>
           <EngineSessionChrome
             chrome={view?.chrome}
@@ -185,7 +192,7 @@ export function EngineConversation() {
               )
             }}
           />
-          {state.loading && <p role="status">Loading conversation…</p>}
+          {state.loading && <p role="status">{t("Loading conversation…")}</p>}
           {view === undefined ? null : (
             <ConversationScopeContext.Provider
               value={{
@@ -213,8 +220,10 @@ export function EngineConversation() {
               <p className="whitespace-pre-wrap">{request.input.text}</p>
               <p>
                 {request.status === "unknown"
-                  ? "The engine's outcome is unknown. This input will not be sent again automatically."
-                  : "Waiting for the engine to acknowledge this input."}
+                  ? t(
+                      "The engine's outcome is unknown. This input will not be sent again automatically.",
+                    )
+                  : t("Waiting for the engine to acknowledge this input.")}
               </p>
             </div>
           ))}
@@ -225,8 +234,9 @@ export function EngineConversation() {
           (request) => request.requestId === state.pendingRequestId,
         ) && (
           <p role="status" className="px-5 py-2 text-sm">
-            Input acknowledgement is pending. It will not be sent again
-            automatically.
+            {t(
+              "Input acknowledgement is pending. It will not be sent again automatically.",
+            )}
           </p>
         )}
       {state.error && (
@@ -237,7 +247,7 @@ export function EngineConversation() {
       {view?.permissions.map((permission) => (
         <fieldset
           key={permission.requestId}
-          aria-label={`Permission · ${permission.description}`}
+          aria-label={t("Permission · {0}", permission.description)}
           className="border-t bg-amber-50 px-5 py-3 dark:bg-amber-950/40"
         >
           <legend className="text-sm">{permission.description}</legend>
@@ -282,7 +292,7 @@ export function EngineConversation() {
               excerpt,
               number: index + 1,
               ownerId: excerptOwnerId,
-              conversation: "engine conversation",
+              conversation: t("engine conversation"),
             }))}
           />
           <SelectionActions
@@ -376,7 +386,7 @@ export function EngineConversation() {
             if (unsupported.length > 0) {
               await discardDraftAttachments(attachments, apiBase)
               throw new Error(
-                "An attachment type is unavailable in this engine.",
+                t("An attachment type is unavailable in this engine."),
               )
             }
             return attachments
@@ -419,6 +429,7 @@ function EngineSessionChrome({
   disabled: boolean
   onConfigure(id: string, value: string): void
 }>) {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-wrap items-center gap-2">
       {chrome?.controls.length ? (
@@ -436,13 +447,13 @@ function EngineSessionChrome({
         ))
       ) : (
         <span className="text-xs text-muted-foreground">
-          {label} · Engine-managed model
+          {label} {t("· Engine-managed model")}
         </span>
       )}
       {chrome?.usage === undefined ? null : (
         <span
           className="text-xs text-muted-foreground"
-          title="Engine context usage"
+          title={t("Engine context usage")}
         >
           {chrome.usage.used.toLocaleString()} /{" "}
           {chrome.usage.size.toLocaleString()} tokens

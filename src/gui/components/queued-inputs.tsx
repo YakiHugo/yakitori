@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
 import { useRef, useState } from "react"
@@ -15,6 +16,7 @@ import { Button } from "./ui/button.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 
 export function QueuedInputs() {
+  const { t } = useTranslation()
   const apiBase = useAppStore((state) => state.apiBase)
   const queued = useAppStore((state) => state.queuedItems)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
@@ -73,7 +75,7 @@ export function QueuedInputs() {
               }}
             >
               <PromptEditor
-                label="Edit queued input"
+                label={t("Edit queued input")}
                 apiBase={apiBase}
                 className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-foreground"
                 value={editingParts}
@@ -85,7 +87,7 @@ export function QueuedInputs() {
                       setOpenError(
                         error instanceof Error
                           ? error.message
-                          : "Could not open PDF.",
+                          : t("Could not open PDF."),
                       ),
                   )
                 }}
@@ -104,7 +106,7 @@ export function QueuedInputs() {
                 }}
               />
               <Button type="submit" size="sm" disabled={saving}>
-                Save
+                {t("Save")}
               </Button>
               <Button
                 type="button"
@@ -112,19 +114,22 @@ export function QueuedInputs() {
                 size="sm"
                 onClick={closeEditor}
               >
-                Cancel
+                {t("Cancel")}
               </Button>
             </form>
           ) : (
             <>
               <span className="min-w-0 flex-1 truncate">
-                {inputContentText(item.input.content) || "Attachment"}
+                {inputContentText(item.input.content) || t("Attachment")}
                 {inputContentAttachments(item.input.content).length > 0
-                  ? ` · ${inputContentAttachments(item.input.content).length} attachment(s)`
+                  ? t(
+                      "· {0} attachment(s)",
+                      inputContentAttachments(item.input.content).length,
+                    )
                   : ""}
               </span>
               <QueueButton
-                label="Edit queued input"
+                label={t("Edit queued input")}
                 onClick={() => {
                   editRevision.current += 1
                   pendingSave.current = undefined
@@ -136,7 +141,7 @@ export function QueuedInputs() {
                 <Pencil />
               </QueueButton>
               <QueueButton
-                label="Move queued input up"
+                label={t("Move queued input up")}
                 disabled={index === 0}
                 onClick={() => {
                   const ids = queued.map((entry) => entry.id)
@@ -150,7 +155,7 @@ export function QueuedInputs() {
                 <ArrowUp />
               </QueueButton>
               <QueueButton
-                label="Move queued input down"
+                label={t("Move queued input down")}
                 disabled={index === queued.length - 1}
                 onClick={() => {
                   const ids = queued.map((entry) => entry.id)
@@ -164,13 +169,13 @@ export function QueuedInputs() {
                 <ArrowDown />
               </QueueButton>
               <QueueButton
-                label="Start queued input"
+                label={t("Start queued input")}
                 onClick={() => void startQueuedInput(item.id)}
               >
                 <Play />
               </QueueButton>
               <QueueButton
-                label="Cancel queued input"
+                label={t("Cancel queued input")}
                 disabled={inFlightActions.has(`cancel-input:${item.id}`)}
                 onClick={() => void cancelQueuedInput(item.id)}
               >

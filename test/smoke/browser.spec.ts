@@ -881,6 +881,57 @@ test("independent sessions route cross-provider models and appear in the sidebar
   }
 })
 
+test("interface language switches immediately and survives a reload", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Keep this draft")
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.getByRole("combobox", { name: "Language", exact: true }).click()
+    await page.getByRole("option", { name: "简体中文", exact: true }).click()
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN")
+    await expect(page.getByRole("region", { name: "通用设置" })).toBeVisible()
+    await expect(page.getByRole("combobox", { name: "界面语言" })).toHaveText(
+      "简体中文",
+    )
+    await page.getByRole("button", { name: "返回应用", exact: true }).click()
+    await expect(
+      page.getByRole("heading", { name: "想在 workspace 中做些什么？" }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("textbox", { name: "给 Mate 发消息" }),
+    ).toHaveText("Keep this draft")
+
+    await page.reload()
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN")
+    await page.getByRole("button", { name: "显示工作区", exact: true }).click()
+    await expect(
+      page.getByRole("button", { name: "浏览器", exact: true }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "设置", exact: true }).click()
+    await page.getByRole("combobox", { name: "界面语言" }).click()
+    await page.getByRole("option", { name: "English", exact: true }).click()
+    await expect(page.locator("html")).toHaveAttribute("lang", "en")
+    await expect(
+      page.getByRole("region", { name: "General settings" }),
+    ).toBeVisible()
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
+
 test("shared selects keep preferences, keyboard focus and popup bounds", async ({
   page,
 }) => {

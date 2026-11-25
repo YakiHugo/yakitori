@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n/use-translation.ts"
 import type { ApiAccountFinancials } from "../../protocol/application.ts"
 
 const amountFormat = new Intl.NumberFormat("en", {
@@ -19,13 +20,14 @@ export function AccountFinancials({
 }: Readonly<{
   financials: ApiAccountFinancials
 }>) {
+  const { t } = useTranslation()
   if (financials.status === "unavailable") {
     return (
       <p className="text-xs text-muted-foreground">
-        Balance and budget unknown.{" "}
+        {t("Balance and budget unknown.")}{" "}
         {financials.reason === "permission_denied"
-          ? "This connection does not have permission to read them."
-          : "Could not refresh them. Try again in a moment."}
+          ? t("This connection does not have permission to read them.")
+          : t("Could not refresh them. Try again in a moment.")}
       </p>
     )
   }
@@ -47,29 +49,30 @@ export function AccountFinancials({
         ))}
         {financials.unlimited ? (
           <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-            <dt className="text-muted-foreground">API key budget</dt>
-            <dd className="font-medium">No budget limit configured</dd>
+            <dt className="text-muted-foreground">{t("API key budget")}</dt>
+            <dd className="font-medium">{t("No budget limit configured")}</dd>
           </div>
         ) : null}
       </dl>
       {financials.keyLimitReset ? (
         <p className="text-muted-foreground">
-          API key budget resets {financials.keyLimitReset}.
+          {t("API key budget resets")} {financials.keyLimitReset}.
         </p>
       ) : null}
       {financials.unlimited ||
       financials.metrics.some((metric) => metric.kind.startsWith("key_")) ? (
         <p className="text-muted-foreground">
           {financials.unlimited
-            ? "This does not mean the account has unlimited funds. "
+            ? `${t("This does not mean the account has unlimited funds.")} `
             : ""}
-          Account funds and other account or organization limits may still
-          restrict usage.
+          {t(
+            "Account funds and other account or organization limits may still restrict usage.",
+          )}
         </p>
       ) : null}
       {financials.metrics.length === 0 && !financials.unlimited ? (
         <p className="text-muted-foreground">
-          No balance or budget was reported.
+          {t("No balance or budget was reported.")}
         </p>
       ) : null}
     </div>
