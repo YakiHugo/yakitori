@@ -913,6 +913,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   },
   {
     method: "session/open",
+    shutdownContinuation: true,
     scope: sessionSharedReadScope,
     async invoke(params, context) {
       const { sessionId } = parseSessionSubscribeParams(params)

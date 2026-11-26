@@ -38,6 +38,11 @@ import {
   TURN_TRANSITION_PENDING_REQUEST_REASON,
 } from "./pending-requests.ts"
 
+// A busy session may replace its rollout more than once during a snapshot read.
+const maxOpenSnapshotAttempts = 3
+
+type SubscriptionEntry = { close(): void; keepOnReset(): boolean }
+
 export type SessionSubscribeInput = Readonly<{
   connectionId: number
   sessionId: string
@@ -80,7 +85,7 @@ export function createSessionSubscriptions(
 ): SessionSubscriptions {
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
-  const bySession = new Map<string, Map<number, { close(): void }>>()
+  const bySession = new Map<string, Map<number, SubscriptionEntry>>()
   // One pending answer channel per permission request, shared by every
   // subscribed connection: the permission.requested publication fans out per
   // connection, so registration dedupes on sessionId:permissionRequestId.
@@ -260,9 +265,9 @@ export function createSessionSubscriptions(
   }
 
   function resetSession(sessionId: string): void {
-    const set = bySession.get(sessionId)
-    bySession.delete(sessionId)
-    for (const entry of set?.values() ?? []) entry.close()
+    for (const [connectionId, entry] of bySession.get(sessionId) ?? []) {
+      if (!entry.keepOnReset()) remove(connectionId, sessionId)
+    }
     retirePermissionsForTurn(sessionId)
   }
 
@@ -271,12 +276,15 @@ export function createSessionSubscriptions(
     readResponse: (
       snapshot: LiveSessionSnapshot,
     ) => Promise<ApplicationResult<T>>,
+    maxAttempts = 1,
   ): Promise<SessionSubscribeOutcome<T>> {
     // A repeat subscribe replaces only this connection’s existing listener.
     remove(input.connectionId, input.sessionId)
 
     let live = false
     let closed = false
+    let opening = maxAttempts > 1
+    let invalidated = false
     let lastSeq = 0
     const buffered: SessionDelivery[] = []
 
@@ -339,7 +347,15 @@ export function createSessionSubscriptions(
       }
       buffered.push(delivery)
     })
-    const entry = {
+    const entry: SubscriptionEntry = {
+      keepOnReset(): boolean {
+        if (!opening) return false
+        // Keep the same listener so a disconnect or replacement still owns
+        // cancellation, and a new attempt can buffer the new rollout's tail.
+        invalidated = true
+        buffered.length = 0
+        return true
+      },
       close(): void {
         if (closed) return
         closed = true
@@ -356,63 +372,69 @@ export function createSessionSubscriptions(
         remove(input.connectionId, input.sessionId)
       else entry.close()
     }
-    const closedOutcome = (): SessionSubscribeOutcome<T> => ({
+    const invalidatedSnapshot: ApplicationResult<never> = {
       ok: false,
-      result: {
-        ok: false,
-        error: {
-          code: "conflict",
-          message:
-            "Session subscription was closed while reading its snapshot.",
-        },
+      error: {
+        code: "conflict",
+        message: "Session subscription changed while reading its snapshot.",
       },
-    })
+    }
 
-    // Only reconcile answer channels that predate this read. The handler can
-    // sample pendingPermissions before asynchronous storage work finishes;
-    // channels opened meanwhile by another subscriber are newer than that
-    // snapshot and must keep their original response ids.
-    const pendingBeforeSnapshot = options.pendingRequests.pendingForSession(
-      input.sessionId,
-    )
-    let snapshot: Awaited<ReturnType<ServerHandlers["readLiveSession"]>>
-    try {
-      snapshot = await options.handlers.readLiveSession({
+    const readAttempt = async (): Promise<
+      ApplicationResult<{ snapshot: LiveSessionSnapshot; response: T }>
+    > => {
+      const snapshot = await options.handlers.readLiveSession({
         sessionId: input.sessionId,
       })
-    } catch (error) {
-      // No replay consumer will be returned on a rejected snapshot read. Release
-      // this listener without removing a newer subscription for the same key.
-      removeOwnedSubscription()
-      throw error
+      if (closed || invalidated) return invalidatedSnapshot
+      if (!snapshot.ok) return snapshot
+      const response = await readResponse(snapshot.value)
+      return response.ok
+        ? {
+            ok: true,
+            value: { snapshot: snapshot.value, response: response.value },
+          }
+        : response
     }
-    // A reset or replacement can close this listener while storage is reading.
-    // Returning that snapshot would let the caller paint the previous history
-    // even though replay itself already observes `closed`.
-    if (closed) return closedOutcome()
-    if (!snapshot.ok) {
-      removeOwnedSubscription()
-      return { ok: false, result: snapshot }
-    }
-    let response: ApplicationResult<T>
+
+    let captured: Awaited<ReturnType<typeof readAttempt>>
+    let pendingBeforeSnapshot: readonly PendingServerRequest[]
     try {
-      response = await readResponse(snapshot.value)
+      for (let attempt = 1; ; attempt++) {
+        invalidated = false
+        // Only reconcile answer channels that predate the successful read.
+        pendingBeforeSnapshot = options.pendingRequests.pendingForSession(
+          input.sessionId,
+        )
+        captured = await readAttempt()
+        if (closed || invalidated) captured = invalidatedSnapshot
+        if (
+          captured.ok ||
+          closed ||
+          captured.error.code !== "conflict" ||
+          attempt >= maxAttempts
+        )
+          break
+      }
     } catch (error) {
+      // No replay consumer is returned on a rejected read. Release only our
+      // listener; a newer subscription for the same key can already exist.
       removeOwnedSubscription()
       throw error
     }
-    if (closed) return closedOutcome()
-    if (!response.ok) {
+    opening = false
+    if (!captured.ok) {
       removeOwnedSubscription()
-      return { ok: false, result: response }
+      return { ok: false, result: captured }
     }
-    const watermark = snapshot.value.watermarkSeq
+    const { snapshot, response } = captured.value
+    const watermark = snapshot.watermarkSeq
     lastSeq = watermark
     // Entries the snapshot no longer lists belong to Turns that ended while
     // nobody was subscribed; rejecting them with the turn-transition marker
     // keeps the pending map bounded and their continuations silent.
     const snapshotPendingIds = new Set(
-      snapshot.value.session.pendingPermissions.map(
+      snapshot.session.pendingPermissions.map(
         (permission) => permission.permissionRequestId,
       ),
     )
@@ -458,7 +480,7 @@ export function createSessionSubscriptions(
         // session/permission/request (register-or-reuse dedupe) so a
         // reconnected client can answer.
         for (const permission of unbufferedPendingPermissions(
-          snapshot.value.session.pendingPermissions,
+          snapshot.session.pendingPermissions,
           buffered,
         )) {
           options.sendRequest(
@@ -472,7 +494,7 @@ export function createSessionSubscriptions(
         }
         reconcileBufferedSessionDeliveries(
           buffered,
-          snapshot.value.session.activeTurnId,
+          snapshot.session.activeTurnId,
           deliver,
         )
         buffered.length = 0
@@ -498,7 +520,7 @@ export function createSessionSubscriptions(
     }
     return {
       ok: true,
-      response: response.value,
+      response,
       startLiveDelivery,
     }
   }
@@ -507,29 +529,33 @@ export function createSessionSubscriptions(
     subscribe: (input) =>
       subscribe(input, async (snapshot) => ({ ok: true, value: snapshot })),
     open: (input) =>
-      subscribe(input, async (snapshot) => {
-        const history = await options.handlers.listCompletedTurns({
-          sessionId: input.sessionId,
-          rolloutId: snapshot.session.rolloutId,
-          view: "summary",
-          through: snapshot.watermarkSeq,
-          activeTurnId: snapshot.activeTurn?.turnId,
-        })
-        if (!history.ok) return history
-        if (
-          history.value.view !== "summary" ||
-          history.value.seq !== snapshot.watermarkSeq ||
-          history.value.rolloutId !== snapshot.session.rolloutId
-        )
-          return {
-            ok: false,
-            error: {
-              code: "conflict",
-              message: "Session history changed while opening.",
-            },
-          }
-        return { ok: true, value: { ...snapshot, history: history.value } }
-      }),
+      subscribe(
+        input,
+        async (snapshot) => {
+          const history = await options.handlers.listCompletedTurns({
+            sessionId: input.sessionId,
+            rolloutId: snapshot.session.rolloutId,
+            view: "summary",
+            through: snapshot.watermarkSeq,
+            activeTurnId: snapshot.activeTurn?.turnId,
+          })
+          if (!history.ok) return history
+          if (
+            history.value.view !== "summary" ||
+            history.value.seq !== snapshot.watermarkSeq ||
+            history.value.rolloutId !== snapshot.session.rolloutId
+          )
+            return {
+              ok: false,
+              error: {
+                code: "conflict",
+                message: "Session history changed while opening.",
+              },
+            }
+          return { ok: true, value: { ...snapshot, history: history.value } }
+        },
+        maxOpenSnapshotAttempts,
+      ),
     unsubscribe: remove,
     removeConnection(connectionId) {
       for (const [sessionId, set] of bySession) {
