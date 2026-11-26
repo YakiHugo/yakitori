@@ -85,11 +85,15 @@ function context(
   }
 }
 
-function prompt(turnId: string, text: string): RolloutItem {
+function prompt(
+  turnId: string,
+  text: string,
+  id = `input_${turnId}`,
+): RolloutItem {
   return {
     type: "response_item",
     item: {
-      id: `input_${turnId}`,
+      id,
       turnId,
       createdAt,
       item: { role: "user", content: [{ type: "text", text }] },
@@ -106,6 +110,77 @@ function start(turnId: string): RolloutItem {
     purpose: "message",
   }
 }
+
+describe("active Turn transcript", () => {
+  it("keeps steer input, an early reply and an image after the activity window fills", () => {
+    const turnId = "long"
+    const transcript: RolloutItem[] = [
+      prompt(turnId, "Initial input"),
+      start(turnId),
+      prompt(turnId, "Additional input", "input_steer"),
+      {
+        type: "item_completed",
+        turnId,
+        item: {
+          type: "agent_message",
+          itemId: "early_reply",
+          content: [{ type: "text", text: "The first check completed." }],
+        },
+      },
+      {
+        type: "item_completed",
+        turnId,
+        item: {
+          type: "image_output",
+          itemId: "early_image",
+          image: {
+            type: "image",
+            mediaType: "image/png",
+            file: { rolloutId: sessionId, path: "generated/image.png" },
+            sizeBytes: 128,
+          },
+        },
+      },
+    ]
+    const activity = Array.from(
+      { length: 205 },
+      (_, index): RolloutItem => ({
+        type: "item_started",
+        turnId,
+        item: {
+          type: "command_execution",
+          itemId: `command_${index}`,
+          toolCallId: `call_${index}`,
+          name: "exec_command",
+          input: { cmd: "test" },
+          command: "test",
+          requiresPermission: false,
+        },
+      }),
+    )
+    const display = new ActiveTurnDisplay()
+    display.append(
+      [...transcript, ...activity].map((item, index) => ({
+        threadId: sessionId,
+        rolloutId: sessionId,
+        seq: index + 1,
+        createdAt,
+        item,
+      })),
+    )
+    const active = display.capture(turnId)
+    expect(
+      active?.records.slice(0, transcript.length).map(({ item }) => item),
+    ).toEqual(transcript)
+    expect(
+      active?.records.filter(({ item }) => item.type === "item_started"),
+    ).toHaveLength(200)
+    expect(active?.activityBefore).toBe(11)
+    display.finish(turnId)
+    expect(display.capture(turnId)).toBeUndefined()
+    expect(display.capture("next")).toEqual({ turnId: "next", records: [] })
+  })
+})
 
 describe("projected Turn reads after reopening storage", () => {
   it("pages older activity for a large active Turn without losing the prompt or start", async () => {

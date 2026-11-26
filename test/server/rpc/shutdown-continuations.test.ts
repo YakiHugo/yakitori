@@ -9,6 +9,7 @@ import { createElicitationBroker } from "../../../src/server/user-interactions.t
 import {
   createFakeHandlers,
   initializeConnection,
+  okResult,
   openTestConnection,
 } from "./testkit.ts"
 
@@ -50,6 +51,7 @@ describe("existing-work controls during process drain", () => {
       "server/ping",
       "session/elicitation/answer",
       "session/elicitation/list",
+      "session/open",
       "session/subscribe",
       "session/turn/cancel",
       "session/unsubscribe",
@@ -60,7 +62,17 @@ describe("existing-work controls during process drain", () => {
   })
 
   it("keeps heartbeat, the session view and Stop available on an existing connection", async () => {
-    const f = await fixture()
+    const f = await fixture({
+      handlers: createFakeHandlers({
+        listCompletedTurns: async () =>
+          okResult({
+            view: "summary",
+            rolloutId: "rollout_session_1",
+            seq: 1,
+            turns: [],
+          }),
+      }),
+    })
     try {
       await f.connection.sendRequest("session/subscribe", {
         sessionId: "session_1",
@@ -70,6 +82,7 @@ describe("existing-work controls during process drain", () => {
       for (const [method, params] of [
         ["server/ping", {}],
         ["session/unsubscribe", { sessionId: "session_1" }],
+        ["session/open", { sessionId: "session_1" }],
         ["session/subscribe", { sessionId: "session_1", after: 0 }],
         ["session/turn/cancel", { sessionId: "session_1", turnId: "turn_1" }],
       ] as const) {

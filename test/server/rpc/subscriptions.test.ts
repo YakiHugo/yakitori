@@ -589,6 +589,151 @@ describe("session/subscribe", () => {
   })
 })
 
+describe("session/open recovery", () => {
+  it("opens the new rollout after a reset during the history read and replays only its tail", async () => {
+    const historyStarted = deferred<void>()
+    const finishHistory = deferred<void>()
+    let rolloutId = "old_rollout"
+    let seq = 40
+    const { processor, eventHub } = createTestProcessor({
+      handlers: createFakeHandlers({
+        readSession: async () =>
+          okResult({
+            session: makeSessionDetail(sessionId, { rolloutId, seq }),
+          }),
+        listCompletedTurns: async () => {
+          if (rolloutId === "old_rollout") {
+            historyStarted.resolve()
+            await finishHistory.promise
+            return okResult({
+              view: "summary",
+              rolloutId: "old_rollout",
+              seq: 40,
+              turns: [],
+            })
+          }
+          return okResult({
+            view: "summary",
+            rolloutId: "new_rollout",
+            seq: 3,
+            turns: [],
+          })
+        },
+      }),
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    const opening = connection.sendRequest("session/open", { sessionId })
+    await historyStarted.promise
+    eventHub.publishDurable([makeTurnStarted(sessionId, 41, "old_turn")])
+    rolloutId = "new_rollout"
+    seq = 3
+    eventHub.resetSession(sessionId)
+    eventHub.publishDurable([makeTurnStarted(sessionId, 4, "new_turn")])
+    finishHistory.resolve()
+    expect(await opening).toMatchObject({
+      result: {
+        session: { rolloutId: "new_rollout" },
+        history: { rolloutId: "new_rollout", seq: 3 },
+        watermarkSeq: 3,
+      },
+    })
+    await flush()
+    expect(
+      connection.notifications("session/event").map(({ params }) => params),
+    ).toMatchObject([
+      { seq: 4, event: { type: "turn.started", data: { turnId: "new_turn" } } },
+    ])
+  })
+
+  it("rereads both snapshots when the history projection temporarily conflicts", async () => {
+    let seq = 1
+    const listCompletedTurns = vi.fn(async () => {
+      if (seq++ === 1) return errorResult("conflict", "History changed")
+      return okResult({
+        view: "summary" as const,
+        rolloutId: "rollout_session_1",
+        seq: 2,
+        turns: [],
+      })
+    })
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers({
+        readSession: async () =>
+          okResult({ session: makeSessionDetail(sessionId, { seq }) }),
+        listCompletedTurns,
+      }),
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    expect(
+      await connection.sendRequest("session/open", { sessionId }),
+    ).toMatchObject({
+      result: { watermarkSeq: 2, history: { seq: 2 } },
+    })
+  })
+
+  it.each([
+    ["conflict", 3],
+    ["not_found", 1],
+  ] as const)("returns %s after %i attempts and releases the listener", async (code, attempts) => {
+    const listCompletedTurns = vi.fn(async () =>
+      errorResult(code, "Fixture failure"),
+    )
+    const { processor, eventHub } = createTestProcessor({
+      handlers: createFakeHandlers({ listCompletedTurns }),
+    })
+    const subscribe = eventHub.subscribe.bind(eventHub)
+    const close = vi.fn()
+    vi.spyOn(eventHub, "subscribe").mockImplementation((id, listener) => {
+      const subscription = subscribe(id, listener)
+      return {
+        close() {
+          close()
+          subscription.close()
+        },
+      }
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    expect(
+      await connection.sendRequest("session/open", { sessionId }),
+    ).toMatchObject({
+      error: { data: { code } },
+    })
+    expect(listCompletedTurns).toHaveBeenCalledTimes(attempts)
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it("does not reopen a pending request that was disconnected after reset", async () => {
+    const eventHub = createSessionEventHub()
+    const historyStarted = deferred<void>()
+    const finishHistory = deferred<void>()
+    const listCompletedTurns = vi.fn(async () => {
+      historyStarted.resolve()
+      await finishHistory.promise
+      return errorResult("conflict", "History changed")
+    })
+    const subscriptions = createSessionSubscriptions({
+      eventHub,
+      pendingRequests: new PendingServerRequests(),
+      notify: () => {},
+      sendRequest: () => {},
+      handlers: createFakeHandlers({ listCompletedTurns }),
+    })
+    const opening = subscriptions.open({ connectionId: 1, sessionId })
+    await historyStarted.promise
+    eventHub.resetSession(sessionId)
+    subscriptions.removeConnection(1)
+    finishHistory.resolve()
+    expect(await opening).toMatchObject({
+      ok: false,
+      result: { error: { code: "conflict" } },
+    })
+    expect(listCompletedTurns).toHaveBeenCalledOnce()
+  })
+})
+
 describe("session history reset", () => {
   it("retires permission channels after the last subscriber disconnects", async () => {
     const eventHub = createSessionEventHub()
