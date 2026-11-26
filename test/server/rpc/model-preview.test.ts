@@ -53,6 +53,10 @@ it("previews active compacted history without retaining old transcript image req
       item: { type: "response_item", item: oldImage },
     }),
   )
+  const fullRead = vi.spyOn(fixture.application.threadStore, "readThread")
+  onTestFinished(() => {
+    fullRead.mockRestore()
+  })
   const preview = await fixture.client.request("model/preview", {
     selection: logical,
     sessionId,
@@ -62,6 +66,7 @@ it("previews active compacted history without retaining old transcript image req
     target: { provider: "first", model: "shared" },
     inputModalities: ["text"],
   })
+  expect(fullRead).not.toHaveBeenCalled()
 })
 
 it("rejects text-only members when a tool image remains in active stored history", async () => {

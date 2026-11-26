@@ -10,10 +10,10 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { StoredThread } from "./rollout.ts"
-import type { ThreadSearchProjectionStamp } from "./sqlite-thread-search-projection.ts"
+import type { RolloutProjectionStamp } from "./sqlite-rollout-projection.ts"
 import type { UsageHistory } from "./usage-history.ts"
 
-export type ThreadUsageProjectionStamp = ThreadSearchProjectionStamp
+export type ThreadUsageProjectionStamp = RolloutProjectionStamp
 
 type StampRow = Readonly<{
   metadata_size: number

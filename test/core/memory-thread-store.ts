@@ -401,6 +401,10 @@ export class MemoryThreadStore implements ThreadStore {
     return structuredClone(versions)
   }
 
+  readProjectedThreadSummary(threadId: string) {
+    return this.readThreadSummary(threadId)
+  }
+
   async readThreadSummary(
     threadId: string,
   ): Promise<ThreadSummary | undefined> {

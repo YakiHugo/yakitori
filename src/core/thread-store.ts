@@ -1,4 +1,8 @@
 import type { HistoryLocation } from "../protocol/application.ts"
+import type { ContextTokens } from "../protocol/execution-view.ts"
+import type { ModelSelection } from "../protocol/events.ts"
+import type { SessionCacheExpiry } from "../protocol/session-cache-expiry.ts"
+import type { SessionTurnOutline } from "../protocol/session-turns.ts"
 import type { DisplayWindowRead } from "./display-window.ts"
 import type {
   HistoryPosition,
@@ -141,6 +145,35 @@ export type ThreadInputAdmissionsRead = Readonly<{
   endSeq: number
 }>
 
+export type CompletedTurnsQuery = Readonly<{
+  view: "outline" | "summary"
+  limit: number
+  before?: number
+  after?: number
+  through?: number
+  activeTurnId?: string
+  aroundTurnId?: string
+  rolloutId?: string
+}>
+
+export type CompletedTurnsRead = Readonly<{
+  rolloutId: string
+  seq: number
+  turns: readonly (SessionTurnOutline &
+    Readonly<{ records?: readonly StoredRolloutItem[] }>)[]
+  nextBefore?: number
+  nextAfter?: number
+  latestCompletionSeq?: number
+  currentModel?: ModelSelection
+  contextTokens?: ContextTokens
+  cacheExpiry?: SessionCacheExpiry
+}>
+
+export type ThreadDisplayActivity = Readonly<{
+  records: readonly StoredRolloutItem[]
+  nextBefore?: number
+}>
+
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
@@ -171,6 +204,13 @@ export type ThreadStore = {
   // Current history first, followed by retained versions of this same Thread.
   readThreadVersions(threadId: string): Promise<readonly StoredThread[]>
   readThreadSummary(threadId: string): Promise<ThreadSummary | undefined>
+  readCompletedTurns?(
+    threadId: string,
+    query: CompletedTurnsQuery,
+  ): Promise<CompletedTurnsRead | undefined>
+  readProjectedThreadSummary(
+    threadId: string,
+  ): Promise<ThreadSummary | undefined>
   // Bounded recent display records plus supplemental Turn/model/cache state.
   readDisplayWindow(
     threadId: string,
@@ -186,14 +226,8 @@ export type ThreadStore = {
     threadId: string,
     rolloutId: string,
     turnId: string,
-    before: number,
-  ): Promise<
-    | Readonly<{
-        records: readonly StoredRolloutItem[]
-        nextBefore?: number
-      }>
-    | undefined
-  >
+    page: number | Readonly<{ aroundItemId: string }>,
+  ): Promise<ThreadDisplayActivity | undefined>
   // Ascending display-eligible records; after is exclusive, through inclusive.
   // nextAfter advances to through/endSeq across excluded metadata when exhausted.
   readThreadEvents(

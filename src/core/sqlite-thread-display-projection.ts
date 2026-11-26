@@ -7,68 +7,28 @@ import {
   isTranscriptRecord,
   selectDisplayWindow,
 } from "./display-window.ts"
-import type { StoredRolloutItem, ThreadMetadata } from "./rollout.ts"
-
-export class ThreadProjectionChangedError extends Error {
-  constructor() {
-    super("Thread projection advanced while its rollout was being read.")
-  }
-}
-
-// Called inside the shared projection transaction: another store instance can
-// finish repair/revert while this reader awaits filesystem I/O.
-export function requireProjectionAppend(
-  database: DatabaseSync,
-  metadata: ThreadMetadata,
-  entries: readonly StoredRolloutItem[],
-  checkpoint?: RolloutCheckpoint,
-): void {
-  const row = database
-    .prepare("SELECT metadata_json FROM search_threads WHERE thread_id = ?")
-    .get(metadata.id) as Readonly<{ metadata_json: string }> | undefined
-  if (
-    row === undefined ||
-    (JSON.parse(row.metadata_json) as ThreadMetadata).rolloutId !==
-      metadata.rolloutId
-  )
-    throw new ThreadProjectionChangedError()
-  const current = readCheckpoint(
-    database,
-    metadata.id,
-    checkpoint?.rolloutId ?? metadata.rolloutId,
-  )
-  const first = entries.find(({ item }) => item.type !== "session_meta")
-  if (
-    current === undefined &&
-    checkpoint !== undefined &&
-    checkpoint.endByteOffset > 0 &&
-    !entries.some(({ item }) => item.type === "session_meta")
-  )
-    throw new ThreadProjectionChangedError()
-  if (
-    current !== undefined &&
-    ((checkpoint !== undefined &&
-      checkpoint.endByteOffset < current.endByteOffset) ||
-      (first !== undefined && first.seq !== current.nextSeq))
-  )
-    throw new ThreadProjectionChangedError()
-}
-
-export type RolloutCheckpoint = Readonly<{
-  rolloutId: string
-  endByteOffset: number
-  nextSeq: number
-}>
+import type { SessionTurnOutline } from "../protocol/session-turns.ts"
+import type { StoredRolloutItem } from "./rollout.ts"
+import type { CompletedTurnsQuery, CompletedTurnsRead } from "./thread-store.ts"
 
 type DisplayRow = Readonly<{ record_json: string; byte_size: number }>
+type CompletedTurnRow = Readonly<{
+  end_seq: number
+  turn_id: string
+  activity_count: number
+  suppress_legacy_answer: number
+}>
 
 export function createDisplayTables(database: DatabaseSync): void {
   database.exec(`
-    CREATE TABLE IF NOT EXISTS display_records (
-      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
+    CREATE TABLE IF NOT EXISTS thread_items (
+      thread_id TEXT NOT NULL REFERENCES projection_threads(thread_id) ON DELETE CASCADE,
       seq INTEGER NOT NULL,
       kind TEXT NOT NULL,
       turn_id TEXT,
+      item_id TEXT,
+      request_id TEXT,
+      assistant_with_text INTEGER NOT NULL,
       successful INTEGER NOT NULL,
       transcript INTEGER NOT NULL,
       record_json TEXT NOT NULL,
@@ -76,20 +36,37 @@ export function createDisplayTables(database: DatabaseSync): void {
       PRIMARY KEY (thread_id, seq)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS display_state
-      ON display_records (thread_id, kind, seq);
+      ON thread_items (thread_id, kind, seq);
     CREATE INDEX IF NOT EXISTS display_turn
-      ON display_records (thread_id, turn_id, kind, seq);
+      ON thread_items (thread_id, turn_id, kind, seq);
+    CREATE INDEX IF NOT EXISTS display_turn_sequence
+      ON thread_items (thread_id, turn_id, seq);
     CREATE INDEX IF NOT EXISTS display_transcript
-      ON display_records (thread_id, transcript, seq);
+      ON thread_items (thread_id, transcript, seq);
     CREATE INDEX IF NOT EXISTS display_activity
-      ON display_records (thread_id, turn_id, seq) WHERE transcript = 0;
-    CREATE TABLE IF NOT EXISTS rollout_checkpoints (
-      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
-      rollout_id TEXT NOT NULL,
-      end_byte_offset INTEGER NOT NULL,
-      next_seq INTEGER NOT NULL,
-      PRIMARY KEY (thread_id, rollout_id)
+      ON thread_items (thread_id, turn_id, seq) WHERE transcript = 0;
+    CREATE INDEX IF NOT EXISTS display_summary_items
+      ON thread_items (thread_id, turn_id, seq) WHERE transcript = 1;
+    CREATE INDEX IF NOT EXISTS display_location
+      ON thread_items (thread_id, turn_id, item_id) WHERE item_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS display_request
+      ON thread_items (thread_id, request_id, seq) WHERE request_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS display_assistant
+      ON thread_items (thread_id, turn_id, seq) WHERE assistant_with_text = 1;
+    CREATE TABLE IF NOT EXISTS thread_turns (
+      thread_id TEXT NOT NULL REFERENCES projection_threads(thread_id) ON DELETE CASCADE,
+      turn_id TEXT NOT NULL,
+      end_seq INTEGER NOT NULL,
+      completed_at TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('completed', 'failed', 'interrupted')),
+      started_at TEXT,
+      input_id TEXT,
+      activity_count INTEGER NOT NULL,
+      suppress_legacy_answer INTEGER NOT NULL,
+      PRIMARY KEY (thread_id, end_seq)
     ) STRICT;
+    CREATE INDEX IF NOT EXISTS thread_turns_by_id
+      ON thread_turns (thread_id, turn_id, end_seq);
   `)
 }
 
@@ -97,80 +74,96 @@ export function applyDisplayEntries(
   database: DatabaseSync,
   threadId: string,
   entries: readonly StoredRolloutItem[],
+  activeTurnId: string | undefined,
 ): void {
   const insert = database.prepare(`
-    INSERT INTO display_records
-      (thread_id, seq, kind, turn_id, successful, transcript, record_json, byte_size)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO thread_items
+      (thread_id, seq, kind, turn_id, item_id, request_id, assistant_with_text, successful, transcript, record_json, byte_size)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const completeTurn = database.prepare(`
+    INSERT INTO thread_turns (
+      thread_id, turn_id, end_seq, completed_at, outcome,
+      started_at, input_id, activity_count, suppress_legacy_answer
+    )
+    WITH started AS (
+      SELECT record_json FROM thread_items
+      WHERE thread_id = ? AND turn_id = ? AND kind = 'turn_started' AND seq < ?
+      ORDER BY seq DESC LIMIT 1
+    )
+    SELECT ?, ?, ?, ?, ?,
+      (SELECT json_extract(record_json, '$.createdAt') FROM started),
+      (SELECT json_extract(record_json, '$.item.inputItemId') FROM started),
+      COUNT(*),
+      COALESCE(? AND MAX(seq) > (
+        SELECT MAX(seq) FROM thread_items
+        WHERE thread_id = ? AND turn_id = ? AND seq < ?
+          AND assistant_with_text = 1
+      ), 0)
+    FROM thread_items
+    WHERE thread_id = ? AND turn_id = ? AND seq < ? AND transcript = 0
   `)
   for (const entry of entries) {
     const record = displayRecord(entry)
     if (record === undefined) continue
     const { item } = record
+    if (item.type === "turn_started") activeTurnId = item.turnId
     const turnId =
       item.type === "response_item"
-        ? item.item.turnId
+        ? (activeTurnId ?? item.item.turnId)
         : item.type === "turn_context"
-          ? item.context.turnId
+          ? (activeTurnId ?? item.context.turnId)
           : "turnId" in item
             ? item.turnId
             : null
     const json = JSON.stringify(record)
+    const assistantWithText =
+      item.type === "item_completed" &&
+      item.item.type === "agent_message" &&
+      item.item.content.some((part) => part.text !== "")
     insert.run(
       threadId,
       record.seq,
       item.type,
       turnId,
+      item.type === "item_completed"
+        ? item.item.itemId
+        : item.type === "response_item"
+          ? item.item.id
+          : null,
+      item.type === "response_item" ? item.item.turnId : null,
+      assistantWithText ? 1 : 0,
       item.type === "turn_completed" && item.outcome === "completed" ? 1 : 0,
       isTranscriptRecord(record) ? 1 : 0,
       json,
       Buffer.byteLength(json),
     )
+    if (item.type === "turn_completed") {
+      if (activeTurnId === item.turnId) activeTurnId = undefined
+      // Older completions inferred the final answer from entry order.
+      // Remember when hidden activity would change that inference.
+      completeTurn.run(
+        threadId,
+        item.turnId,
+        record.seq,
+        threadId,
+        item.turnId,
+        record.seq,
+        record.createdAt,
+        item.outcome,
+        item.outcome === "completed" &&
+          item.completion?.answerItemIds === undefined
+          ? 1
+          : 0,
+        threadId,
+        item.turnId,
+        record.seq,
+        threadId,
+        item.turnId,
+        record.seq,
+      )
+    }
   }
-}
-
-export function writeCheckpoint(
-  database: DatabaseSync,
-  threadId: string,
-  checkpoint: RolloutCheckpoint,
-): void {
-  database
-    .prepare(`
-      INSERT INTO rollout_checkpoints
-        (thread_id, rollout_id, end_byte_offset, next_seq)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT (thread_id, rollout_id) DO UPDATE SET
-        end_byte_offset = excluded.end_byte_offset,
-        next_seq = excluded.next_seq
-    `)
-    .run(
-      threadId,
-      checkpoint.rolloutId,
-      checkpoint.endByteOffset,
-      checkpoint.nextSeq,
-    )
-}
-
-export function readCheckpoint(
-  database: DatabaseSync,
-  threadId: string,
-  rolloutId: string,
-): RolloutCheckpoint | undefined {
-  const row = database
-    .prepare(`
-      SELECT end_byte_offset, next_seq FROM rollout_checkpoints
-      WHERE thread_id = ? AND rollout_id = ?
-    `)
-    .get(threadId, rolloutId) as
-    | Readonly<{ end_byte_offset: number; next_seq: number }>
-    | undefined
-  return row === undefined
-    ? undefined
-    : {
-        rolloutId,
-        endByteOffset: row.end_byte_offset,
-        nextSeq: row.next_seq,
-      }
 }
 
 export function readDisplayPage(
@@ -185,7 +178,7 @@ export function readDisplayPage(
   }
   const candidates = database
     .prepare(`
-      SELECT record_json, byte_size FROM display_records
+      SELECT record_json, byte_size FROM thread_items
       WHERE thread_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?
     `)
     .iterate(threadId, before, displayPageRecords + 1)
@@ -203,7 +196,7 @@ export function readDisplayPage(
   const lastState = (kind: string) =>
     database
       .prepare(`
-        SELECT record_json, byte_size FROM display_records
+        SELECT record_json, byte_size FROM thread_items
         WHERE thread_id = ? AND kind = ? AND seq < ?
         ORDER BY seq DESC LIMIT 1
       `)
@@ -224,7 +217,7 @@ export function readDisplayPage(
   const turnState = (kind: string, ownerTurnId: string, beforeSeq: number) =>
     database
       .prepare(`
-        SELECT record_json, byte_size FROM display_records
+        SELECT record_json, byte_size FROM thread_items
         WHERE thread_id = ? AND turn_id = ? AND kind = ? AND seq < ?
         ORDER BY seq DESC LIMIT 1
       `)
@@ -235,7 +228,7 @@ export function readDisplayPage(
   }
   const cacheRow = database
     .prepare(`
-      SELECT record_json, byte_size FROM display_records
+      SELECT record_json, byte_size FROM thread_items
       WHERE thread_id = ? AND kind = 'turn_completed'
         AND successful = 1 AND seq < ?
       ORDER BY seq DESC LIMIT 1
@@ -253,7 +246,7 @@ export function readDisplayPage(
     hasEarlier:
       database
         .prepare(
-          "SELECT 1 FROM display_records WHERE thread_id = ? AND seq < ? LIMIT 1",
+          "SELECT 1 FROM thread_items WHERE thread_id = ? AND seq < ? LIMIT 1",
         )
         .get(threadId, first) !== undefined,
   }
@@ -270,8 +263,7 @@ function readTranscriptPage(
     before !== Number.MAX_SAFE_INTEGER &&
     database
       .prepare(`
-    SELECT 1 FROM display_records
-    WHERE thread_id = ? AND seq = ? AND kind = 'turn_completed'
+    SELECT 1 FROM thread_turns WHERE thread_id = ? AND end_seq = ?
   `)
       .get(threadId, before - 1) === undefined
   )
@@ -281,34 +273,37 @@ function readTranscriptPage(
   const recentTurns = 5
   const ends = database
     .prepare(`
-    SELECT seq FROM display_records
-    WHERE thread_id = ? AND kind = 'turn_completed' AND seq < ?
-    ORDER BY seq DESC LIMIT ?
+    SELECT end_seq, turn_id, activity_count, suppress_legacy_answer FROM thread_turns
+    WHERE thread_id = ? AND end_seq < ?
+    ORDER BY end_seq DESC LIMIT ?
   `)
-    .all(threadId, before, recentTurns + 1) as { seq: number }[]
+    .all(threadId, before, recentTurns + 1) as CompletedTurnRow[]
   const latestEnd = ends[0]
   if (
     latestEnd === undefined ||
     database
       .prepare(`
-    SELECT 1 FROM display_records
+    SELECT 1 FROM thread_items
     WHERE thread_id = ? AND kind = 'turn_started' AND seq > ? AND seq < ?
     LIMIT 1
   `)
-      .get(threadId, latestEnd.seq, before) !== undefined
+      .get(threadId, latestEnd.end_seq, before) !== undefined
   )
     return undefined
   const getRows = database.prepare(`
-    SELECT record_json, byte_size FROM display_records
+    SELECT record_json, byte_size FROM thread_items
     WHERE thread_id = ? AND transcript = 1 AND seq >= ? AND seq < ?
     ORDER BY seq
   `)
   const pages: StoredRolloutItem[][] = []
+  const activityTurnIds: string[] = []
   let bytes = 0
   let count = 0
   let first = before
   for (let index = 0; index < Math.min(recentTurns, ends.length); index++) {
-    const start = (ends[index + 1]?.seq ?? 0) + 1
+    const end = ends[index]
+    if (end === undefined) break
+    const start = (ends[index + 1]?.end_seq ?? 0) + 1
     const records: StoredRolloutItem[] = []
     let complete = true
     for (const value of getRows.iterate(threadId, start, first)) {
@@ -326,62 +321,22 @@ function readTranscriptPage(
       records.push(parseDisplayRow(row))
     }
     if (!complete) break
+    if (end.activity_count > 0) activityTurnIds.unshift(end.turn_id)
+    if (end.suppress_legacy_answer) {
+      const completionIndex = records.findIndex(
+        ({ seq }) => seq === end.end_seq,
+      )
+      const completion = records[completionIndex]
+      if (completion !== undefined)
+        records[completionIndex] = hideLegacyAnswer(completion)
+    }
     pages.push(records)
     first = start
   }
-  const hasActivity = database.prepare(`
-    SELECT 1 FROM display_records
-    WHERE thread_id = ? AND turn_id = ? AND transcript = 0 AND seq < ? LIMIT 1
-  `)
-  const hasTrailingActivity = database.prepare(`
-    SELECT 1 FROM display_records
-    WHERE thread_id = ? AND turn_id = ? AND transcript = 0 AND seq > ? AND seq < ?
-    LIMIT 1
-  `)
-  const records = pages.reverse().flatMap((page) => {
-    const latestAssistant = page.findLast(
-      ({ item }) =>
-        item.type === "item_completed" &&
-        item.item.type === "agent_message" &&
-        item.item.content.some(
-          (part) => part.type !== "text" || part.text !== "",
-        ),
-    )
-    return page.map((record) => {
-      const { item, seq } = record
-      if (
-        item.type !== "turn_completed" ||
-        item.outcome !== "completed" ||
-        item.completion?.answerItemIds !== undefined ||
-        latestAssistant === undefined ||
-        hasTrailingActivity.get(
-          threadId,
-          item.turnId,
-          latestAssistant.seq,
-          seq,
-        ) === undefined
-      )
-        return record
-      // Legacy completions infer a final reply from the last visible item.
-      // Omitting a later tool must not promote preceding commentary.
-      return {
-        ...record,
-        item: {
-          ...item,
-          completion: { ...item.completion, answerItemIds: [] },
-        },
-      }
-    })
-  })
-  const activityTurnIds = records.flatMap(({ item, seq }) =>
-    item.type === "turn_completed" &&
-    hasActivity.get(threadId, item.turnId, seq)
-      ? [item.turnId]
-      : [],
-  )
+  const records = pages.reverse().flat()
   // State may predate all selected turns.
   const lastState = database.prepare(`
-    SELECT record_json, byte_size FROM display_records
+    SELECT record_json, byte_size FROM thread_items
     WHERE thread_id = ? AND kind = ? AND seq < ? ORDER BY seq DESC LIMIT 1
   `)
   const lookbehind = ["turn_context", "token_count"].flatMap((kind) => {
@@ -396,7 +351,7 @@ function readTranscriptPage(
   ) {
     const previous = database
       .prepare(`
-      SELECT record_json, byte_size FROM display_records
+      SELECT record_json, byte_size FROM thread_items
       WHERE thread_id = ? AND kind = 'turn_completed' AND successful = 1 AND seq < ?
       ORDER BY seq DESC LIMIT 1
     `)
@@ -407,7 +362,7 @@ function readTranscriptPage(
       if (completion.item.type === "turn_completed") {
         const context = database
           .prepare(`
-          SELECT record_json, byte_size FROM display_records
+          SELECT record_json, byte_size FROM thread_items
           WHERE thread_id = ? AND turn_id = ? AND kind = 'turn_context' AND seq < ?
           ORDER BY seq DESC LIMIT 1
         `)
@@ -427,6 +382,194 @@ function readTranscriptPage(
   }
 }
 
+type TurnListRow = CompletedTurnRow &
+  Readonly<{
+    completed_at: string
+    outcome: SessionTurnOutline["outcome"]
+    started_at: string | null
+    input_id: string | null
+  }>
+
+export function readCompletedTurns(
+  database: DatabaseSync,
+  threadId: string,
+  query: CompletedTurnsQuery,
+): Pick<CompletedTurnsRead, "turns" | "nextBefore" | "nextAfter"> | undefined {
+  const through =
+    query.through === undefined ? Number.MAX_SAFE_INTEGER : query.through - 1
+  let before =
+    query.before === undefined ? Number.MAX_SAFE_INTEGER : query.before - 1
+  // An unmatched durable start has no task after a restart. Include it in
+  // history as interrupted unless the live cut identifies it as resident.
+  const interrupted = database
+    .prepare(`
+      WITH latest_start AS (
+        SELECT turn_id, seq, record_json FROM thread_items
+        WHERE thread_id = ? AND kind = 'turn_started' AND seq <= ?
+        ORDER BY seq DESC LIMIT 1
+      )
+      SELECT ? AS end_seq, start.turn_id, 'interrupted' AS outcome,
+        json_extract(start.record_json, '$.createdAt') AS started_at,
+        json_extract(start.record_json, '$.item.inputItemId') AS input_id,
+        json_extract(start.record_json, '$.createdAt') AS completed_at,
+        (SELECT COUNT(*) FROM thread_items
+          WHERE thread_id = ? AND turn_id = start.turn_id AND transcript = 0 AND seq <= ?
+        ) AS activity_count, 0 AS suppress_legacy_answer
+      FROM latest_start AS start
+      WHERE start.turn_id IS NOT ?
+        AND NOT EXISTS (
+          SELECT 1 FROM thread_turns
+          WHERE thread_id = ? AND turn_id = start.turn_id AND end_seq BETWEEN start.seq AND ?
+        )
+    `)
+    .get(
+      threadId,
+      through,
+      through,
+      threadId,
+      through,
+      query.activeTurnId ?? null,
+      threadId,
+      through,
+    ) as TurnListRow | undefined
+  if (query.aroundTurnId !== undefined) {
+    const anchor = database
+      .prepare(`
+      SELECT end_seq FROM thread_turns WHERE thread_id = ? AND turn_id = ? AND end_seq <= ?
+      ORDER BY end_seq DESC LIMIT 1
+    `)
+      .get(threadId, query.aroundTurnId, through) as
+      | { end_seq: number }
+      | undefined
+    const end =
+      anchor?.end_seq ??
+      (interrupted?.turn_id === query.aroundTurnId
+        ? interrupted.end_seq
+        : undefined)
+    if (end === undefined) return undefined
+    before = end + 1
+  }
+  const forward = query.after !== undefined
+  const rows = database
+    .prepare(`
+    SELECT end_seq, turn_id, completed_at, started_at, input_id, outcome,
+      activity_count, suppress_legacy_answer
+    FROM thread_turns WHERE thread_id = ? AND end_seq <= ? AND end_seq ${forward ? ">" : "<"} ?
+    ORDER BY end_seq ${forward ? "ASC" : "DESC"} LIMIT ?
+  `)
+    .all(
+      threadId,
+      through,
+      query.after === undefined ? before : query.after - 1,
+      query.limit,
+    ) as TurnListRow[]
+  if (
+    interrupted !== undefined &&
+    (forward
+      ? interrupted.end_seq > (query.after ?? 0) - 1
+      : interrupted.end_seq < before)
+  ) {
+    if (forward) rows.push(interrupted)
+    else rows.unshift(interrupted)
+    if (rows.length > query.limit) rows.pop()
+  }
+  const summaryItems =
+    query.view === "summary"
+      ? database.prepare(`
+      SELECT record_json, byte_size FROM thread_items
+      WHERE thread_id = ? AND turn_id = ? AND transcript = 1 AND seq > ? AND seq <= ?
+        AND kind NOT IN ('turn_context', 'token_count')
+      ORDER BY seq
+    `)
+      : undefined
+  const previousEnd =
+    summaryItems === undefined
+      ? undefined
+      : database.prepare(`
+    SELECT end_seq FROM thread_turns WHERE thread_id = ? AND end_seq < ?
+    ORDER BY end_seq DESC LIMIT 1
+  `)
+  const turns = []
+  let bytes = 0
+  let count = 0
+  for (const [index, row] of rows.entries()) {
+    const records: StoredRolloutItem[] = []
+    let complete = true
+    const previous = previousEnd?.get(threadId, row.end_seq) as
+      | { end_seq: number }
+      | undefined
+    for (const value of summaryItems?.iterate(
+      threadId,
+      row.turn_id,
+      previous?.end_seq ?? 0,
+      row.end_seq,
+    ) ?? []) {
+      const item = value as DisplayRow
+      // Keep each Turn together. An oversized first Turn can still be read,
+      // while additional Turns have to fit the display budget.
+      if (
+        index > 0 &&
+        (count >= displayPageRecords ||
+          bytes + item.byte_size > displayPageBytes)
+      ) {
+        complete = false
+        break
+      }
+      const record = parseDisplayRow(item)
+      records.push(
+        row.suppress_legacy_answer ? hideLegacyAnswer(record) : record,
+      )
+      bytes += item.byte_size
+      count++
+    }
+    if (!complete) break
+    turns.push({
+      turnId: row.turn_id,
+      completionSeq: row.end_seq + 1,
+      completedAt: row.completed_at,
+      outcome: row.outcome,
+      activityCount: row.activity_count,
+      ...(row.started_at === null ? {} : { startedAt: row.started_at }),
+      ...(row.input_id === null ? {} : { inputId: row.input_id }),
+      ...(summaryItems === undefined ? {} : { records }),
+    })
+  }
+  if (forward) turns.reverse()
+  const newest = turns[0]
+  const oldest = turns.at(-1)
+  if (newest === undefined || oldest === undefined) return { turns }
+  const earlier = database
+    .prepare(`
+    SELECT 1 FROM thread_turns WHERE thread_id = ? AND end_seq < ? LIMIT 1
+  `)
+    .get(threadId, oldest.completionSeq - 1)
+  const later = database
+    .prepare(`
+    SELECT 1 FROM thread_turns WHERE thread_id = ? AND end_seq > ? AND end_seq <= ? LIMIT 1
+  `)
+    .get(threadId, newest.completionSeq - 1, through)
+  return {
+    turns,
+    ...(earlier === undefined ? {} : { nextBefore: oldest.completionSeq }),
+    ...(later !== undefined ||
+    (interrupted !== undefined && interrupted.end_seq >= newest.completionSeq)
+      ? { nextAfter: newest.completionSeq }
+      : {}),
+  }
+}
+
+function hideLegacyAnswer(record: StoredRolloutItem): StoredRolloutItem {
+  return record.item.type === "turn_completed"
+    ? {
+        ...record,
+        item: {
+          ...record.item,
+          completion: { ...record.item.completion, answerItemIds: [] },
+        },
+      }
+    : record
+}
+
 export function readDisplayActivity(
   database: DatabaseSync,
   threadId: string,
@@ -435,22 +578,20 @@ export function readDisplayActivity(
 ): { records: readonly StoredRolloutItem[]; nextBefore?: number } {
   const end = database
     .prepare(`
-    SELECT seq FROM display_records
-    WHERE thread_id = ? AND turn_id = ? AND kind = 'turn_completed'
-    ORDER BY seq DESC LIMIT 1
+    SELECT end_seq FROM thread_turns
+    WHERE thread_id = ? AND turn_id = ? ORDER BY end_seq DESC LIMIT 1
   `)
-    .get(threadId, turnId) as { seq: number } | undefined
-  if (end === undefined) return { records: [] }
+    .get(threadId, turnId) as { end_seq: number } | undefined
   const rows = database
     .prepare(`
-    SELECT record_json, byte_size FROM display_records
+    SELECT record_json, byte_size FROM thread_items
     WHERE thread_id = ? AND turn_id = ? AND transcript = 0 AND seq < ?
     ORDER BY seq DESC LIMIT ?
   `)
     .iterate(
       threadId,
       turnId,
-      Math.min(before, end.seq),
+      Math.min(before, end?.end_seq ?? before),
       displayPageRecords + 1,
     )
   const records = boundedRows(rows)
@@ -459,7 +600,7 @@ export function readDisplayActivity(
     last !== undefined &&
     database
       .prepare(`
-    SELECT 1 FROM display_records
+    SELECT 1 FROM thread_items
     WHERE thread_id = ? AND turn_id = ? AND transcript = 0 AND seq < ? LIMIT 1
   `)
       .get(threadId, turnId, last) !== undefined
@@ -478,7 +619,7 @@ export function readDisplayEvents(
 ): { records: StoredRolloutItem[]; nextAfter: number; hasMore: boolean } {
   const rows = database
     .prepare(`
-      SELECT record_json, byte_size FROM display_records
+      SELECT record_json, byte_size FROM thread_items
       WHERE thread_id = ? AND seq > ? AND seq <= ? AND kind <> 'turn_context'
       ORDER BY seq LIMIT ?
     `)
@@ -488,7 +629,7 @@ export function readDisplayEvents(
   const hasMore =
     database
       .prepare(`
-        SELECT 1 FROM display_records
+        SELECT 1 FROM thread_items
         WHERE thread_id = ? AND seq > ? AND seq <= ? AND kind <> 'turn_context' LIMIT 1
       `)
       .get(threadId, last, through) !== undefined
@@ -502,9 +643,8 @@ export function readInputAdmissions(
 ): StoredRolloutItem[] {
   const rows = database
     .prepare(`
-    SELECT record_json, byte_size FROM display_records
-    WHERE thread_id = ? AND kind = 'response_item'
-      AND turn_id IN (SELECT value FROM json_each(?))
+    SELECT record_json, byte_size FROM thread_items
+    WHERE thread_id = ? AND request_id IN (SELECT value FROM json_each(?))
     ORDER BY seq
   `)
     .all(threadId, JSON.stringify(requestIds)) as unknown as DisplayRow[]

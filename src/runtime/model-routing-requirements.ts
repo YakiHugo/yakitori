@@ -1,3 +1,4 @@
+import { modelMessageHasImage } from "../core/thread-model-routing.ts"
 import type { SessionConfigurationSnapshot } from "../kernel/events.ts"
 import type { UserAttachment } from "../protocol/asset-types.ts"
 import type { ModelRouteRequirements } from "../protocol/model-routing.ts"
@@ -12,15 +13,9 @@ export function modelRoutingRequirements(
     configuration?: SessionConfigurationSnapshot
   }>,
 ): ModelRouteRequirements & Readonly<{ preferredAccount?: string }> {
-  const attachments = input.attachments ?? []
-  let image = attachments.some((file) => file.mediaType.startsWith("image/"))
-  for (const message of input.history) {
-    if (message.role !== "user" && message.role !== "tool") continue
-    for (const block of message.content) {
-      if (block.type !== "image") continue
-      image = true
-    }
-  }
+  const image =
+    input.attachments?.some((file) => file.mediaType.startsWith("image/")) ||
+    input.history.some(modelMessageHasImage)
 
   return {
     ...(image ? { inputModalities: ["image"] } : {}),

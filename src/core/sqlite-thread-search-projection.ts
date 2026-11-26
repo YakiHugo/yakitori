@@ -1,34 +1,12 @@
-import { mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { DatabaseSync } from "node:sqlite"
-import type { HistoryLocation } from "../protocol/application.ts"
+import type { DatabaseSync } from "node:sqlite"
 import { answerTextParts } from "../protocol/model-output.ts"
 import { parseSessionPlan } from "../protocol/user-interaction.ts"
-import type { DisplayWindow, RolloutRecordLocation } from "./display-window.ts"
-import type {
-  StoredRolloutItem,
-  StoredThread,
-  ThreadMetadata,
-  ThreadStatusProjection,
-  ThreadSummary,
-} from "./rollout.ts"
+import type { StoredRolloutItem, ThreadStatusProjection } from "./rollout.ts"
 import {
-  applyDisplayEntries,
-  createDisplayTables,
-  type RolloutCheckpoint,
-  readCheckpoint,
-  readDisplayActivity,
-  readDisplayEvents,
-  readDisplayPage,
-  readInputAdmissions,
-  requireProjectionAppend,
-  writeCheckpoint,
-} from "./sqlite-thread-display-projection.ts"
-import {
-  createTranscriptLocationTable,
-  findTranscriptLocation,
-  indexTranscriptLocations,
-} from "./sqlite-transcript-locations.ts"
+  projectedThreadSummary,
+  type ProjectedThreadRow,
+  SqliteRolloutProjection,
+} from "./sqlite-rollout-projection.ts"
 import {
   literalMatches,
   markdownVisibleText,
@@ -37,35 +15,12 @@ import {
   type ThreadSearchOccurrence,
   threadCursor,
 } from "./thread-search.ts"
-import { advanceThreadStatus } from "./thread-status.ts"
 import type {
   ThreadStoreOccurrenceSearchInput,
   ThreadStoreOccurrenceSearchResult,
   ThreadStoreSearchInput,
   ThreadStoreSearchResult,
 } from "./thread-store.ts"
-
-export type ThreadSearchProjectionStamp = Readonly<{
-  metadataSize: number
-  metadataMtimeMs: number
-  rolloutSize: number
-  rolloutMtimeMs: number
-}>
-
-type StampRow = Readonly<{
-  metadata_size: number
-  metadata_mtime_ms: number
-  rollout_size: number
-  rollout_mtime_ms: number
-}>
-
-type ThreadRow = Readonly<{
-  thread_id: string
-  metadata_json: string
-  seq: number
-  title: string
-  status_json: string
-}>
 
 type MessageRow = Readonly<{
   seq: number
@@ -91,25 +46,10 @@ type OccurrenceCursor = Readonly<{
   toolActivity?: boolean
 }>
 
-// Status, compact display history and checkpoints share a disposable projection,
-// so a schema reset rebuilds them consistently from authoritative JSONL.
-const schemaVersion = 13
-
-// Disposable SQLite materialization of canonical JSONL history. The rollout
-// remains authoritative; stamps let startup rebuild only stale projections.
-export class SqliteThreadSearchProjection {
-  readonly #database: DatabaseSync
-
+export class SqliteThreadSearchProjection extends SqliteRolloutProjection {
   constructor(databasePath: string) {
-    if (databasePath !== ":memory:") {
-      mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 })
-    }
-    this.#database = new DatabaseSync(databasePath, {
-      timeout: 5_000,
-      enableDoubleQuotedStringLiterals: false,
-    })
-    initializeDatabase(this.#database)
-    this.#database.function(
+    super(databasePath, 16, dropSearchTables, createSearchTables)
+    this.database.function(
       "literal_match",
       { deterministic: true },
       (text, searchTerm) =>
@@ -121,239 +61,13 @@ export class SqliteThreadSearchProjection {
     )
   }
 
-  indexedThreadIds(): readonly string[] {
-    const rows = this.#database
-      .prepare("SELECT thread_id FROM search_threads")
-      .all() as unknown as ReadonlyArray<Readonly<{ thread_id: string }>>
-    return rows.map((row) => row.thread_id)
-  }
-
-  isCurrent(threadId: string, stamp: ThreadSearchProjectionStamp): boolean {
-    const row = this.#database
-      .prepare(`
-        SELECT metadata_size, metadata_mtime_ms, rollout_size, rollout_mtime_ms
-        FROM search_threads
-        WHERE thread_id = ?
-      `)
-      .get(threadId) as StampRow | undefined
-    return (
-      row?.metadata_size === stamp.metadataSize &&
-      row.metadata_mtime_ms === stamp.metadataMtimeMs &&
-      row.rollout_size === stamp.rolloutSize &&
-      row.rollout_mtime_ms === stamp.rolloutMtimeMs
-    )
-  }
-
-  readSummary(threadId: string): ThreadSummary | undefined {
-    const row = this.#database
-      .prepare(
-        "SELECT thread_id, metadata_json, seq, title, status_json FROM search_threads WHERE thread_id = ?",
-      )
-      .get(threadId) as ThreadRow | undefined
-    return row === undefined ? undefined : summaryFromRow(row)
-  }
-
-  checkpoint(
+  protected applyEntries(
     threadId: string,
-    rolloutId: string,
-  ): RolloutCheckpoint | undefined {
-    return readCheckpoint(this.#database, threadId, rolloutId)
-  }
-
-  readDisplayWindow(
-    threadId: string,
-    before = Number.MAX_SAFE_INTEGER,
-    transcript = false,
-  ): DisplayWindow {
-    return readDisplayPage(this.#database, threadId, before, transcript)
-  }
-
-  readDisplayLocation(
-    threadId: string,
-    location: HistoryLocation,
-    page: Readonly<{ before?: number; after?: number }>,
-  ) {
-    const summary = this.readSummary(threadId)
-    if (summary?.rolloutId !== location.rolloutId) return undefined
-    const match = this.#database
-      .prepare(`
-      SELECT seq, kind FROM search_messages WHERE thread_id = ? AND turn_id = ? AND item_id = ?
-    `)
-      .get(threadId, location.turnId, location.itemId) as
-      | { seq: number; kind: string }
-      | undefined
-    if (match === undefined) return undefined
-    let before = page.before
-    if (page.after !== undefined) {
-      // Use the next finished turn as the end of the page. The transcript
-      // byte budget can trim preceding turns, so jumping several ends here
-      // could skip a turn in between.
-      const next = this.#database
-        .prepare(`
-        SELECT seq FROM display_records
-        WHERE thread_id = ? AND kind = 'turn_completed' AND seq >= ?
-        ORDER BY seq LIMIT 1
-      `)
-        .get(threadId, page.after) as { seq: number } | undefined
-      before = (next?.seq ?? summary.seq) + 1
-    }
-    const opensTool = before === undefined && match.kind === "tool"
-    if (opensTool) before = match.seq + 1
-    if (before === undefined) {
-      const turnEnd = this.#database
-        .prepare(`
-        SELECT seq FROM display_records WHERE thread_id = ? AND turn_id = ?
-          AND kind = 'turn_completed' AND seq >= ?
-        ORDER BY seq DESC LIMIT 1
-      `)
-        .get(threadId, location.turnId, match.seq) as
-        | { seq: number }
-        | undefined
-      before = (turnEnd?.seq ?? match.seq) + 1
-    }
-    return {
-      ...this.readDisplayWindow(threadId, before, !opensTool),
-      endSeq: summary.seq,
-      ...(before <= summary.seq ? { historyAfter: before } : {}),
-    }
-  }
-
-  readDisplayActivity(threadId: string, turnId: string, before: number) {
-    return readDisplayActivity(this.#database, threadId, turnId, before)
-  }
-
-  readThreadEvents(
-    threadId: string,
-    input: { after: number; through: number; limit: number },
-  ) {
-    return readDisplayEvents(
-      this.#database,
-      threadId,
-      input.after,
-      input.through,
-      input.limit,
-    )
-  }
-
-  readInputAdmissions(
-    threadId: string,
-    requestIds: readonly string[],
-  ): StoredRolloutItem[] {
-    return readInputAdmissions(this.#database, threadId, requestIds)
-  }
-
-  begin(metadata: ThreadMetadata): void {
-    this.#transaction(() => {
-      this.#database
-        .prepare("DELETE FROM search_threads WHERE thread_id = ?")
-        .run(metadata.id)
-      insertThread(this.#database, metadata, 0, {
-        metadataSize: -1,
-        metadataMtimeMs: -1,
-        rolloutSize: -1,
-        rolloutMtimeMs: -1,
-      })
-    })
-  }
-
-  rebuild(
-    stored: StoredThread,
-    stamp: ThreadSearchProjectionStamp,
-    locations?: ReadonlyMap<number, RolloutRecordLocation>,
-  ): void {
-    this.#transaction(() => {
-      this.#database
-        .prepare("DELETE FROM search_threads WHERE thread_id = ?")
-        .run(stored.metadata.id)
-      insertThread(
-        this.#database,
-        stored.metadata,
-        stored.rollout.filter(({ item }) => item.type !== "session_meta")
-          .length,
-        stamp,
-      )
-      applyEntries(this.#database, stored.metadata.id, stored.rollout)
-      if (locations !== undefined)
-        indexTranscriptLocations(
-          this.#database,
-          stored.metadata.id,
-          stored.rollout,
-          locations,
-        )
-      writeCheckpoint(this.#database, stored.metadata.id, {
-        rolloutId: stored.metadata.rolloutId,
-        endByteOffset: stamp.rolloutSize,
-        nextSeq: (stored.rollout.at(-1)?.seq ?? 0) + 1,
-      })
-    })
-  }
-
-  append(
-    metadata: ThreadMetadata,
     entries: readonly StoredRolloutItem[],
-    stamp: ThreadSearchProjectionStamp,
-    checkpoint?: RolloutCheckpoint,
-    locations?: ReadonlyMap<number, RolloutRecordLocation>,
+    _locations: unknown,
+    previous: ThreadStatusProjection,
   ): void {
-    this.#transaction(() => {
-      requireProjectionAppend(this.#database, metadata, entries, checkpoint)
-      const result = this.#database
-        .prepare(`
-          UPDATE search_threads
-          SET metadata_json = ?,
-              title = ?,
-              updated_at = ?,
-              seq = seq + ?,
-              metadata_size = ?,
-              metadata_mtime_ms = ?,
-              rollout_size = ?,
-              rollout_mtime_ms = ?
-          WHERE thread_id = ?
-        `)
-        .run(
-          JSON.stringify(metadata),
-          metadata.title ?? "",
-          metadata.updatedAt,
-          entries.filter(({ item }) => item.type !== "session_meta").length,
-          stamp.metadataSize,
-          stamp.metadataMtimeMs,
-          stamp.rolloutSize,
-          stamp.rolloutMtimeMs,
-          metadata.id,
-        )
-      if (result.changes !== 1) {
-        throw new Error(`Thread ${metadata.id} has no search projection.`)
-      }
-      applyEntries(this.#database, metadata.id, entries)
-      if (locations !== undefined)
-        indexTranscriptLocations(
-          this.#database,
-          metadata.id,
-          entries,
-          locations,
-        )
-      writeCheckpoint(
-        this.#database,
-        metadata.id,
-        checkpoint ?? {
-          rolloutId: metadata.rolloutId,
-          endByteOffset: stamp.rolloutSize,
-          nextSeq:
-            (entries.at(-1)?.seq ?? this.readSummary(metadata.id)?.seq ?? 0) +
-            1,
-        },
-      )
-    })
-  }
-
-  findTranscriptItem(threadId: string, itemId: string, through?: number) {
-    return findTranscriptLocation(this.#database, threadId, itemId, through)
-  }
-
-  delete(threadId: string): void {
-    this.#database
-      .prepare("DELETE FROM search_threads WHERE thread_id = ?")
-      .run(threadId)
+    applySearchEntries(this.database, threadId, entries, previous.activeTurnId)
   }
 
   searchThreads(
@@ -379,12 +93,12 @@ export class SqliteThreadSearchProjection {
     ]
     const rows = (
       anchor === undefined
-        ? this.#database
+        ? this.database
             .prepare(
               `${matchingThreadsSql(input.toolActivity)}${filter} ORDER BY updated_at DESC, thread_id DESC LIMIT ?`,
             )
             .all(...parameters, input.limit + 1)
-        : this.#database
+        : this.database
             .prepare(`${matchingThreadsSql(input.toolActivity)}${filter}
             AND (updated_at < ? OR (updated_at = ? AND thread_id < ?))
             ORDER BY updated_at DESC, thread_id DESC
@@ -397,10 +111,10 @@ export class SqliteThreadSearchProjection {
               anchor.id,
               input.limit + 1,
             )
-    ) as ThreadRow[]
+    ) as ProjectedThreadRow[]
     const page = rows.slice(0, input.limit)
     const matches = page.map((row) => {
-      const summary = summaryFromRow(row)
+      const summary = projectedThreadSummary(row)
       return {
         summary,
         ...this.#firstMatch(
@@ -416,7 +130,7 @@ export class SqliteThreadSearchProjection {
       matches,
       ...(rows.length <= input.limit || last === undefined
         ? {}
-        : { nextCursor: threadCursor(summaryFromRow(last)) }),
+        : { nextCursor: threadCursor(projectedThreadSummary(last)) }),
     }
   }
 
@@ -424,8 +138,8 @@ export class SqliteThreadSearchProjection {
     input: ThreadStoreOccurrenceSearchInput,
   ): ThreadStoreOccurrenceSearchResult | undefined {
     if (
-      this.#database
-        .prepare("SELECT 1 FROM search_threads WHERE thread_id = ?")
+      this.database
+        .prepare("SELECT 1 FROM projection_threads WHERE thread_id = ?")
         .get(input.threadId) === undefined
     ) {
       return undefined
@@ -492,7 +206,7 @@ export class SqliteThreadSearchProjection {
   ): MessageRow | undefined {
     const kind = searchedKind(input.toolActivity)
     if (cursor !== undefined) {
-      return this.#database
+      return this.database
         .prepare(`
           SELECT seq, item_id, turn_id, text, result_item_id
           FROM search_messages
@@ -510,7 +224,7 @@ export class SqliteThreadSearchProjection {
         ) as MessageRow | undefined
     }
     if (after !== undefined) {
-      return this.#database
+      return this.database
         .prepare(`
           SELECT seq, item_id, turn_id, text, result_item_id
           FROM search_messages
@@ -527,7 +241,7 @@ export class SqliteThreadSearchProjection {
           after.itemId,
         ) as MessageRow | undefined
     }
-    return this.#database
+    return this.database
       .prepare(`
         SELECT seq, item_id, turn_id, text, result_item_id
         FROM search_messages
@@ -539,7 +253,7 @@ export class SqliteThreadSearchProjection {
   }
 
   #firstMatch(
-    row: ThreadRow,
+    row: ProjectedThreadRow,
     rolloutId: string,
     searchTerm: string,
     toolActivity: boolean | undefined,
@@ -549,7 +263,7 @@ export class SqliteThreadSearchProjection {
       : literalMatches(row.title, searchTerm, 1)[0]
     if (titleMatch !== undefined)
       return { snippet: snippetForMatch(row.title, titleMatch).snippet }
-    const message = this.#database
+    const message = this.database
       .prepare(`
         SELECT seq, item_id, turn_id, text, result_item_id
         FROM search_messages
@@ -577,17 +291,6 @@ export class SqliteThreadSearchProjection {
       },
     }
   }
-
-  #transaction(operation: () => void): void {
-    this.#database.exec("BEGIN IMMEDIATE")
-    try {
-      operation()
-      this.#database.exec("COMMIT")
-    } catch (error) {
-      if (this.#database.isTransaction) this.#database.exec("ROLLBACK")
-      throw error
-    }
-  }
 }
 
 function searchedKind(toolActivity: boolean | undefined): string {
@@ -598,8 +301,8 @@ function matchingThreadsSql(toolActivity: boolean | undefined): string {
   return `
     WITH presented AS (
       SELECT thread_id, metadata_json, status_json, seq, updated_at,
-        COALESCE((SELECT value FROM json_each(?) WHERE key = search_threads.thread_id), title) AS title
-      FROM search_threads
+        COALESCE((SELECT value FROM json_each(?) WHERE key = projection_threads.thread_id), title) AS title
+      FROM projection_threads
     )
     SELECT thread_id, metadata_json, status_json, seq, title
     FROM presented AS thread
@@ -613,46 +316,19 @@ function matchingThreadsSql(toolActivity: boolean | undefined): string {
   `
 }
 
-function insertThread(
-  database: DatabaseSync,
-  metadata: ThreadMetadata,
-  seq: number,
-  stamp: ThreadSearchProjectionStamp,
-): void {
-  database
-    .prepare(`
-      INSERT INTO search_threads (
-        thread_id, metadata_json, title, updated_at, seq,
-        metadata_size, metadata_mtime_ms, rollout_size, rollout_mtime_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      metadata.id,
-      JSON.stringify(metadata),
-      metadata.title ?? "",
-      metadata.updatedAt,
-      seq,
-      stamp.metadataSize,
-      stamp.metadataMtimeMs,
-      stamp.rolloutSize,
-      stamp.rolloutMtimeMs,
-    )
-}
-
-function applyEntries(
+function applySearchEntries(
   database: DatabaseSync,
   threadId: string,
   entries: readonly StoredRolloutItem[],
+  activeTurnId: string | undefined,
 ): void {
-  applyDisplayEntries(database, threadId, entries)
-  const row = database
-    .prepare("SELECT status_json FROM search_threads WHERE thread_id = ?")
-    .get(threadId) as Readonly<{ status_json: string }>
-  const status = JSON.parse(row.status_json) as ThreadStatusProjection
-  database
-    .prepare("UPDATE search_threads SET status_json = ? WHERE thread_id = ?")
-    .run(JSON.stringify(advanceThreadStatus(status, entries)), threadId)
   for (const record of entries) {
+    if (record.item.type === "turn_started") activeTurnId = record.item.turnId
+    if (
+      record.item.type === "turn_completed" &&
+      record.item.turnId === activeTurnId
+    )
+      activeTurnId = undefined
     if (
       record.item.type === "item_completed" &&
       record.item.item.type === "hosted_tool"
@@ -720,7 +396,7 @@ function applyEntries(
           database,
           threadId,
           record.seq,
-          envelope.turnId,
+          activeTurnId ?? envelope.turnId,
           envelope.id,
           "user",
           // User messages are displayed verbatim; only assistant answers render
@@ -862,23 +538,6 @@ function insertMessage(
     .run(threadId, seq, turnId, itemId, kind, text, resultItemId)
 }
 
-function summaryFromRow(row: ThreadRow): ThreadSummary {
-  const value: unknown = JSON.parse(row.metadata_json)
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("id" in value) ||
-    value.id !== row.thread_id
-  ) {
-    throw new Error(`Thread ${row.thread_id} has invalid search metadata.`)
-  }
-  return {
-    ...(value as ThreadMetadata),
-    ...(JSON.parse(row.status_json) as ThreadStatusProjection),
-    seq: row.seq,
-  }
-}
-
 function parseOccurrenceCursor(
   cursor: string,
   threadId: string,
@@ -922,40 +581,22 @@ function parseOccurrenceCursor(
   }
 }
 
-function initializeDatabase(database: DatabaseSync): void {
-  database.exec("PRAGMA journal_mode = WAL")
-  database.exec("PRAGMA synchronous = FULL")
-  database.exec("PRAGMA foreign_keys = ON")
-  const version = database.prepare("PRAGMA user_version").get() as
-    | Readonly<{ user_version: number }>
-    | undefined
-  if ((version?.user_version ?? 0) !== schemaVersion) {
-    database.exec(`
-      DROP TABLE IF EXISTS search_answer_items;
-      DROP TABLE IF EXISTS display_records;
-      DROP TABLE IF EXISTS transcript_locations;
-      DROP TABLE IF EXISTS rollout_checkpoints;
-      DROP TABLE IF EXISTS search_messages;
-      DROP TABLE IF EXISTS search_turns;
-      DROP TABLE IF EXISTS search_threads;
-    `)
-  }
+function dropSearchTables(database: DatabaseSync): void {
   database.exec(`
-    CREATE TABLE IF NOT EXISTS search_threads (
-      thread_id TEXT PRIMARY KEY,
-      metadata_json TEXT NOT NULL,
-      status_json TEXT NOT NULL DEFAULT '{}',
-      title TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      seq INTEGER NOT NULL,
-      metadata_size INTEGER NOT NULL,
-      metadata_mtime_ms REAL NOT NULL,
-      rollout_size INTEGER NOT NULL,
-      rollout_mtime_ms REAL NOT NULL
-    ) STRICT;
+    DROP TABLE IF EXISTS search_answer_items;
+    DROP TABLE IF EXISTS display_records;
+    DROP TABLE IF EXISTS transcript_locations;
+    DROP TABLE IF EXISTS rollout_checkpoints;
+    DROP TABLE IF EXISTS search_messages;
+    DROP TABLE IF EXISTS search_turns;
+    DROP TABLE IF EXISTS search_threads;
+  `)
+}
 
+function createSearchTables(database: DatabaseSync): void {
+  database.exec(`
     CREATE TABLE IF NOT EXISTS search_messages (
-      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL REFERENCES projection_threads(thread_id) ON DELETE CASCADE,
       seq INTEGER NOT NULL,
       turn_id TEXT NOT NULL,
       item_id TEXT NOT NULL,
@@ -969,7 +610,7 @@ function initializeDatabase(database: DatabaseSync): void {
     ON search_messages (thread_id, seq, item_id);
 
     CREATE TABLE IF NOT EXISTS search_answer_items (
-      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL REFERENCES projection_threads(thread_id) ON DELETE CASCADE,
       turn_id TEXT NOT NULL,
       item_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
@@ -978,7 +619,7 @@ function initializeDatabase(database: DatabaseSync): void {
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS search_turns (
-      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL REFERENCES projection_threads(thread_id) ON DELETE CASCADE,
       turn_id TEXT NOT NULL,
       last_tool_seq INTEGER NOT NULL DEFAULT -1,
       candidate_seq INTEGER,
@@ -987,8 +628,5 @@ function initializeDatabase(database: DatabaseSync): void {
       PRIMARY KEY (thread_id, turn_id)
     ) STRICT;
 
-    PRAGMA user_version = ${schemaVersion};
   `)
-  createDisplayTables(database)
-  createTranscriptLocationTable(database)
 }
