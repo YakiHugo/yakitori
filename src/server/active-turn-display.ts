@@ -17,7 +17,7 @@ export class ActiveTurnDisplay {
   #bytes = 0
   #omittedActivity = false
   #start: StoredRolloutItem | undefined
-  #input: StoredRolloutItem | undefined
+  #transcript: StoredRolloutItem[] = []
   #context: StoredRolloutItem | undefined
 
   append(records: readonly StoredRolloutItem[]): void {
@@ -46,8 +46,13 @@ export class ActiveTurnDisplay {
         this.#reset(turnId)
       if (this.#turnId !== turnId) continue
       if (item.type === "turn_started") this.#start = record
-      if (item.type === "response_item") this.#input ??= record
-      if (item.type === "turn_context") this.#context = record
+      else if (item.type === "turn_context") this.#context = record
+      else if (item.type !== "token_count" && isTranscriptRecord(record)) {
+        // Activity pages only recover non-transcript rows. Preserve the
+        // visible conversation for the lifetime of its active Turn.
+        this.#transcript.push(record)
+        continue
+      }
       const bytes = Buffer.byteLength(JSON.stringify(record))
       this.#records.push({ record, bytes })
       this.#bytes += bytes
@@ -75,7 +80,8 @@ export class ActiveTurnDisplay {
     const records = new Map(
       this.#records.map(({ record }) => [record.seq, record]),
     )
-    for (const anchor of [this.#start, this.#input, this.#context])
+    for (const record of this.#transcript) records.set(record.seq, record)
+    for (const anchor of [this.#start, this.#context])
       if (anchor !== undefined) records.set(anchor.seq, anchor)
     const before = this.#records[0]?.record.seq
     return {
@@ -95,7 +101,7 @@ export class ActiveTurnDisplay {
     this.#bytes = 0
     this.#omittedActivity = false
     this.#start = undefined
-    this.#input = undefined
+    this.#transcript = []
     this.#context = undefined
   }
 }
