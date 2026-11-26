@@ -1,3 +1,4 @@
+import { executionEntries } from "../execution-view.ts"
 import { useTranslation } from "../i18n/use-translation.ts"
 import {
   ChevronDown,
@@ -74,7 +75,7 @@ function SummaryPopover({
   const [latestCacheExpiry, setLatestCacheExpiry] = useState(cacheExpiry)
   const [cacheReadFailed, setCacheReadFailed] = useState(false)
   const completedTurns = useAppStore((state) => state.execution.telemetry.turns)
-  const entries = useAppStore((state) => state.execution.entries)
+  const entries = useAppStore((state) => executionEntries(state.execution))
   const open = anchor !== undefined
   const { status, loading, error, refresh, revision } = useWorkspaceGitStatus({
     cwd,
@@ -82,6 +83,7 @@ function SummaryPopover({
     active: open,
   })
   const sessionId = useAppStore((state) => state.selectedSession?.id)
+  const rolloutId = useAppStore((state) => state.selectedSession?.rolloutId)
   const agents = useSessionAgents(apiBase, sessionId, open)
   const completedAgents = agents.agents.filter(
     (agent) => typeof agent.status === "object" && "completed" in agent.status,
@@ -121,11 +123,19 @@ function SummaryPopover({
     let current = true
     setCacheReadFailed(false)
     void getAppRpcClient(apiBase)
-      .request("session/read", { sessionId })
+      .request("session/turns/list", {
+        sessionId,
+        view: "outline",
+        limit: 1,
+        ...(rolloutId === undefined ? {} : { rolloutId }),
+      })
       .then(
         (response) => {
-          if (current && response.session?.id === sessionId)
-            setLatestCacheExpiry(response.session.cacheExpiry)
+          if (
+            current &&
+            (rolloutId === undefined || response.rolloutId === rolloutId)
+          )
+            setLatestCacheExpiry(response.cacheExpiry)
         },
         () => {
           if (current) setCacheReadFailed(true)
@@ -134,7 +144,7 @@ function SummaryPopover({
     return () => {
       current = false
     }
-  }, [apiBase, completedTurns, open, sessionId])
+  }, [apiBase, completedTurns, open, rolloutId, sessionId])
 
   useEffect(() => {
     if (!open || expiresAt === undefined || expiresAt <= now) return

@@ -272,11 +272,14 @@ export function createFakeHandlers(
         behavior: "allow" as const,
       }),
     readSessionEvents: async () => okResult({ events: [] }),
-    readDisplayWindow: async () =>
-      okResult({
-        session: makeSessionDetail("session_1"),
-        events: [],
-      }),
+    listCompletedTurns: async () =>
+      okResult({ view: "outline", rolloutId: "session_1", seq: 1, turns: [] }),
+    readLiveSession: async (input) => {
+      const snapshot = await (overrides.readSession ?? base.readSession)(input)
+      if (!snapshot.ok) return snapshot
+      const { session } = snapshot.value
+      return okResult({ session, watermarkSeq: session.seq })
+    },
     readDisplayActivity: async () => okResult({ events: [] }),
   }
   return { ...base, ...overrides }

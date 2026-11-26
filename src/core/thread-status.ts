@@ -1,12 +1,4 @@
-import type {
-  RolloutItem,
-  StoredRolloutItem,
-  ThreadStatusProjection,
-} from "./rollout.ts"
-
-export function isSidebarStatusItem(item: RolloutItem): boolean {
-  return item.type === "turn_started" || item.type === "turn_completed"
-}
+import type { StoredRolloutItem, ThreadStatusProjection } from "./rollout.ts"
 
 export function advanceThreadStatus(
   previous: ThreadStatusProjection,

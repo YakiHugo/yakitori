@@ -124,8 +124,9 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
         params?: { sessionId?: string; before?: number }
       }
       if (
-        frame.method === "session/history" &&
-        frame.params?.sessionId !== undefined
+        frame.method === "session/turns/list" &&
+        frame.params?.sessionId !== undefined &&
+        frame.params.before !== undefined
       )
         reads.push(
           JSON.stringify([frame.params.sessionId, frame.params.before]),

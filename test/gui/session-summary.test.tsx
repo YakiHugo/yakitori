@@ -210,7 +210,8 @@ it("keeps loaded files during refresh and ignores superseded reads and inactive 
         entries: [{ path: "first.ts", indexStatus: " ", worktreeStatus: "M" }],
       }
     }
-    if (method === "session/read") return { session: session() }
+    if (method === "session/turns/list")
+      return { rolloutId: session().rolloutId }
     return { available: true, pullRequests: [] }
   })
   const user = userEvent.setup()
@@ -409,23 +410,21 @@ it("shows the previous provider's cache policy and keeps minimum retention disti
 it("refreshes the cache summary after a live turn completes", async () => {
   let completed = false
   request.mockImplementation(async (method) => {
-    if (method === "session/read")
+    if (method === "session/turns/list")
       return {
-        session: {
-          ...session(),
-          ...(completed
-            ? {
-                cacheExpiry: {
-                  provider: "anthropic",
-                  lastTurnCompletedAt: "2026-09-20T00:00:00Z",
-                  lastRequestStartedAt: "2026-09-19T23:59:00Z",
-                  ttlDescription: "5 minutes after last use",
-                  expiresAt: "2026-09-20T00:04:00Z",
-                  status: "estimated",
-                },
-              }
-            : {}),
-        },
+        rolloutId: session().rolloutId,
+        ...(completed
+          ? {
+              cacheExpiry: {
+                provider: "anthropic",
+                lastTurnCompletedAt: "2026-09-20T00:00:00Z",
+                lastRequestStartedAt: "2026-09-19T23:59:00Z",
+                ttlDescription: "5 minutes after last use",
+                expiresAt: "2026-09-20T00:04:00Z",
+                status: "estimated",
+              },
+            }
+          : {}),
       }
     if (method === "git/pullRequests")
       return { available: true, pullRequests: [] }
@@ -577,7 +576,8 @@ it("clears an invalidated pull-request load when refreshed Git status has no bra
   let finishPrevious!: (value: unknown) => void
   let statusReads = 0
   request.mockImplementation(async (method) => {
-    if (method === "session/read") return { session: session() }
+    if (method === "session/turns/list")
+      return { rolloutId: session().rolloutId }
     if (method === "git/pullRequests")
       return new Promise((resolve) => {
         finishPrevious = resolve

@@ -292,12 +292,7 @@ describe("session methods over real handlers", () => {
       title: "Revert route",
       counts: { inputs: 0, pendingInputs: 0, turns: 0 },
     })
-    expect(forked.events).toEqual([
-      expect.objectContaining({
-        sessionId: forked.session.id,
-        type: EventType.SessionCreated,
-      }),
-    ])
+    expect(forked).not.toHaveProperty("events")
 
     const source = await rpc<ApiReadSessionResponse>(
       connection,
@@ -430,7 +425,7 @@ describe("session methods over real handlers", () => {
 
     await rpc(connection, "session/subscribe", { sessionId, after: 1 })
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
 
     await rpc(connection, "session/input", {
@@ -475,7 +470,7 @@ describe("session methods over real handlers", () => {
     })
   })
 
-  it("replays durable events after the subscribe cursor", async () => {
+  it("leaves completed Turns to the history reader when opening the live stream", async () => {
     const { connection, handlers } = realSetup()
     await initializeConnection(connection)
     const created = await createSession(connection)
@@ -506,26 +501,10 @@ describe("session methods over real handlers", () => {
       { sessionId },
     )
 
-    await rpc(connection, "session/subscribe", { sessionId, after: 2 })
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-
-    const replayed = connection
-      .notifications("session/event")
-      .map((frame) => frame.params as { seq: number; event: { type: string } })
-    // Display events preserve their canonical ordering; hidden context
-    // records consume sequence numbers without requiring cursor frames.
-    expect(replayed.map(({ event }) => event.type)).toEqual([
-      "input.admitted",
-      "turn.completed",
-      "turn.started",
-      "input.admitted",
-      "turn.completed",
-    ])
-    for (const [index, event] of replayed.entries())
-      expect(event.seq).toBeGreaterThan(replayed[index - 1]?.seq ?? 2)
-    expect(replayed.at(-1)?.seq).toBe(snapshot.session.seq)
+    const live = await rpc(connection, "session/subscribe", { sessionId })
+    expect(live).toMatchObject({ watermarkSeq: snapshot.session.seq })
+    expect(live).not.toHaveProperty("activeTurn")
+    expect(connection.notifications("session/event")).toEqual([])
   })
 })
 
@@ -1022,7 +1001,7 @@ describe("permission requests over real handlers", () => {
 
     await rpc(connection, "session/subscribe", { sessionId })
     await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
+      (frame) => "method" in frame && frame.method === "session/liveReady",
     )
 
     // The runtime waits on the gate; its request publication flows to the

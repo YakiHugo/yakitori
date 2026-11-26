@@ -15,12 +15,8 @@ import {
   type SessionSidebar,
 } from "../core/session-sidebar.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
-import { isSidebarStatusItem } from "../core/thread-status.ts"
-import {
-  type DisplayWindowRead,
-  PersistContext,
-  type ThreadStore,
-} from "../core/thread-store.ts"
+import { PersistContext, type ThreadStore } from "../core/thread-store.ts"
+import { advanceThreadStatus } from "../core/thread-status.ts"
 import {
   inputContentAttachments,
   inputContentText,
@@ -48,9 +44,11 @@ import {
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import type {
+  LiveSessionSnapshot,
   SessionActivityResponse,
   SessionInputStatusResponse,
 } from "../protocol/rpc-methods.ts"
+import type { SessionTurnsResponse } from "../protocol/session-turns.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import type {
@@ -60,6 +58,7 @@ import type {
 import type { SkillMetadata } from "../runtime/skills.ts"
 import { GoalToolError } from "../runtime/tools/goal.ts"
 import type { ApplicationResult } from "./application-result.ts"
+import { ActiveTurnDisplay } from "./active-turn-display.ts"
 import {
   InputQueue,
   InputQueueFullError,
@@ -84,7 +83,6 @@ import {
   type ApiCompactSessionResponse,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
-  type ApiDisplayWindowResponse,
   ApiErrorCode,
   type ApiListAgentsResponse,
   type ApiListSessionsResponse,
@@ -257,9 +255,12 @@ export type ServerHandlers = {
   readInputStatus(
     input: unknown,
   ): Promise<ApplicationResult<SessionInputStatusResponse>>
-  readDisplayWindow(
+  listCompletedTurns(
     input: unknown,
-  ): Promise<ApplicationResult<ApiDisplayWindowResponse>>
+  ): Promise<ApplicationResult<SessionTurnsResponse>>
+  readLiveSession(
+    input: unknown,
+  ): Promise<ApplicationResult<LiveSessionSnapshot>>
   readDisplayActivity(
     input: unknown,
   ): Promise<ApplicationResult<SessionActivityResponse>>
@@ -273,6 +274,7 @@ const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
 
 type RolloutPublication = {
+  activeDisplay: ActiveTurnDisplay
   rolloutId: string
   firstUserInputId: string | undefined
   processedThrough: number
@@ -289,6 +291,7 @@ export function createThreadServerHandlers(
   const pumps = new Map<AgentThread, Promise<void>>()
   const pumpReady = new Map<AgentThread, Promise<void>>()
   const publishedThrough = new Map<string, number>()
+  const activeDisplays = new WeakMap<AgentThread, ActiveTurnDisplay>()
   const admissionTails = new Map<string, Promise<void>>()
   const pendingInitialDrafts = new Map<string, readonly InputContent[]>()
   const pendingSteerDrafts = new Map<string, readonly InputContent[]>()
@@ -360,6 +363,7 @@ export function createThreadServerHandlers(
     if (records.length === 0) return
     if (records.some((record, index) => hostSeq(record) !== after + index + 1))
       throw new Error("Rollout publication contains a sequence gap.")
+    publication.activeDisplay.append(records)
     options.eventHub?.publishDurable(
       records
         .filter(
@@ -376,8 +380,6 @@ export function createThreadServerHandlers(
         Math.max(publishedThrough.get(threadId) ?? 0, hostSeq(last)),
       )
     }
-    if (records.some(({ item }) => isSidebarStatusItem(item)))
-      options.notifySidebarChanged?.(threadId)
     for (const record of records) {
       recordTurnInput(publication, record.item)
       if (isInitialUserInput(record)) {
@@ -491,7 +493,11 @@ export function createThreadServerHandlers(
           stored === undefined ? 0 : threadSeq(stored),
         )
       }
+      const activeDisplay = new ActiveTurnDisplay()
+      activeDisplays.set(thread, activeDisplay)
+      const initialTurnId = thread.snapshot().activeTurnId
       const publication = {
+        activeDisplay,
         rolloutId: thread.snapshot().metadata.rolloutId,
         firstUserInputId:
           stored?.rollout.find(isInitialUserInput)?.item.item.id,
@@ -500,6 +506,7 @@ export function createThreadServerHandlers(
       }
       for (const record of stored?.rollout ?? []) {
         if (hostSeq(record) > (publishedThrough.get(thread.id) ?? 0)) break
+        if (initialTurnId !== undefined) activeDisplay.append([record])
         recordTurnInput(publication, record.item)
         if (record.item.type === "turn_completed")
           publication.turns.delete(record.item.turnId)
@@ -550,6 +557,7 @@ export function createThreadServerHandlers(
             event.type === "turn.failed" ||
             event.type === "turn.interrupted"
           ) {
+            publication.activeDisplay.finish(event.input.submissionId)
             if (event.type === "turn.completed") {
               const snapshot = thread.snapshot()
               const agent = snapshot.metadata.metadata?.agent
@@ -914,11 +922,95 @@ export function createThreadServerHandlers(
 
   const unsubscribeThreadInstalled =
     options.manager.subscribeThreadInstalled(ensureEventPump)
+  // A durable completion can precede the actor going idle. Refresh status at
+  // the running transition, when the sidebar can read both facts together.
+  let runningSessionIds = new Set(options.manager.runningSessionIds)
+  const unsubscribeRunning = options.manager.subscribeRunningTurnCount(() => {
+    const running = new Set(options.manager.runningSessionIds)
+    const previous = runningSessionIds
+    runningSessionIds = running
+    for (const sessionId of new Set([...previous, ...running])) {
+      if (previous.has(sessionId) !== running.has(sessionId))
+        options.notifySidebarChanged?.(sessionId)
+    }
+  })
+
+  async function readLiveSession(
+    input: unknown,
+  ): Promise<ApplicationResult<LiveSessionSnapshot>> {
+    try {
+      const { sessionId } = requireReadSessionRequest(input)
+      for (;;) {
+        const live = options.manager.getThread(sessionId)
+        if (live !== undefined) await ensureEventPump(live)
+        const turnId = live?.snapshot().activeTurnId
+        const activeTurn =
+          live === undefined || turnId === undefined
+            ? undefined
+            : activeDisplays.get(live)?.capture(turnId)
+        const published =
+          live === undefined ? undefined : publishedThrough.get(sessionId)
+        const summary =
+          await options.store.readProjectedThreadSummary(sessionId)
+        if (summary === undefined)
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        const watermarkSeq = Math.min(
+          summary.seq + 1,
+          published ?? Number.MAX_SAFE_INTEGER,
+        )
+        const records =
+          activeTurn?.records.filter(
+            (record) => hostSeq(record) <= watermarkSeq,
+          ) ?? []
+        const session = await mapStoredThread(
+          { metadata: summary, rollout: records },
+          activeTurn === undefined ? undefined : live,
+          queueOptions,
+          summary,
+        )
+        const current = options.manager.getThread(sessionId)
+        // A start or completion can race filesystem catch-up. Capture a
+        // replacement snapshot before publishing a watermark for that actor.
+        if (current !== live || current?.snapshot().activeTurnId !== turnId)
+          continue
+        return ok({
+          session: {
+            ...session,
+            seq: watermarkSeq,
+            ...(activeTurn === undefined && session.active
+              ? {
+                  active: false,
+                  status:
+                    summary.latestTurnOutcome === "failed" ? "failed" : "idle",
+                }
+              : {}),
+          },
+          watermarkSeq,
+          ...(activeTurn === undefined
+            ? {}
+            : {
+                activeTurn: {
+                  turnId: activeTurn.turnId,
+                  ...(activeTurn.activityBefore === undefined
+                    ? {}
+                    : { activityBefore: activeTurn.activityBefore }),
+                  events: records
+                    .map((record) => mapRolloutEvent(record, sessionId))
+                    .filter((event) => event.type !== "session.cursor"),
+                },
+              }),
+        })
+      }
+    } catch (error) {
+      return fail(error, reporter, "read-live-session")
+    }
+  }
 
   return {
     async close() {
       closing = true
       unsubscribeThreadInstalled()
+      unsubscribeRunning()
       await queuedItems.close()
       stopPumps?.()
       await Promise.allSettled([...admissionTails.values()])
@@ -1196,7 +1288,8 @@ export function createThreadServerHandlers(
     async readGoal(input) {
       try {
         const { sessionId } = requireDeleteSessionRequest(input)
-        await requireStoredThread(options.store, sessionId)
+        if ((await options.store.readThreadMetadata(sessionId)) === undefined)
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         return ok({ goal: options.goals?.read(sessionId) ?? null })
       } catch (error) {
         return fail(error, reporter, "read-goal")
@@ -1556,24 +1649,22 @@ export function createThreadServerHandlers(
               resubmitted = true
             }
             await options.store.flushThread(request.sessionId)
-            const stored = await requireStoredThread(
-              options.store,
+            const snapshot = await readLiveSession({
+              sessionId: request.sessionId,
+            })
+            if (!snapshot.ok) return snapshot
+            publishedThrough.set(
               request.sessionId,
+              Math.max(
+                publishedThrough.get(request.sessionId) ?? 0,
+                snapshot.value.watermarkSeq,
+              ),
             )
-            const events = stored.rollout
-              .map((record) => mapRolloutEvent(record, request.sessionId))
-              .filter((event) => event.type !== "session.cursor")
-            publishedThrough.set(request.sessionId, threadSeq(stored))
             options.notifySidebarChanged?.(request.sessionId)
             return ok({
-              session: await mapStoredThread(
-                stored,
-                reverted.thread,
-                queueOptions,
-              ),
+              session: snapshot.value.session,
               historyEndSeqExclusive:
                 (reverted.result.historyEndSeqExclusive ?? 1) + 1,
-              events,
             })
           } finally {
             options.goals?.deferContinuation(
@@ -2254,90 +2345,114 @@ export function createThreadServerHandlers(
       }
     },
 
-    async readDisplayWindow(input) {
+    readLiveSession,
+
+    async listCompletedTurns(input) {
       try {
-        const request = requireDisplayWindowRequest(input)
-        const live = options.manager.getThread(request.sessionId)
-        if (live !== undefined) await ensureEventPump(live)
-        const window =
-          request.location === undefined
-            ? await options.store.readDisplayWindow(
-                request.sessionId,
-                request.before,
-                request.transcript &&
-                  (request.before !== undefined ||
-                    live?.snapshot().activeTurnId === undefined),
-              )
-            : await options.store.readDisplayLocation?.(
-                request.sessionId,
-                request.location,
-                {
-                  ...(request.before === undefined
-                    ? {}
-                    : { before: request.before }),
-                  ...(request.after === undefined
-                    ? {}
-                    : { after: request.after }),
-                },
-              )
-        if (window === undefined) {
-          if (request.location !== undefined)
-            throw notFound("This match is no longer in the current history.")
-          throw notFound(`Session ${request.sessionId} was not found.`, {
-            sessionId: request.sessionId,
-          })
-        }
-        const modelContext = window.records.some(
-          (record) => record.item.type === "turn_context",
+        const request = requireRecord(
+          input,
+          "Turn list request must be an object.",
         )
-          ? []
-          : window.lookbehind
-              .filter((record) => record.item.type === "turn_context")
-              .slice(-1)
-        const session = {
-          ...(await mapStoredThread(
-            {
-              metadata: window.metadata,
-              rollout: [...modelContext, ...window.records],
-            },
-            live,
-            queueOptions,
-          )),
-          seq: window.endSeq + 1,
-        }
-        const expiry = sessionCacheExpiry([
-          ...window.lookbehind,
-          ...window.records,
-        ])
-        const replayRecords = replayRecordsForWindow(window)
-        const historyBefore =
-          window.transcriptStart ??
-          window.records[0]?.seq ??
-          window.coverageStartSeq
-        return ok({
-          session:
-            expiry === undefined
-              ? session
-              : { ...session, cacheExpiry: expiry },
-          ...(!window.projectionReady ? { statePending: true } : {}),
-          ...(window.activityTurnIds === undefined
+        const sessionId = requireSessionId(request.sessionId, "sessionId")
+        const { view } = request
+        if (view !== "summary" && view !== "outline")
+          throw invalidInput("view must be summary or outline.")
+        const limit = request.limit ?? (view === "summary" ? 5 : 50)
+        if (
+          typeof limit !== "number" ||
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > 100
+        )
+          throw invalidInput(
+            "Turn list limit must be an integer from 1 to 100.",
+          )
+        const before = requireOptionalSequence(request.before, "before")
+        const after = requireOptionalSequence(request.after, "after")
+        const through = requireOptionalSequence(request.through, "through")
+        if (
+          [before, after, through].some(
+            (seq) =>
+              seq !== undefined && (!Number.isSafeInteger(seq) || seq < 1),
+          )
+        )
+          throw invalidInput(
+            "Turn cursors must be positive completion sequences.",
+          )
+        const aroundTurnId =
+          request.aroundTurnId === undefined
+            ? undefined
+            : requireString(request.aroundTurnId, "aroundTurnId")
+        if (
+          [aroundTurnId, before, after].filter((value) => value !== undefined)
+            .length > 1
+        )
+          throw invalidInput("Specify one of aroundTurnId, before or after.")
+        const rolloutId =
+          request.rolloutId === undefined
+            ? undefined
+            : requireString(request.rolloutId, "rolloutId")
+        if (
+          rolloutId === undefined &&
+          (before !== undefined || after !== undefined || through !== undefined)
+        )
+          throw invalidInput("A Turn cursor must include its rolloutId.")
+        const activeTurnId =
+          through === undefined
+            ? options.manager.getThread(sessionId)?.snapshot().activeTurnId
+            : request.activeTurnId === undefined
+              ? undefined
+              : requireString(request.activeTurnId, "activeTurnId")
+        const activeMatch =
+          view === "summary" &&
+          through === undefined &&
+          aroundTurnId !== undefined &&
+          aroundTurnId === activeTurnId
+            ? await readLiveSession({ sessionId })
+            : undefined
+        if (activeMatch !== undefined && !activeMatch.ok) return activeMatch
+        const activeTurn =
+          activeMatch?.value.activeTurn?.turnId === aroundTurnId
+            ? activeMatch?.value.activeTurn
+            : undefined
+        const cut =
+          activeTurn === undefined ? through : activeMatch?.value.watermarkSeq
+        const page = await options.store.readCompletedTurns?.(sessionId, {
+          limit,
+          view,
+          ...(before === undefined ? {} : { before }),
+          ...(after === undefined ? {} : { after }),
+          ...(cut === undefined ? {} : { through: cut }),
+          ...(activeTurnId === undefined ? {} : { activeTurnId }),
+          ...(aroundTurnId === undefined || activeTurn !== undefined
             ? {}
-            : { activityTurnIds: window.activityTurnIds }),
-          events: replayRecords.map((record) =>
-            mapRolloutEvent(record, request.sessionId),
-          ),
-          // Supplemental state can precede unseen transcript records. Only
-          // the contiguous window defines how far history has been covered.
-          ...(window.hasEarlier && historyBefore !== undefined
-            ? { historyBefore }
-            : {}),
-          ...("historyAfter" in window &&
-          typeof window.historyAfter === "number"
-            ? { historyAfter: window.historyAfter }
-            : {}),
+            : { aroundTurnId }),
+          ...(rolloutId === undefined ? {} : { rolloutId }),
         })
+        if (page === undefined)
+          throw notFound("This session or Turn is no longer available.", {
+            sessionId,
+          })
+        const { turns, ...state } = page
+        return view === "outline"
+          ? ok({
+              ...state,
+              view,
+              turns: turns.map(({ records: _records, ...turn }) => turn),
+            })
+          : ok({
+              ...state,
+              view,
+              ...(activeTurn === undefined ? {} : { activeTurn }),
+              turns: turns.map(({ records, ...turn }) => ({
+                ...turn,
+                events: (records ?? [])
+                  .map((record) => mapRolloutEvent(record, sessionId))
+                  .filter((event) => event.type !== "session.cursor"),
+              })),
+            })
       } catch (error) {
-        return fail(error, reporter, "read-display-window")
+        return fail(error, reporter, "list-completed-turns")
       }
     },
 
@@ -2348,12 +2463,22 @@ export function createThreadServerHandlers(
           "Session activity request must be an object.",
         )
         const sessionId = requireSessionId(request.sessionId, "sessionId")
+        const rolloutId = requireString(request.rolloutId, "rolloutId")
+        const turnId = requireString(request.turnId, "turnId")
+        const before = requireOptionalSequence(request.before, "before")
+        const aroundItemId =
+          request.aroundItemId === undefined
+            ? undefined
+            : requireString(request.aroundItemId, "aroundItemId")
+        if (before !== undefined && aroundItemId !== undefined)
+          throw invalidInput("Specify one of aroundItemId or before.")
         const page = await options.store.readDisplayActivity(
           sessionId,
-          requireString(request.rolloutId, "rolloutId"),
-          requireString(request.turnId, "turnId"),
-          requireOptionalSequence(request.before, "before") ??
-            Number.MAX_SAFE_INTEGER,
+          rolloutId,
+          turnId,
+          aroundItemId === undefined
+            ? (before ?? Number.MAX_SAFE_INTEGER)
+            : { aroundItemId },
         )
         if (page === undefined)
           throw notFound("This session history is no longer available.", {
@@ -2441,31 +2566,16 @@ async function mapStoredThread(
   stored: StoredThread,
   live: AgentThread | undefined,
   options: ThreadServerHandlerOptions,
+  projectedSummary?: ThreadSummary,
 ): Promise<ApiSessionDetail> {
   const rollout = stored.rollout.map((record) => record.item)
   const contexts = rollout.filter(
     (item): item is Extract<RolloutItem, { readonly type: "turn_context" }> =>
       item.type === "turn_context",
   )
-  const inputs = stored.rollout.filter(
-    ({ item }) =>
-      item.type === "response_item" &&
-      item.item.item.role === "user" &&
-      item.item.id.startsWith("input_") &&
-      item.item.item.context === undefined,
-  ).length
-  const turns = rollout.filter((item) => item.type === "turn_started").length
-  const completedItems = rollout.filter(
-    (item): item is Extract<RolloutItem, { readonly type: "item_completed" }> =>
-      item.type === "item_completed",
-  )
-  const items = completedItems.length
-  const tools = completedItems.filter(
-    ({ item }) =>
-      item.type !== "agent_message" &&
-      item.type !== "reasoning" &&
-      item.type !== "context_compaction",
-  ).length
+  const counts =
+    projectedSummary?.displayCounts ??
+    advanceThreadStatus({}, stored.rollout).displayCounts
   const usage = rollout.reduce<TokenUsage | undefined>((total, item) => {
     if (item.type !== "turn_completed" || item.usage === undefined) return total
     return addUsage(total, item.usage)
@@ -2474,9 +2584,9 @@ async function mapStoredThread(
   const pendingPermissions =
     options.listPendingPermissions?.(stored.metadata.id) ?? []
   const currentContext = contexts.at(-1)
-  const cachedSummary = await options.store.readThreadSummary(
-    stored.metadata.id,
-  )
+  const cachedSummary =
+    projectedSummary ??
+    (await options.store.readThreadSummary(stored.metadata.id))
   if (cachedSummary === undefined)
     throw notFound(`Session ${stored.metadata.id} was not found.`)
   const summary: ThreadSummary = {
@@ -2514,12 +2624,12 @@ async function mapStoredThread(
       ({ sessionId: _, ...entry }) => entry,
     ),
     counts: {
-      inputs,
+      inputs: counts?.inputs ?? 0,
       pendingInputs: pendingQueue.length,
-      turns,
-      items,
+      turns: counts?.turns ?? 0,
+      items: counts?.items ?? 0,
       permissions: pendingPermissions.length,
-      tools,
+      tools: counts?.tools ?? 0,
     },
   }
 }
@@ -3061,54 +3171,6 @@ function requireRequestId(value: unknown): string {
     "requestId must be 1 to 128 letters, numbers, dots, underscores, colons, or hyphens.",
     { field: "requestId" },
   )
-}
-
-function replayRecordsForWindow(
-  window: DisplayWindowRead,
-): readonly StoredRolloutItem[] {
-  const hasTokens = window.records.some(
-    (record) => record.item.type === "token_count",
-  )
-  const supplemental = window.lookbehind.filter(
-    (record) =>
-      record.item.type === "turn_started" ||
-      (!hasTokens && record.item.type === "token_count"),
-  )
-  return [
-    ...supplemental,
-    ...window.records.filter((record) => record.item.type !== "session_meta"),
-  ]
-}
-
-function requireDisplayWindowRequest(input: unknown) {
-  const record = requireRecord(
-    input,
-    "Session display request must be an object.",
-  )
-  const before = requireOptionalSequence(record.before, "before")
-  const after = requireOptionalSequence(record.after, "after")
-  const location =
-    record.location === undefined
-      ? undefined
-      : requireRecord(record.location, "History location must be an object.")
-  if (after !== undefined && (location === undefined || before !== undefined))
-    throw invalidInput(
-      "A history location can page in one direction at a time.",
-    )
-  return {
-    sessionId: requireSessionId(record.sessionId, "sessionId"),
-    before,
-    after,
-    location:
-      location === undefined
-        ? undefined
-        : {
-            rolloutId: requireString(location.rolloutId, "location.rolloutId"),
-            turnId: requireString(location.turnId, "location.turnId"),
-            itemId: requireString(location.itemId, "location.itemId"),
-          },
-    transcript: record.transcript === true,
-  }
 }
 
 function requireReadSessionEventsRequest(input: unknown) {

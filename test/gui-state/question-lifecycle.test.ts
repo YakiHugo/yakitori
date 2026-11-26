@@ -98,7 +98,7 @@ async function open() {
   const stream = fakeRef.current.streams.at(-1)
   if (stream === undefined) throw new Error("Missing stream")
   stream.emitSnapshot({ session })
-  stream.emitReplayComplete()
+  stream.emitReady()
   return stream
 }
 
@@ -205,10 +205,14 @@ it.each([
   ])
   stream.disconnect(new Error("Disconnected"))
   const { activeTurnId: _, ...idle } = session
-  stream.emitSnapshot({ session: { ...idle, active: false, seq: 3 } })
-  stream.emitEvent(question(2, "historical_question"))
-  if (hasTerminalEvent) stream.emitEvent(completed(3, "completed"))
-  stream.emitReplayComplete()
+  stream.emitSnapshot({
+    session: { ...idle, active: false, seq: 3 },
+    events: [
+      question(2, "historical_question"),
+      ...(hasTerminalEvent ? [completed(3, "completed")] : []),
+    ],
+  })
+  stream.emitReady()
   expect(useAppStore.getState().execution.pendingQuestionIds).toEqual([])
   expect(useAppStore.getState().promptDraft).toBeUndefined()
   expect(useAppStore.getState().promptExcerpts).toMatchObject([

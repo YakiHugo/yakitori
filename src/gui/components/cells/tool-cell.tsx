@@ -65,12 +65,14 @@ export function ToolCell({
     presentation.detail?.kind === "collaboration"
       ? presentation.detail
       : undefined
-  const { threadId, interactiveQuestions, capabilities } =
+  const { threadId, interactiveQuestions, capabilities, focusItemId } =
     useConversationScope()
   const [open, setOpen] = useThreadScopeState(
     threadId,
     `tool:${entry.toolCallId}`,
-    entry.state === "failed" || entry.state === "interrupted",
+    entry.state === "failed" ||
+      entry.state === "interrupted" ||
+      entry.execution.itemId === focusItemId,
   )
   const active = entry.state === "requested"
   const contentId = useId()

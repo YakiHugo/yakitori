@@ -1,3 +1,4 @@
+import { executionEntries } from "../../execution-view.ts"
 import { useTranslation } from "../../i18n/use-translation.ts"
 import {
   Check,
@@ -36,7 +37,7 @@ export function UserQuestionsCell({
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const apiBase = useAppStore((state) => state.apiBase)
   const answered = useAppStore((state) =>
-    state.execution.entries.some(
+    executionEntries(state.execution).some(
       (entry) => entry.kind === "user_input" && entry.questionId === toolCallId,
     ),
   )

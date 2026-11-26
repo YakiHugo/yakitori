@@ -8,16 +8,13 @@ import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createEventEnvelope } from "../../src/kernel/events.ts"
 import type {
+  LiveSessionSnapshot,
   SessionActivityResponse,
-  SessionHistoryResponse,
-  SessionSubscribeResponse,
 } from "../../src/protocol/rpc-methods.ts"
+import type { SessionTurnsResponse } from "../../src/protocol/session-turns.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
-import { mapRolloutEvent } from "../../src/server/session-event-projection.ts"
 import {
   createTestProcessor,
-  deferred,
-  flush,
   initializeConnection,
   openTestConnection,
 } from "./rpc/testkit.ts"
@@ -31,7 +28,9 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-async function setup(options: { cold?: boolean; activity?: boolean } = {}) {
+async function setup(
+  options: { cold?: boolean; activity?: boolean; steering?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-session-loading-"))
   let store = new JsonlThreadStore({ root: join(root, "store") })
   await store.createThread({
@@ -83,6 +82,26 @@ async function setup(options: { cold?: boolean; activity?: boolean } = {}) {
       settings: { provider: "faux", model: "scripted" },
     },
   ])
+  if (options.steering) {
+    const start = items.findIndex(
+      (item) =>
+        item.type === "turn_started" && item.turnId === "request_latest",
+    )
+    items.splice(start + 1, 0, {
+      type: "response_item",
+      item: {
+        id: "message_steered",
+        turnId: "request_steered",
+        createdAt,
+        item: {
+          role: "user",
+          content: [
+            { type: "text", text: "Steering belongs to the running turn" },
+          ],
+        },
+      },
+    })
+  }
   if (options.activity) {
     const turnId = "request_latest"
     const answerPiece = (id: string, text: string): RolloutItem => ({
@@ -154,7 +173,7 @@ async function setup(options: { cold?: boolean; activity?: boolean } = {}) {
     await store.shutdownThread(sessionId)
     await cp(join(root, "store"), join(root, "cold-store"), {
       recursive: true,
-      filter: (path) => !basename(path).startsWith("thread-search.sqlite"),
+      filter: (path) => !basename(path).startsWith("thread-history.sqlite"),
     })
     store = new JsonlThreadStore({ root: join(root, "cold-store") })
   } else {
@@ -190,87 +209,269 @@ async function setup(options: { cold?: boolean; activity?: boolean } = {}) {
 }
 
 describe("bounded session loading", () => {
-  it("keeps recent prompts and answers together while completed activity pages separately", async () => {
-    const { connection } = await setup({ activity: true })
-    const response = await connection.sendRequest("session/subscribe", {
+  it("starts a live subscription at the captured watermark without completed history", async () => {
+    const { connection, eventHub, handlers } = await setup({ cold: true })
+    const read = handlers.readLiveSession.bind(handlers)
+    vi.spyOn(handlers, "readLiveSession").mockImplementationOnce(
+      async (input) => {
+        const snapshot = await read(input)
+        eventHub.publishDurable([
+          createEventEnvelope({
+            sessionId,
+            seq: 16,
+            event: {
+              type: "turn.completed",
+              data: {
+                turnId: "request_latest",
+                outcome: { status: "completed" },
+              },
+            },
+          }),
+          createEventEnvelope({
+            sessionId,
+            seq: 18,
+            event: {
+              type: "turn.started",
+              data: { turnId: "request_after_snapshot" },
+            },
+          }),
+        ])
+        return snapshot
+      },
+    )
+    const replay = vi.spyOn(handlers, "readSessionEvents")
+    const frame = await connection.sendRequest("session/subscribe", {
       sessionId,
-      after: 0,
-      recent: "transcript",
     })
-    if (!("result" in response))
-      throw new Error("Expected subscription result.")
-    const result = response.result as SessionSubscribeResponse
-    const { session, historyBefore } = result
-    expect(result).toMatchObject({
-      activityTurnIds: ["request_latest"],
+    if (!("result" in frame)) throw new Error("Expected live snapshot.")
+    const snapshot = frame.result as LiveSessionSnapshot
+    expect(snapshot).toMatchObject({ session: { seq: 17 }, watermarkSeq: 17 })
+    expect(snapshot).not.toHaveProperty("activeTurn")
+    expect(snapshot).not.toHaveProperty("events")
+    await connection.waitForFrame(
+      (message) => "method" in message && message.method === "session/event",
+    )
+    expect(
+      connection.notifications("session/event").map(({ params }) => params),
+    ).toMatchObject([
+      { seq: 18, event: { data: { turnId: "request_after_snapshot" } } },
+    ])
+    expect(replay).not.toHaveBeenCalled()
+  })
+
+  it("opens at one cut and keeps a steering request in its owning Turn", async () => {
+    const { connection, eventHub, handlers, store } = await setup({
+      cold: true,
+      steering: true,
     })
-    expect(
-      result.events?.flatMap((event) =>
-        event.type === "input.admitted" ? [event.data.inputId] : [],
-      ),
-    ).toEqual([
-      "input_third",
-      "input_fourth",
-      "input_old",
-      "input_middle",
-      "input_latest",
-    ])
-    expect(
-      result.events?.flatMap((event) =>
-        event.type === "item.completed" ? [event.data.item.itemId] : [],
-      ),
-    ).toEqual([
-      "answer_third",
-      "answer_fourth",
-      "answer_old",
-      "answer_middle",
-      "answer_begin",
-      "answer_latest",
-    ])
-    expect(result.events).toContainEqual(
+    const load = handlers.listCompletedTurns.bind(handlers)
+    vi.spyOn(handlers, "listCompletedTurns").mockImplementationOnce(
+      async (input) => {
+        const result = await load(input)
+        eventHub.publishDurable([
+          createEventEnvelope({
+            sessionId,
+            seq: 19,
+            event: {
+              type: "turn.started",
+              data: { turnId: "request_after_history" },
+            },
+          }),
+        ])
+        return result
+      },
+    )
+    const open = await connection.sendRequest("session/open", { sessionId })
+    expect(open).toMatchObject({
+      result: {
+        watermarkSeq: 18,
+        history: { rolloutId: sessionId, seq: 18, view: "summary" },
+      },
+    })
+    if (!("result" in open)) throw new Error("Expected initial Turn history")
+    const snapshot =
+      open.result as import("../../src/protocol/rpc-methods.ts").OpenSessionSnapshot
+    expect(snapshot.history.turns[0]?.events).toContainEqual(
       expect.objectContaining({
-        type: "turn.completed",
+        type: "input.admitted",
         data: expect.objectContaining({
-          turnId: "request_latest",
-          outcome: {
-            status: "completed",
-            answerItemIds: ["answer_begin", "answer_latest"],
-          },
+          requestId: "request_steered",
+          steered: true,
         }),
       }),
     )
-    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThan(16 * 1024)
-    if (historyBefore === undefined)
-      throw new Error("Expected older transcript.")
-
-    const older = await connection.sendRequest("session/history", {
-      sessionId,
-      before: historyBefore,
-      transcript: true,
-    })
-    if (!("result" in older)) throw new Error("Expected history result.")
-    const olderPage = older.result as SessionHistoryResponse
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/event",
+    )
     expect(
-      olderPage.events.flatMap((event) =>
-        event.type === "input.admitted" ? [event.data.inputId] : [],
-      ),
-    ).toEqual(["input_first", "input_second"])
-    expect(olderPage.historyBefore).toBeUndefined()
+      connection.notifications("session/event").map(({ params }) => params),
+    ).toMatchObject([{ seq: 19, event: { type: "turn.started" } }])
+    const status = await connection.sendRequest("session/input/status", {
+      sessionId,
+      requestIds: ["request_steered"],
+    })
+    expect(status).toHaveProperty(
+      "result.events.0.data.requestId",
+      "request_steered",
+    )
+    expect(
+      await store.searchThreadOccurrences({
+        threadId: sessionId,
+        searchTerm: "Steering belongs",
+        limit: 1,
+      }),
+    ).toMatchObject({
+      occurrences: [{ turnId: "request_latest", itemId: "message_steered" }],
+    })
+  })
 
+  it("lists finished Turns from a cold projection with a rollout-scoped cursor", async () => {
+    const { connection } = await setup({ cold: true, activity: true })
+    const first = await connection.sendRequest("session/turns/list", {
+      sessionId,
+      view: "summary",
+      limit: 2,
+    })
+    if (!("result" in first)) throw new Error("Expected Turn list.")
+    const summary = first.result as SessionTurnsResponse
+    if (summary.view !== "summary") throw new Error("Expected Turn summaries.")
+    expect(summary).toMatchObject({
+      rolloutId: sessionId,
+      contextTokens: { activeContextTokens: 73 },
+      nextBefore: 30,
+      latestCompletionSeq: 62,
+      turns: [
+        {
+          turnId: "request_latest",
+          inputId: "input_latest",
+          activityCount: 24,
+        },
+        { turnId: "request_middle", inputId: "input_middle", activityCount: 0 },
+      ],
+    })
+    const latest = summary.turns[0]
+    expect(latest?.events.map(({ type }) => type)).toEqual([
+      "input.admitted",
+      "turn.started",
+      "item.completed",
+      "item.completed",
+      "turn.completed",
+    ])
+    expect(latest?.events.at(-1)).toMatchObject({
+      data: { outcome: { answerItemIds: ["answer_begin", "answer_latest"] } },
+    })
+    const beforeNewest = await connection.sendRequest("session/turns/list", {
+      sessionId,
+      rolloutId: summary.rolloutId,
+      view: "summary",
+      after: 25,
+      through: 30,
+      limit: 1,
+    })
+    expect(beforeNewest).toMatchObject({
+      result: {
+        seq: 30,
+        latestCompletionSeq: 30,
+        turns: [{ turnId: "request_middle" }],
+        nextBefore: 30,
+      },
+    })
+    expect(beforeNewest).not.toHaveProperty("result.nextAfter")
+    expect(beforeNewest).not.toHaveProperty("result.contextTokens")
+    const outline = await connection.sendRequest("session/turns/list", {
+      sessionId,
+      rolloutId: summary.rolloutId,
+      view: "outline",
+      before: summary.nextBefore,
+      limit: 2,
+    })
+    expect(outline).toMatchObject({
+      result: {
+        view: "outline",
+        turns: [{ turnId: "request_old" }, { turnId: "request_fourth" }],
+      },
+    })
+    if (!("result" in outline)) throw new Error("Expected Turn outline.")
+    expect(
+      (outline.result as SessionTurnsResponse).turns[0],
+    ).not.toHaveProperty("events")
+    await expect(
+      connection.sendRequest("session/turns/list", {
+        sessionId,
+        rolloutId: summary.rolloutId,
+        view: "outline",
+        after: 25,
+        limit: 1,
+      }),
+    ).resolves.toMatchObject({
+      result: { turns: [{ turnId: "request_middle" }], nextAfter: 30 },
+    })
+    await expect(
+      connection.sendRequest("session/turns/list", {
+        sessionId,
+        view: "outline",
+        aroundTurnId: "request_middle",
+        limit: 1,
+      }),
+    ).resolves.toMatchObject({
+      result: { turns: [{ turnId: "request_middle" }] },
+    })
+    await expect(
+      connection.sendRequest("session/turns/list", {
+        sessionId,
+        rolloutId: "previous_rollout",
+        view: "outline",
+        before: summary.nextBefore,
+      }),
+    ).resolves.toHaveProperty("error")
+    await expect(
+      connection.sendRequest("session/turns/list", {
+        sessionId,
+        view: "outline",
+        before: 30,
+      }),
+    ).resolves.toMatchObject({ error: { data: { code: "invalid_input" } } })
+  })
+
+  it("resolves a specific tool result by rollout without reading unrelated history", async () => {
+    const { connection } = await setup({ activity: true })
+    const located = await connection.sendRequest("session/turn/activity", {
+      sessionId,
+      rolloutId: sessionId,
+      turnId: "request_latest",
+      aroundItemId: "tool_4",
+    })
+    expect(located).toMatchObject({
+      result: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            type: "item.completed",
+            data: expect.objectContaining({
+              item: expect.objectContaining({ itemId: "tool_4" }),
+            }),
+          }),
+        ]),
+      },
+    })
+    expect(located).toHaveProperty("result.events.length", 1)
+  })
+
+  it("pages tool output only on request", async () => {
+    const { connection } = await setup({ activity: true })
     const params = {
       sessionId,
-      rolloutId: session.rolloutId,
+      rolloutId: sessionId,
       turnId: "request_latest",
     }
     const activity = await connection.sendRequest(
-      "session/activity/read",
+      "session/turn/activity",
       params,
     )
     if (!("result" in activity)) throw new Error("Expected activity result.")
     const activityPage = activity.result as SessionActivityResponse
     const nextBefore = activityPage.nextBefore
     if (nextBefore === undefined) throw new Error("Expected older activity.")
-    const earlier = await connection.sendRequest("session/activity/read", {
+    const earlier = await connection.sendRequest("session/turn/activity", {
       ...params,
       before: nextBefore,
     })
@@ -284,7 +485,7 @@ describe("bounded session loading", () => {
       ),
     ).toEqual(Array.from({ length: 24 }, (_, index) => `tool_${index}`))
     expect(
-      await connection.sendRequest("session/activity/read", {
+      await connection.sendRequest("session/turn/activity", {
         ...params,
         rolloutId: "different_rollout",
       }),
@@ -299,109 +500,6 @@ describe("bounded session loading", () => {
     expect(
       await connection.sendRequest("session/skills", { sessionId }),
     ).toMatchObject({ result: { skills: [] } })
-  })
-
-  it("embeds the latest display window without replaying its events as notifications", async () => {
-    const { connection } = await setup()
-    const response = await connection.sendRequest("session/subscribe", {
-      sessionId,
-      after: 0,
-      recent: true,
-    })
-    expect(response).toMatchObject({
-      result: {
-        session: { id: sessionId, seq: 16 },
-        historyBefore: 11,
-        events: [
-          {
-            seq: 12,
-            type: "input.admitted",
-            data: { inputId: "input_latest" },
-          },
-          { seq: 13, type: "turn.started" },
-          { seq: 14, type: "item.completed" },
-          { seq: 15, type: "turn.completed" },
-        ],
-      },
-    })
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-    expect(connection.notifications("session/event")).toEqual([])
-    expect(
-      connection
-        .notifications("session/replayComplete")
-        .map((frame) => frame.params),
-    ).toEqual([{ sessionId, seq: 16 }])
-  })
-
-  it("catches up a cached view across prompts outside the latest display window", async () => {
-    const { connection } = await setup()
-    const response = await connection.sendRequest("session/subscribe", {
-      sessionId,
-      after: 5,
-      recent: true,
-    })
-    expect(response).toMatchObject({
-      result: { session: { id: sessionId, seq: 16 } },
-    })
-    if (!("result" in response))
-      throw new Error("Expected subscription result.")
-    expect(response.result).not.toHaveProperty("historyBefore")
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/replayComplete",
-    )
-    expect(
-      connection.notifications("session/event").map((frame) => frame.params),
-    ).toEqual([
-      {
-        sessionId,
-        seq: 7,
-        event: expect.objectContaining({
-          type: "input.admitted",
-          data: expect.objectContaining({ inputId: "input_middle" }),
-        }),
-      },
-      {
-        sessionId,
-        seq: 8,
-        event: expect.objectContaining({ type: "turn.started" }),
-      },
-      {
-        sessionId,
-        seq: 9,
-        event: expect.objectContaining({ type: "item.completed" }),
-      },
-      {
-        sessionId,
-        seq: 10,
-        event: expect.objectContaining({ type: "turn.completed" }),
-      },
-      {
-        sessionId,
-        seq: 12,
-        event: expect.objectContaining({
-          type: "input.admitted",
-          data: expect.objectContaining({ inputId: "input_latest" }),
-        }),
-      },
-      {
-        sessionId,
-        seq: 13,
-        event: expect.objectContaining({ type: "turn.started" }),
-      },
-      {
-        sessionId,
-        seq: 14,
-        event: expect.objectContaining({ type: "item.completed" }),
-      },
-      {
-        sessionId,
-        seq: 15,
-        event: expect.objectContaining({ type: "turn.completed" }),
-      },
-    ])
-    expect(connection.notifications("session/subscriptionError")).toEqual([])
   })
 
   it("pages display events without full-history reads and advances across hidden records", async () => {
@@ -477,229 +575,25 @@ describe("bounded session loading", () => {
         ],
       },
     })
-    const window = await connection.sendRequest("session/subscribe", {
+    const live = await connection.sendRequest("session/subscribe", {
       sessionId,
-      after: 0,
-      recent: true,
     })
-    expect(window).toMatchObject({
+    expect(live).toMatchObject({ result: { watermarkSeq: 16 } })
+    expect(live).not.toHaveProperty("result.activeTurn")
+    expect(live).not.toHaveProperty("result.events")
+    const page = await connection.sendRequest("session/turns/list", {
+      sessionId,
+      view: "summary",
+      rolloutId: sessionId,
+      limit: 1,
+      through: 16,
+    })
+    expect(page).toMatchObject({
       result: {
-        historyBefore: 11,
-        events: [
-          { seq: 12, type: "input.admitted" },
-          { seq: 13, type: "turn.started" },
-          { seq: 14, type: "item.completed" },
-          { seq: 15, type: "turn.completed" },
-        ],
+        seq: 16,
+        nextBefore: 15,
+        turns: [{ turnId: "request_latest" }],
       },
     })
-  })
-
-  it("delivers a commit made after the snapshot exactly once after the replay watermark", async () => {
-    const { store, handlers, eventHub, connection } = await setup()
-    const captured = deferred<void>()
-    const release = deferred<void>()
-    const readWindow = handlers.readDisplayWindow.bind(handlers)
-    vi.spyOn(handlers, "readDisplayWindow").mockImplementation(
-      async (input) => {
-        const result = await readWindow(input)
-        captured.resolve()
-        await release.promise
-        return result
-      },
-    )
-    const subscribing = connection.sendRequest("session/subscribe", {
-      sessionId,
-      after: 0,
-      recent: "transcript",
-    })
-    await captured.promise
-    const appended = await store.appendItems(sessionId, [
-      {
-        type: "turn_started",
-        turnId: "request_live",
-        inputItemId: "input_live",
-      },
-    ])
-    await store.flushThread(sessionId)
-    eventHub.publishDurable(
-      appended.records.map((record) => mapRolloutEvent(record, sessionId)),
-    )
-    release.resolve()
-    const response = await subscribing
-    expect(response).toMatchObject({ result: { session: { seq: 16 } } })
-    await connection.waitForFrame(
-      (frame) =>
-        "method" in frame &&
-        frame.method === "session/event" &&
-        (frame.params as { seq: number }).seq === 17,
-    )
-    await flush()
-    const notifications = connection.frames.filter((frame) => "method" in frame)
-    expect(notifications).toEqual([
-      {
-        method: "session/replayComplete",
-        params: { sessionId, seq: 16 },
-      },
-      {
-        method: "session/event",
-        params: {
-          sessionId,
-          seq: 17,
-          event: expect.objectContaining({
-            seq: 17,
-            type: "turn.started",
-            data: { turnId: "request_live", inputId: "input_live" },
-          }),
-        },
-      },
-    ])
-  })
-
-  it("paints a missing-index window and enables live delivery before supplementing authoritative state", async () => {
-    const { handlers, eventHub, connection } = await setup({ cold: true })
-    const entered = deferred<void>()
-    const release = deferred<void>()
-    const readStatus = handlers.readInputStatus.bind(handlers)
-    const barrierRead = vi
-      .spyOn(handlers, "readInputStatus")
-      .mockImplementation(async (input) => {
-        entered.resolve()
-        await release.promise
-        return readStatus(input)
-      })
-    cleanups.push(async () => release.resolve())
-    const response = await connection.sendRequest("session/subscribe", {
-      sessionId,
-      after: 0,
-      recent: true,
-    })
-    expect(response).toMatchObject({
-      result: {
-        statePending: true,
-        session: { id: sessionId, seq: 17 },
-        historyBefore: 11,
-        events: [
-          { seq: 12, type: "input.admitted" },
-          { seq: 13, type: "turn.started" },
-          { seq: 14, type: "item.completed" },
-          { seq: 15, type: "turn.completed" },
-          { seq: 17, type: "context.tokens" },
-        ],
-      },
-    })
-    await entered.promise
-    expect(barrierRead).toHaveBeenCalledExactlyOnceWith({
-      sessionId,
-      requestIds: [],
-    })
-    expect(
-      connection
-        .notifications("session/replayComplete")
-        .map((frame) => frame.params),
-    ).toEqual([{ sessionId, seq: 17 }])
-    expect(connection.notifications("session/snapshot")).toEqual([])
-    eventHub.publishDurable([
-      createEventEnvelope({
-        sessionId,
-        seq: 18,
-        event: { type: "turn.started", data: { turnId: "request_live" } },
-      }),
-    ])
-    await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/event",
-    )
-    expect(connection.notifications("session/snapshot")).toEqual([])
-    release.resolve()
-    const supplemented = await connection.waitForFrame(
-      (frame) => "method" in frame && frame.method === "session/snapshot",
-    )
-    expect(supplemented).toEqual({
-      method: "session/snapshot",
-      params: {
-        sessionId,
-        snapshot: {
-          session: expect.objectContaining({ id: sessionId, seq: 17 }),
-          events: [
-            expect.objectContaining({
-              type: "context.tokens",
-              seq: 17,
-              data: { turnId: "request_latest", activeContextTokens: 73 },
-            }),
-          ],
-        },
-      },
-    })
-    expect(
-      connection.frames
-        .filter((frame) => "method" in frame)
-        .map((frame) => frame.method),
-    ).toEqual(["session/replayComplete", "session/event", "session/snapshot"])
-  })
-
-  it.each([
-    "unsubscribe",
-    "reset",
-    "replace",
-  ] as const)("suppresses the pending cold-state supplement after %s", async (action) => {
-    const { handlers, eventHub, connection } = await setup({ cold: true })
-    const entered = deferred<void>()
-    const release = deferred<void>()
-    const completed = deferred<void>()
-    const readStatus = handlers.readInputStatus.bind(handlers)
-    vi.spyOn(handlers, "readInputStatus").mockImplementation(async (input) => {
-      entered.resolve()
-      await release.promise
-      try {
-        return await readStatus(input)
-      } finally {
-        completed.resolve()
-      }
-    })
-    cleanups.push(async () => release.resolve())
-    const initial = await connection.sendRequest("session/subscribe", {
-      sessionId,
-      after: 0,
-      recent: true,
-    })
-    expect(initial).toMatchObject({ result: { statePending: true } })
-    await entered.promise
-    if (action === "unsubscribe") {
-      expect(
-        await connection.sendRequest("session/unsubscribe", { sessionId }),
-      ).toMatchObject({ result: {} })
-    } else if (action === "reset") {
-      eventHub.resetSession(sessionId)
-    } else {
-      // The indexed replacement is authoritative while the older independent
-      // state read remains blocked.
-      await readStatus({ sessionId, requestIds: [] })
-      const replacement = await connection.sendRequest("session/subscribe", {
-        sessionId,
-        after: 0,
-        recent: true,
-      })
-      expect(replacement).toMatchObject({
-        result: { session: { id: sessionId, seq: 17 } },
-      })
-      if (!("result" in replacement))
-        throw new Error("Expected replacement subscription.")
-      expect(replacement.result).not.toHaveProperty("statePending")
-    }
-    release.resolve()
-    await completed.promise
-    await flush()
-    expect(connection.notifications("session/snapshot")).toEqual([])
-    eventHub.publishDurable([
-      createEventEnvelope({
-        sessionId,
-        seq: 18,
-        event: { type: "turn.started", data: { turnId: "request_live" } },
-      }),
-    ])
-    await flush()
-    expect(connection.notifications("session/event")).toHaveLength(
-      action === "replace" ? 1 : 0,
-    )
   })
 })

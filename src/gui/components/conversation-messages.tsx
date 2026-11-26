@@ -209,6 +209,7 @@ export function ConversationMessages({
           entry.state,
         )
       } else if (
+        view.finalAnswerItemIds?.[entry.turnId] === undefined &&
         entry.kind !== "permission" &&
         entry.kind !== "compaction" &&
         entry.kind !== "image_output"
@@ -230,12 +231,13 @@ export function ConversationMessages({
       )
         continue
       const itemIds =
-        timing.outcome?.status === "completed" &&
+        view.finalAnswerItemIds?.[turnId] ??
+        (timing.outcome?.status === "completed" &&
         timing.outcome.answerItemIds !== undefined
           ? timing.outcome.answerItemIds
           : turn.last?.kind === "assistant"
             ? [turn.last.source?.itemId ?? turn.last.itemId]
-            : []
+            : [])
       if (itemIds.some((id) => !assistants.has(id))) continue
       const pieces = itemIds
         .flatMap((id) => answerTextParts(assistants.get(id) ?? []))
@@ -251,7 +253,12 @@ export function ConversationMessages({
     }
     previousAnswers.current = answers
     return answers
-  }, [view.entries, view.turnTimings, view.activeTurnId])
+  }, [
+    view.entries,
+    view.turnTimings,
+    view.activeTurnId,
+    view.finalAnswerItemIds,
+  ])
   const queued = new Set(view.queuedInputIds)
   const messages = (
     <>
@@ -408,14 +415,21 @@ const TurnBlock = memo(
     retry: ActiveModelRetry | undefined
   }>) {
     const { t } = useTranslation()
-    const { threadId, sessionId, apiBase, loadTurnActivity } =
+    const { threadId, sessionId, apiBase, loadTurnActivity, focusItemId } =
       useConversationScope()
+    const focused =
+      focusItemId !== undefined &&
+      entries.some((entry) =>
+        entry.kind === "tool"
+          ? entry.execution.itemId === focusItemId
+          : "itemId" in entry && entry.itemId === focusItemId,
+      )
     const [liveActivityCollapsed, setLiveActivityCollapsed] =
       useThreadScopeState(threadId, `turn:${blockKey}:live-collapsed`, false)
     const [activityExpanded, setActivityExpanded] = useThreadScopeState(
       threadId,
       `turn:${blockKey}:activity-expanded`,
-      false,
+      focused,
     )
     const [sourceNavigation, setSourceNavigation] =
       useState<ContextSourceNavigation>()

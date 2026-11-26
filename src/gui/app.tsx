@@ -1,3 +1,4 @@
+import { executionEntries } from "./execution-view.ts"
 import { useTranslation } from "./i18n/use-translation.ts"
 import { GitFork, LoaderCircle, Square } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
@@ -44,7 +45,7 @@ export function App() {
   const route = useComposerRoute(externalSession === undefined && !archived)
   const emptySession = useAppStore((state) => {
     if (
-      state.execution.entries.length > 0 ||
+      executionEntries(state.execution).length > 0 ||
       state.execution.activeTurnId !== undefined
     )
       return false

@@ -1,3 +1,4 @@
+import { executionEntries } from "../execution-view.ts"
 import { useTranslation } from "../i18n/use-translation.ts"
 import { Check, LoaderCircle, Monitor, RefreshCw, Unplug } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
@@ -26,8 +27,8 @@ export function ComputerPanel({
   const [error, setError] = useState<string>()
   const [preview, setPreview] = useState(false)
   const screenshot = useAppStore((state) => {
-    for (let index = state.execution.entries.length - 1; index >= 0; index--) {
-      const entry = state.execution.entries[index]
+    for (let index = executionEntries(state.execution).length - 1; index >= 0; index--) {
+      const entry = executionEntries(state.execution)[index]
       if (
         entry &&
         entry.kind === "tool" &&

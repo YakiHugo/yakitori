@@ -19,9 +19,6 @@ import type {
   SessionEventNotification,
   SessionPermissionRequestParams,
   SessionPermissionRequestResult,
-  SessionReplayCompleteNotification,
-  SessionSnapshotNotification,
-  SessionSubscribeResponse,
   SessionSubscriptionErrorNotification,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
@@ -36,8 +33,6 @@ import {
   sessionPermissionRequestedMethod,
   sessionPermissionRequestMethod,
   sessionQueueChangedMethod,
-  sessionReplayCompleteMethod,
-  sessionSnapshotMethod,
   sessionSubscriptionErrorMethod,
   sessionsActivityMethod,
   sessionTransientMethod,
@@ -46,12 +41,7 @@ import {
   websocketRpcPath,
 } from "../../protocol/rpc-wire.ts"
 import type { SideChatSnapshot } from "../../protocol/side-chat.ts"
-
-// The GUI's only server channel: JSON-RPC over one WebSocket at /rpc,
-// reproducing the old REST+SSE behavior — snapshot via the session/subscribe
-// response, durable/transient deliveries as notifications, replay-complete as
-// a notification, and permission answers as responses to the server's
-// session/permission/request.
+import type { SessionStreamSnapshot } from "./session-turn-history.ts"
 
 export class ApiRequestError extends Error {
   readonly code: ApiErrorCode | undefined
@@ -73,10 +63,10 @@ export function rpcUrl(apiBase: string): string {
 }
 
 export type SessionStreamHandlers = {
-  readonly onSnapshot: (response: SessionSubscribeResponse) => void
+  readonly onSnapshot: (response: SessionStreamSnapshot) => void
   readonly onEvent: (event: AppSessionEventEnvelope) => void
   readonly onTransient: (event: LiveSessionEvent) => void
-  readonly onReplayComplete: () => void
+  readonly onReady: () => void
   readonly onHistoryReset?: () => void
   // The stream stays registered and will be re-subscribed after reconnect.
   readonly onDisconnected?: (error: unknown) => void
@@ -117,7 +107,6 @@ export type AppRpcClient = {
     sessionId: string,
     after: number,
     handlers: SessionStreamHandlers,
-    options?: Readonly<{ recent?: boolean | "transcript" }>,
   ): SessionStream
   // Registers a listener for server-broadcast project/changed notifications;
   // returns the unsubscribe function.
@@ -157,7 +146,12 @@ export type AppRpcClient = {
 type StreamRecord = {
   readonly handlers: SessionStreamHandlers
   readonly sessionId: string
-  readonly recent: boolean | "transcript"
+  pending:
+    | Array<
+        | { kind: "durable"; event: AppSessionEventEnvelope }
+        | { kind: "transient"; event: LiveSessionEvent }
+      >
+    | undefined
   lastSeq: number
   subscribeRevision: number
   snapshotRevision: number
@@ -504,7 +498,9 @@ export function createAppRpcClient(options: {
       )
         return
       record.lastSeq = Math.max(record.lastSeq, params.seq)
-      record.handlers.onEvent(params.event)
+      if (record.pending !== undefined)
+        record.pending.push({ kind: "durable", event: params.event })
+      else record.handlers.onEvent(params.event)
       return
     }
     if (message.method === sessionTransientMethod) {
@@ -516,34 +512,6 @@ export function createAppRpcClient(options: {
       // as the same permission.requested transient the SSE stream produced.
       const params = message.params as SessionPermissionRequestParams
       dispatchTransient({ type: "permission.requested", ...params })
-      return
-    }
-    if (message.method === sessionReplayCompleteMethod) {
-      const params = message.params as SessionReplayCompleteNotification
-      const record = streams.get(params.sessionId)
-      if (
-        record === undefined ||
-        record.closed ||
-        record.snapshotRevision !== record.subscribeRevision
-      )
-        return
-      record.lastSeq = Math.max(record.lastSeq, params.seq)
-      record.handlers.onReplayComplete()
-      return
-    }
-    if (message.method === sessionSnapshotMethod) {
-      const { sessionId, snapshot } =
-        message.params as SessionSnapshotNotification
-      const record = streams.get(sessionId)
-      if (
-        record === undefined ||
-        record.closed ||
-        record.snapshotRevision !== record.subscribeRevision
-      )
-        return
-      record.handlers.onSnapshot(snapshot)
-      record.lastSeq = Math.max(record.lastSeq, snapshot.session.seq)
-      record.handlers.onReplayComplete()
       return
     }
     if (message.method === sessionSubscriptionErrorMethod) {
@@ -611,7 +579,9 @@ export function createAppRpcClient(options: {
       record.snapshotRevision !== record.subscribeRevision
     )
       return
-    record.handlers.onTransient(event)
+    if (record.pending !== undefined)
+      record.pending.push({ kind: "transient", event })
+    else record.handlers.onTransient(event)
   }
 
   function resetSessionHistory(sessionId: string): void {
@@ -640,42 +610,70 @@ export function createAppRpcClient(options: {
   async function subscribe(record: StreamRecord): Promise<void> {
     const revision = ++record.subscribeRevision
     const after = record.lastSeq
+    const isCurrent = () =>
+      !record.closed &&
+      streams.get(record.sessionId) === record &&
+      record.subscribeRevision === revision
+    record.pending = []
     try {
-      // The server replays events after the cursor, so a reconnect only needs
-      // the last durable seq this stream observed.
-      const response = await request("session/subscribe", {
-        sessionId: record.sessionId,
-        after,
-        ...(record.recent ? { recent: record.recent } : {}),
-      })
-      if (
-        record.closed ||
-        streams.get(record.sessionId) !== record ||
-        record.subscribeRevision !== revision
+      const response = await request(
+        "session/open",
+        { sessionId: record.sessionId },
+        () => {
+          // A second WebSocket frame can be delivered before the request's
+          // promise continuation runs. Start buffering at the response frame.
+          if (isCurrent()) record.snapshotRevision = revision
+        },
       )
-        return
+      if (!isCurrent()) return
       // A reset broadcast can be missed while disconnected. A cursor beyond
       // the authoritative snapshot proves that this history was replaced.
       if (response.session.seq < after) {
         resetSessionHistory(record.sessionId)
         return
       }
-      record.snapshotRevision = revision
-      record.handlers.onSnapshot(response)
-      if (response.events !== undefined)
-        record.lastSeq = Math.max(record.lastSeq, response.session.seq)
+      const { watermarkSeq: watermark, history } = response
+      const pending = record.pending ?? []
+      record.pending = undefined
+      record.lastSeq = Math.max(record.lastSeq, watermark)
+      record.handlers.onSnapshot({
+        session: {
+          ...response.session,
+          ...(history.currentModel === undefined
+            ? {}
+            : { currentModel: history.currentModel }),
+          ...(history.cacheExpiry === undefined
+            ? {}
+            : { cacheExpiry: history.cacheExpiry }),
+        },
+        completedTurns: history.turns,
+        ...(response.activeTurn === undefined
+          ? {}
+          : { activeTurn: response.activeTurn }),
+        ...(history.nextBefore === undefined
+          ? {}
+          : { historyBefore: history.nextBefore }),
+        ...(history.contextTokens === undefined
+          ? {}
+          : { contextTokens: history.contextTokens }),
+      })
+      for (const delivery of pending) {
+        if (!isCurrent()) return
+        if (delivery.kind === "durable") record.handlers.onEvent(delivery.event)
+        else record.handlers.onTransient(delivery.event)
+      }
+      if (isCurrent()) record.handlers.onReady()
     } catch (error) {
-      if (
-        record.closed ||
-        streams.get(record.sessionId) !== record ||
-        record.subscribeRevision !== revision
-      )
-        return
+      if (!isCurrent()) return
       // A dropped connection is not terminal: the stream stays registered and
       // the next successful handshake re-subscribes it.
       if (!ready) return
       streams.delete(record.sessionId)
       record.closed = true
+      if (record.snapshotRevision === revision)
+        void request("session/unsubscribe", {
+          sessionId: record.sessionId,
+        }).catch(() => {})
       record.handlers.onError?.(error)
     }
   }
@@ -683,6 +681,7 @@ export function createAppRpcClient(options: {
   async function request<M extends AppMethod>(
     method: M,
     params: RpcMethodParams[M],
+    onResponse?: () => void,
   ): Promise<RpcMethodResponses[M]> {
     await ensureConnection()
     // The connection may close between the awaited handshake and this
@@ -711,6 +710,7 @@ export function createAppRpcClient(options: {
       inflight.set(id, {
         resolve: (value) => {
           clearTimeout(deadline)
+          onResponse?.()
           resolve(value as RpcMethodResponses[M])
         },
         reject: (error) => {
@@ -797,11 +797,11 @@ export function createAppRpcClient(options: {
         sideChatListeners.delete(listener)
       }
     },
-    openSessionStream(sessionId, after, handlers, options) {
+    openSessionStream(sessionId, after, handlers) {
       const record: StreamRecord = {
         sessionId,
         handlers,
-        recent: options?.recent ?? false,
+        pending: undefined,
         lastSeq: after,
         subscribeRevision: 0,
         snapshotRevision: -1,
@@ -810,7 +810,7 @@ export function createAppRpcClient(options: {
       streams.set(sessionId, record)
       // When the socket is still connecting, the post-handshake
       // resubscribeAll picks the record up; subscribing here too would send
-      // the session/subscribe request twice.
+      // the session/open request twice.
       if (ready) {
         void subscribe(record)
       } else {

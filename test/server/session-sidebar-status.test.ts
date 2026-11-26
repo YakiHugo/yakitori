@@ -332,7 +332,7 @@ describe("authoritative session sidebar status", () => {
       prompt("turn_question"),
       question("ask_first"),
     ])
-    expect(await handlers.readDisplayWindow({ sessionId })).toMatchObject({
+    expect(await handlers.readLiveSession({ sessionId })).toMatchObject({
       ok: true,
       value: { session: { status: "idle" } },
     })
