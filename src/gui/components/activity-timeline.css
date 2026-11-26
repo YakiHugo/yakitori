@@ -53,7 +53,6 @@
   max-height: 14rem;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  scrollbar-width: thin;
   padding-inline-end: 4px;
 }
 .activity-batch-viewport:focus-visible {
