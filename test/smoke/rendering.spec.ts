@@ -621,9 +621,35 @@ test("conversation scrolls at the page edge while the project overview stays on 
   ).toBeLessThan(1)
   await page.getByRole("button", { name: "Close goal editor" }).click()
   await viewport.hover()
+  const sidebarList = page.locator("[data-sidebar-scroll-viewport]")
+  const thumb = page.locator(
+    '.conversation-surface [data-slot="scroll-area-thumb"]',
+  )
+  await expect(sidebarList).toHaveCSS("scrollbar-width", "thin")
+  await expect(viewport).toHaveCSS("scrollbar-width", "none")
+  await expect(thumb).toBeVisible()
+  const thumbColor = await thumb.evaluate(
+    (node) => getComputedStyle(node).backgroundColor,
+  )
+  await expect(sidebarList).toHaveCSS(
+    "scrollbar-color",
+    `${thumbColor} rgba(0, 0, 0, 0)`,
+  )
   await page.screenshot({
     path: testInfo.outputPath("conversation-scroll-layout.png"),
   })
+  await page.locator("html").evaluate((node) => node.classList.add("dark"))
+  const darkThumbColor = await thumb.evaluate(
+    (node) => getComputedStyle(node).backgroundColor,
+  )
+  expect(darkThumbColor).not.toBe(thumbColor)
+  await expect(sidebarList).toHaveCSS(
+    "scrollbar-color",
+    `${darkThumbColor} rgba(0, 0, 0, 0)`,
+  )
+  await page.emulateMedia({ forcedColors: "active" })
+  await expect(sidebarList).toHaveCSS("scrollbar-width", "auto")
+  await expect(sidebarList).toHaveCSS("scrollbar-color", "auto")
 })
 
 test("workspace tabs and actions share the titlebar and stay reachable at the minimum width", async ({
