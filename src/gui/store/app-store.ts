@@ -1718,6 +1718,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                   () => isCurrentSelection(selection),
                   false,
                   false,
+                  { preserveInputRecoveryNotice: true },
                 )
                 // A failed lookup proves no absence. Keep recovery unresolved.
                 if (!checked || !confirmed) return
