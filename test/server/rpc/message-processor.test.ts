@@ -211,7 +211,7 @@ describe("method dispatch", () => {
   })
 
   it("serves project, provider, and subscription methods from injected dependencies", async () => {
-    const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
+    const projectStore = createSqliteProjectStore(":memory:")
     const requestedSubscriptions: string[] = []
     const { processor } = createTestProcessor({
       handlers: createFakeHandlers(),

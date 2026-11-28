@@ -143,9 +143,7 @@ it("discovers enabled skills from a saved draft project and rejects disabled or 
   const foreign = join(root, "other")
   await mkdir(foreign)
   await writeFile(join(foreign, "SKILL.md"), "private")
-  const store = createSqliteProjectStore({
-    databasePath: join(root, "projects.sqlite"),
-  })
+  const store = createSqliteProjectStore(join(root, "projects.sqlite"))
   const { project: saved } = await store.createProject({
     name: "Draft",
     roots: [project],

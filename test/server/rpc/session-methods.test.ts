@@ -514,7 +514,7 @@ describe("project methods over a real store", () => {
     connection: TestConnection
     projectStore: SqliteProjectStore
   } {
-    const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
+    const projectStore = createSqliteProjectStore(":memory:")
     const { processor, connection } = realSetup({ projectStore })
     return { processor, connection, projectStore }
   }

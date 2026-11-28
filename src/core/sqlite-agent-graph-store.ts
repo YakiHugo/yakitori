@@ -1,27 +1,20 @@
-import { join } from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { closeSqliteDatabase, openSqliteDatabase } from "./sqlite.ts"
+import { connectStateStore } from "./sqlite.ts"
 import { isGeneratedSessionId } from "../kernel/ids.ts"
 import type { AgentGraphStore, ThreadSpawnEdge } from "./agent-graph-store.ts"
 
 export type SqliteAgentGraphStore = AgentGraphStore &
   Readonly<{ close(): void }>
 
-export type SqliteAgentGraphStoreOptions = Readonly<{
-  databasePath?: string
-  rootDir?: string
-}>
-
 type ChildRow = { readonly child_thread_id: string }
 
 export function createSqliteAgentGraphStore(
-  options: SqliteAgentGraphStoreOptions = {},
+  source: string | DatabaseSync,
 ): SqliteAgentGraphStore {
-  const databasePath =
-    options.databasePath ??
-    join(options.rootDir ?? ".yakitori", "agent-graph.sqlite")
-  const database = openSqliteDatabase(databasePath, { profile: "durable" })
-  initializeDatabase(database)
+  const { database, close } = connectStateStore(
+    source,
+    initializeAgentGraphTables,
+  )
 
   return {
     async upsertThreadSpawnEdge(edge) {
@@ -115,18 +108,15 @@ export function createSqliteAgentGraphStore(
       return rows.map((row) => row.child_thread_id)
     },
 
-    close() {
-      closeSqliteDatabase(database)
-    },
+    close,
   }
 }
 
-function initializeDatabase(database: DatabaseSync): void {
-  try {
-    // Existing graph databases require this non-null column without a default.
-    // Keep its physical shape and insert a constant; graph ownership is edge
-    // existence, with no status transitions or filtering.
-    database.exec(`
+export function initializeAgentGraphTables(database: DatabaseSync): void {
+  // Existing graph databases require this non-null column without a default.
+  // Keep its physical shape and insert a constant; graph ownership is edge
+  // existence, with no status transitions or filtering.
+  database.exec(`
       CREATE TABLE IF NOT EXISTS thread_spawn_edges (
         parent_thread_id TEXT NOT NULL,
         child_thread_id TEXT NOT NULL,
@@ -138,10 +128,6 @@ function initializeDatabase(database: DatabaseSync): void {
       CREATE INDEX IF NOT EXISTS thread_spawn_edges_parent_status
       ON thread_spawn_edges (parent_thread_id, status);
     `)
-  } catch (error) {
-    closeSqliteDatabase(database)
-    throw error
-  }
 }
 
 function requireEdge(edge: ThreadSpawnEdge): void {

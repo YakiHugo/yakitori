@@ -175,7 +175,7 @@ describe("authoritative session sidebar status", () => {
   })
 
   it("returns current sidebar presentation and suppresses deleted project ownership", async () => {
-    const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
+    const projectStore = createSqliteProjectStore(":memory:")
     cleanups.push(async () => projectStore.close())
     const { project } = await projectStore.createProject({
       name: "Workspace",

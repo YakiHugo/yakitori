@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite"
-import { closeSqliteDatabase, openSqliteDatabase } from "./sqlite.ts"
+import { connectStateStore } from "./sqlite.ts"
 import {
   createGoalId,
   GoalStatus,
@@ -23,40 +23,13 @@ type GoalRow = Readonly<{
 // Goals are durable thread state, independent of sidebar presentation and
 // disposable rollout projections. Receipts make replayed usage safe to charge.
 export class SqliteGoalStore {
+  readonly #closeDatabase: () => void
   readonly #database: DatabaseSync
 
-  constructor(databasePath: string) {
-    this.#database = openSqliteDatabase(databasePath, { profile: "durable" })
-    try {
-      this.#database.exec(`
-        CREATE TABLE IF NOT EXISTS thread_goals (
-          thread_id TEXT PRIMARY KEY NOT NULL,
-          id TEXT UNIQUE NOT NULL,
-          objective TEXT NOT NULL,
-          status TEXT NOT NULL CHECK (status IN (
-            'active', 'paused', 'blocked', 'usage_limited', 'budget_limited', 'complete'
-          )),
-          token_budget INTEGER CHECK (token_budget > 0),
-          tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0),
-          time_used_seconds INTEGER NOT NULL CHECK (time_used_seconds >= 0),
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          input_id TEXT
-        ) STRICT;
-        CREATE TABLE IF NOT EXISTS goal_usage_receipts (
-          goal_id TEXT NOT NULL REFERENCES thread_goals(id) ON DELETE CASCADE,
-          event_id TEXT NOT NULL,
-          PRIMARY KEY (goal_id, event_id)
-        ) STRICT;
-        CREATE TABLE IF NOT EXISTS goal_continuation_deferrals (
-          thread_id TEXT PRIMARY KEY NOT NULL
-            REFERENCES thread_goals(thread_id) ON DELETE CASCADE
-        ) STRICT;
-      `)
-    } catch (error) {
-      closeSqliteDatabase(this.#database)
-      throw error
-    }
+  constructor(source: DatabaseSync | string) {
+    const { database, close } = connectStateStore(source, initializeGoalTables)
+    this.#database = database
+    this.#closeDatabase = close
   }
 
   read(threadId: string): ThreadGoal | undefined {
@@ -221,7 +194,7 @@ export class SqliteGoalStore {
   }
 
   close(): void {
-    closeSqliteDatabase(this.#database)
+    this.#closeDatabase()
   }
 
   #writeGoal(goal: ThreadGoal): void {
@@ -285,4 +258,32 @@ function requireTimestamp(value: string, name: string): void {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
     throw new Error(`${name} must be a timestamp.`)
   }
+}
+
+export function initializeGoalTables(database: DatabaseSync): void {
+  database.exec(`
+        CREATE TABLE IF NOT EXISTS thread_goals (
+          thread_id TEXT PRIMARY KEY NOT NULL,
+          id TEXT UNIQUE NOT NULL,
+          objective TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN (
+            'active', 'paused', 'blocked', 'usage_limited', 'budget_limited', 'complete'
+          )),
+          token_budget INTEGER CHECK (token_budget > 0),
+          tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0),
+          time_used_seconds INTEGER NOT NULL CHECK (time_used_seconds >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          input_id TEXT
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS goal_usage_receipts (
+          goal_id TEXT NOT NULL REFERENCES thread_goals(id) ON DELETE CASCADE,
+          event_id TEXT NOT NULL,
+          PRIMARY KEY (goal_id, event_id)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS goal_continuation_deferrals (
+          thread_id TEXT PRIMARY KEY NOT NULL
+            REFERENCES thread_goals(thread_id) ON DELETE CASCADE
+        ) STRICT;
+      `)
 }

@@ -1,13 +1,8 @@
 import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
 import type { DatabaseSync } from "node:sqlite"
-import {
-  closeSqliteDatabase,
-  openSqliteDatabase,
-  openReadOnlySqliteDatabase,
-} from "../core/sqlite.ts"
 import { isDeepStrictEqual } from "node:util"
 import type { PreparedAttachments } from "../core/rollout-assets.ts"
+import { connectStateStore } from "../core/sqlite.ts"
 import type { UserAttachment } from "../protocol/asset-types.ts"
 import type { InputContent } from "../protocol/user-input.ts"
 import type {
@@ -70,6 +65,7 @@ type PrepareEngineAttachments = (
 export class ExternalSessionService {
   readonly #changed: ((sessionId: string) => void) | undefined
   readonly #engine: EngineAdapter
+  readonly #closeDatabase: () => void
   readonly #database: DatabaseSync
   readonly #prepareAttachments: PrepareEngineAttachments | undefined
   readonly #bound = new Map<string, Promise<EngineBinding>>()
@@ -86,22 +82,20 @@ export class ExternalSessionService {
 
   constructor(options: {
     engine: EngineAdapter
-    databasePath: string
+    database: DatabaseSync | string
     changed?: (sessionId: string) => void
     prepareAttachments?: PrepareEngineAttachments
   }) {
     this.#changed = options.changed
     this.#engine = options.engine
     this.#prepareAttachments = options.prepareAttachments
-    this.#database = openSqliteDatabase(options.databasePath, {
-      profile: "durable",
-    })
+    const { database, close } = connectStateStore(
+      options.database,
+      initializeExternalSessionTables,
+    )
+    this.#database = database
+    this.#closeDatabase = close
     try {
-      this.#database.exec(`
-      CREATE TABLE IF NOT EXISTS external_sessions (id TEXT PRIMARY KEY, engine_id TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS external_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (session_id, seq));
-      CREATE TABLE IF NOT EXISTS external_requests (session_id TEXT NOT NULL, request_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (session_id, request_id));
-    `)
       // A process restart is not evidence that the external engine stopped. Keep
       // unfinished submissions explicitly unknown rather than automatically retry.
       for (const session of this.list()) {
@@ -119,7 +113,7 @@ export class ExternalSessionService {
         }
       }
     } catch (error) {
-      closeSqliteDatabase(this.#database)
+      this.#closeDatabase()
       throw error
     }
   }
@@ -400,7 +394,7 @@ export class ExternalSessionService {
       await Promise.allSettled(this.#operations)
       for (const unsubscribe of this.#unsubscribe.values()) unsubscribe()
       this.#listeners.clear()
-      closeSqliteDatabase(this.#database)
+      this.#closeDatabase()
       this.#closed = true
     }
   }
@@ -551,31 +545,27 @@ export class ExternalSessionService {
 
 export function createExternalSessionService(options: {
   engine: EngineAdapter
-  databasePath: string
+  database: DatabaseSync | string
   changed?: (sessionId: string) => void
 }): ExternalSessionService {
   return new ExternalSessionService(options)
 }
 
 export function listStoredExternalEngineIds(
-  databasePath: string,
+  database: DatabaseSync,
 ): readonly string[] {
-  if (!existsSync(databasePath)) return []
-  const database = openReadOnlySqliteDatabase(databasePath)
-  try {
-    const table = database
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_sessions'",
-      )
-      .get()
-    if (table === undefined) return []
-    return database
-      .prepare(
-        "SELECT DISTINCT engine_id FROM external_sessions ORDER BY engine_id",
-      )
-      .all()
-      .map((row) => String(row.engine_id))
-  } finally {
-    closeSqliteDatabase(database)
-  }
+  return database
+    .prepare(
+      "SELECT DISTINCT engine_id FROM external_sessions ORDER BY engine_id",
+    )
+    .all()
+    .map((row) => String(row.engine_id))
+}
+
+export function initializeExternalSessionTables(database: DatabaseSync): void {
+  database.exec(`
+      CREATE TABLE IF NOT EXISTS external_sessions (id TEXT PRIMARY KEY, engine_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS external_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (session_id, seq));
+      CREATE TABLE IF NOT EXISTS external_requests (session_id TEXT NOT NULL, request_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (session_id, request_id));
+    `)
 }

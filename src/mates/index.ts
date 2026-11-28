@@ -13,7 +13,4 @@ export type {
   MateStoreListResult,
 } from "./mate-store.ts"
 export { createSqliteMateStore } from "./sqlite-mate-store.ts"
-export type {
-  SqliteMateStore,
-  SqliteMateStoreOptions,
-} from "./sqlite-mate-store.ts"
+export type { SqliteMateStore } from "./sqlite-mate-store.ts"

@@ -1,6 +1,5 @@
-import { join } from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { closeSqliteDatabase, openSqliteDatabase } from "../core/sqlite.ts"
+import { connectStateStore } from "../core/sqlite.ts"
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 
 // First-class Project entity store (C8-D2, Codex convergence): the entity
@@ -80,11 +79,6 @@ export type ProjectStore = {
 
 export type SqliteProjectStore = ProjectStore & Readonly<{ close(): void }>
 
-export type SqliteProjectStoreOptions = Readonly<{
-  databasePath?: string
-  rootDir?: string
-}>
-
 // Cursor parse failures map to ApiErrorCode.InvalidCursor at the RPC boundary;
 // the store has no ApiErrorCode dependency, so this is a dedicated class.
 export class InvalidProjectCursorError extends Error {
@@ -120,13 +114,9 @@ const defaultListLimit = 50
 const maxListLimit = 100
 
 export function createSqliteProjectStore(
-  options: SqliteProjectStoreOptions = {},
+  source: string | DatabaseSync,
 ): SqliteProjectStore {
-  const databasePath =
-    options.databasePath ??
-    join(options.rootDir ?? ".yakitori", "projects.sqlite")
-  const database = openSqliteDatabase(databasePath, { profile: "durable" })
-  initializeDatabase(database)
+  const { database, close } = connectStateStore(source, initializeProjectTables)
 
   return {
     async listProjects(input = {}) {
@@ -374,15 +364,12 @@ export function createSqliteProjectStore(
       return result.changes > 0
     },
 
-    close() {
-      closeSqliteDatabase(database)
-    },
+    close,
   }
 }
 
-function initializeDatabase(database: DatabaseSync): void {
-  try {
-    database.exec(`
+export function initializeProjectTables(database: DatabaseSync): void {
+  database.exec(`
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -409,21 +396,17 @@ function initializeDatabase(database: DatabaseSync): void {
       CREATE INDEX IF NOT EXISTS projects_position
       ON projects (pinned DESC, position ASC, id ASC);
     `)
-    // Databases created before the pinned column get it added in place; the
-    // default keeps every existing project unpinned.
-    const hasPinned = (
-      database.prepare("PRAGMA table_info(projects)").all() as {
-        readonly name: string
-      }[]
-    ).some((column) => column.name === "pinned")
-    if (!hasPinned) {
-      database.exec(
-        "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
-      )
-    }
-  } catch (error) {
-    closeSqliteDatabase(database)
-    throw error
+  // Databases created before the pinned column get it added in place; the
+  // default keeps every existing project unpinned.
+  const hasPinned = (
+    database.prepare("PRAGMA table_info(projects)").all() as {
+      readonly name: string
+    }[]
+  ).some((column) => column.name === "pinned")
+  if (!hasPinned) {
+    database.exec(
+      "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    )
   }
 }
 

@@ -139,7 +139,7 @@ async function withStores(
   try {
     await run({
       open() {
-        const store = createSqliteMateStore({ rootDir })
+        const store = createSqliteMateStore(join(rootDir, "mates.sqlite"))
         stores.push(store)
         return store
       },

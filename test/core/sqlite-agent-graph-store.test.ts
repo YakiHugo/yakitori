@@ -22,7 +22,7 @@ describe("SqliteAgentGraphStore", () => {
     const child = threadId(9)
     const sibling = threadId(2)
     const grandchild = threadId(1)
-    const first = createSqliteAgentGraphStore({ databasePath })
+    const first = createSqliteAgentGraphStore(databasePath)
 
     await first.upsertThreadSpawnEdge({
       parentThreadId: parent,
@@ -38,7 +38,7 @@ describe("SqliteAgentGraphStore", () => {
     })
     first.close()
 
-    const resumed = createSqliteAgentGraphStore({ databasePath })
+    const resumed = createSqliteAgentGraphStore(databasePath)
     await expect(resumed.listThreadSpawnDescendants(parent)).resolves.toEqual([
       sibling,
       child,
@@ -66,14 +66,14 @@ describe("SqliteAgentGraphStore", () => {
       .run(parent, child)
     database.close()
 
-    const store = createSqliteAgentGraphStore({ databasePath })
+    const store = createSqliteAgentGraphStore(databasePath)
     await store.upsertThreadSpawnEdge({
       parentThreadId: child,
       childThreadId: grandchild,
     })
     store.close()
 
-    const reopened = createSqliteAgentGraphStore({ databasePath })
+    const reopened = createSqliteAgentGraphStore(databasePath)
     await expect(reopened.listThreadSpawnDescendants(parent)).resolves.toEqual([
       child,
       grandchild,
@@ -82,7 +82,7 @@ describe("SqliteAgentGraphStore", () => {
   })
 
   it("upserts an existing edge without duplicating it", async () => {
-    const store = createSqliteAgentGraphStore({ databasePath: ":memory:" })
+    const store = createSqliteAgentGraphStore(":memory:")
     const parent = createSessionId()
     const child = createSessionId()
     await store.upsertThreadSpawnEdge({
@@ -101,7 +101,7 @@ describe("SqliteAgentGraphStore", () => {
   })
 
   it("moves a child to its single new parent on upsert", async () => {
-    const store = createSqliteAgentGraphStore({ databasePath: ":memory:" })
+    const store = createSqliteAgentGraphStore(":memory:")
     const firstParent = createSessionId()
     const secondParent = createSessionId()
     const child = createSessionId()
@@ -124,7 +124,7 @@ describe("SqliteAgentGraphStore", () => {
   })
 
   it("rejects reparenting that would create a cycle", async () => {
-    const store = createSqliteAgentGraphStore({ databasePath: ":memory:" })
+    const store = createSqliteAgentGraphStore(":memory:")
     const parent = createSessionId()
     const child = createSessionId()
     await store.upsertThreadSpawnEdge({
@@ -146,7 +146,7 @@ describe("SqliteAgentGraphStore", () => {
   })
 
   it("deletes incoming and outgoing edges for a removed Thread", async () => {
-    const store = createSqliteAgentGraphStore({ databasePath: ":memory:" })
+    const store = createSqliteAgentGraphStore(":memory:")
     const parent = createSessionId()
     const child = createSessionId()
     const grandchild = createSessionId()
