@@ -125,6 +125,36 @@ function checkpoint(root: string, id: string, projection = "history") {
 }
 
 describe("persisted display projection", () => {
+  it("waits for an admitted background history repair to publish before closing", async () => {
+    const { root, store, id } = await createStore()
+    const database = new DatabaseSync(join(root, "thread-history.sqlite"))
+    database
+      .prepare("DELETE FROM projection_threads WHERE thread_id = ?")
+      .run(id)
+    database.close()
+
+    const blocked = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    io.beforeOpen = async (path) => {
+      if (path !== join(root, "rollouts", id, "rollout.jsonl")) return
+      io.beforeOpen = undefined
+      blocked.resolve()
+      await release.promise
+    }
+    await store.appendItems(id, turn("saved"))
+    await blocked.promise
+    const closing = store.close()
+    try {
+      await expect(store.readThread(id)).rejects.toThrow(
+        "Thread store is closed",
+      )
+    } finally {
+      release.resolve()
+      await closing
+    }
+    expect(checkpoint(root, id)).toMatchObject({ next_seq: 6 })
+  })
+
   it("opens persisted history before search initializes its database", async () => {
     const { root, store, id } = await createStore()
     await store.appendItems(id, turn("independent"))

@@ -1,6 +1,6 @@
-import { mkdirSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import { join } from "node:path"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "../core/sqlite.ts"
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 
 // First-class Project entity store (C8-D2, Codex convergence): the entity
@@ -125,10 +125,7 @@ export function createSqliteProjectStore(
   const databasePath =
     options.databasePath ??
     join(options.rootDir ?? ".yakitori", "projects.sqlite")
-  if (databasePath !== ":memory:") {
-    mkdirSync(dirname(databasePath), { recursive: true })
-  }
-  const database = new DatabaseSync(databasePath)
+  const database = openSqliteDatabase(databasePath, { profile: "durable" })
   initializeDatabase(database)
 
   return {
@@ -378,17 +375,13 @@ export function createSqliteProjectStore(
     },
 
     close() {
-      if (database.isOpen) database.close()
+      closeSqliteDatabase(database)
     },
   }
 }
 
 function initializeDatabase(database: DatabaseSync): void {
   try {
-    database.exec("PRAGMA journal_mode = WAL")
-    database.exec("PRAGMA synchronous = FULL")
-    database.exec("PRAGMA busy_timeout = 5000")
-    database.exec("PRAGMA foreign_keys = ON")
     database.exec(`
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
@@ -428,12 +421,8 @@ function initializeDatabase(database: DatabaseSync): void {
         "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
       )
     }
-    const enableDefensive = Reflect.get(database, "enableDefensive")
-    if (typeof enableDefensive === "function") {
-      Reflect.apply(enableDefensive, database, [true])
-    }
   } catch (error) {
-    if (database.isOpen) database.close()
+    closeSqliteDatabase(database)
     throw error
   }
 }

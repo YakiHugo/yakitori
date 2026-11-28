@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import { existsSync } from "node:fs"
+import type { DatabaseSync } from "node:sqlite"
+import {
+  closeSqliteDatabase,
+  openSqliteDatabase,
+  openReadOnlySqliteDatabase,
+} from "../core/sqlite.ts"
 import { isDeepStrictEqual } from "node:util"
 import type { PreparedAttachments } from "../core/rollout-assets.ts"
 import type { UserAttachment } from "../protocol/asset-types.ts"
@@ -89,30 +93,34 @@ export class ExternalSessionService {
     this.#changed = options.changed
     this.#engine = options.engine
     this.#prepareAttachments = options.prepareAttachments
-    if (options.databasePath !== ":memory:")
-      mkdirSync(dirname(options.databasePath), { recursive: true })
-    this.#database = new DatabaseSync(options.databasePath)
-    this.#database.exec(`
-      PRAGMA journal_mode = WAL;
+    this.#database = openSqliteDatabase(options.databasePath, {
+      profile: "durable",
+    })
+    try {
+      this.#database.exec(`
       CREATE TABLE IF NOT EXISTS external_sessions (id TEXT PRIMARY KEY, engine_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS external_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (session_id, seq));
       CREATE TABLE IF NOT EXISTS external_requests (session_id TEXT NOT NULL, request_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (session_id, request_id));
     `)
-    // A process restart is not evidence that the external engine stopped. Keep
-    // unfinished submissions explicitly unknown rather than automatically retry.
-    for (const session of this.list()) {
-      for (const request of this.#requests(session.id)) {
-        if (request.status !== "pending" && request.status !== "accepted")
-          continue
-        this.#saveRequest(session.id, { ...request, status: "unknown" })
-        if (request.turnId !== undefined)
-          this.#append(session.id, {
-            type: "turn.status",
-            turnId: request.turnId,
-            status: "disconnected",
-            message: "Application restarted before observing completion.",
-          })
+      // A process restart is not evidence that the external engine stopped. Keep
+      // unfinished submissions explicitly unknown rather than automatically retry.
+      for (const session of this.list()) {
+        for (const request of this.#requests(session.id)) {
+          if (request.status !== "pending" && request.status !== "accepted")
+            continue
+          this.#saveRequest(session.id, { ...request, status: "unknown" })
+          if (request.turnId !== undefined)
+            this.#append(session.id, {
+              type: "turn.status",
+              turnId: request.turnId,
+              status: "disconnected",
+              message: "Application restarted before observing completion.",
+            })
+        }
       }
+    } catch (error) {
+      closeSqliteDatabase(this.#database)
+      throw error
     }
   }
 
@@ -392,7 +400,7 @@ export class ExternalSessionService {
       await Promise.allSettled(this.#operations)
       for (const unsubscribe of this.#unsubscribe.values()) unsubscribe()
       this.#listeners.clear()
-      this.#database.close()
+      closeSqliteDatabase(this.#database)
       this.#closed = true
     }
   }
@@ -553,7 +561,7 @@ export function listStoredExternalEngineIds(
   databasePath: string,
 ): readonly string[] {
   if (!existsSync(databasePath)) return []
-  const database = new DatabaseSync(databasePath, { readOnly: true })
+  const database = openReadOnlySqliteDatabase(databasePath)
   try {
     const table = database
       .prepare(
@@ -568,6 +576,6 @@ export function listStoredExternalEngineIds(
       .all()
       .map((row) => String(row.engine_id))
   } finally {
-    database.close()
+    closeSqliteDatabase(database)
   }
 }

@@ -177,6 +177,7 @@ export type ThreadDisplayActivity = Readonly<{
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
+  close(): Promise<void>
   retainEphemeralRolloutAssets?(rolloutId: string): () => void
   createThread(metadata: CreateThreadMetadata): Promise<StoredThread>
   resumeThread(threadId: string): Promise<StoredThread | undefined>

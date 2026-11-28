@@ -1,6 +1,5 @@
-import { mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "./sqlite.ts"
 import {
   createGoalId,
   GoalStatus,
@@ -27,18 +26,9 @@ export class SqliteGoalStore {
   readonly #database: DatabaseSync
 
   constructor(databasePath: string) {
-    if (databasePath !== ":memory:") {
-      mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 })
-    }
-    this.#database = new DatabaseSync(databasePath, {
-      timeout: 5_000,
-      enableDoubleQuotedStringLiterals: false,
-    })
+    this.#database = openSqliteDatabase(databasePath, { profile: "durable" })
     try {
       this.#database.exec(`
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = FULL;
-        PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS thread_goals (
           thread_id TEXT PRIMARY KEY NOT NULL,
           id TEXT UNIQUE NOT NULL,
@@ -64,7 +54,7 @@ export class SqliteGoalStore {
         ) STRICT;
       `)
     } catch (error) {
-      this.#database.close()
+      closeSqliteDatabase(this.#database)
       throw error
     }
   }
@@ -231,7 +221,7 @@ export class SqliteGoalStore {
   }
 
   close(): void {
-    if (this.#database.isOpen) this.#database.close()
+    closeSqliteDatabase(this.#database)
   }
 
   #writeGoal(goal: ThreadGoal): void {

@@ -277,6 +277,8 @@ export async function createYakitoriApplication(
   let engines: EngineRegistry | undefined
   let goals: GoalRuntime | undefined
   let runtimeLock: RuntimeLock | undefined
+  let closeHandlersForCleanup: (() => Promise<void>) | undefined
+  let threadStoreForCleanup: ThreadStore | undefined
   let threadManagerForCleanup: ThreadManager | undefined
   let agentRuntimeForCleanup: AgentRuntime | undefined
   let agentGraphStoreForCleanup: SqliteAgentGraphStore | undefined
@@ -874,6 +876,7 @@ export async function createYakitoriApplication(
       })
     }
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
+    threadStoreForCleanup = threadStore
     // Observed sessions own attachment files through their SQLite identities,
     // so restore their leases before the native store collects orphan files.
     const engineAssetOwners = new Set<string>()
@@ -1531,6 +1534,7 @@ export async function createYakitoriApplication(
       },
       reportOperationalFailure: reporter,
     })
+    closeHandlersForCleanup = handlers.close
     const interactions = createSessionInteractions(
       threadStore,
       handlers,
@@ -1729,6 +1733,7 @@ export async function createYakitoriApplication(
         clearInterval(providerConfigTimer)
         closePromise ??= closeApplicationResources(
           threadManager,
+          threadStore,
           handlers.close,
           ownedMateStore.close,
           ownedProjectStore.close,
@@ -1750,7 +1755,8 @@ export async function createYakitoriApplication(
     try {
       await closeApplicationResources(
         threadManagerForCleanup,
-        undefined,
+        threadStoreForCleanup,
+        closeHandlersForCleanup,
         mateStore?.close,
         projectStoreForCleanup?.close,
         agentRuntimeForCleanup?.close,
@@ -1999,6 +2005,7 @@ function configureProviders(
 
 async function closeApplicationResources(
   threadManager: ThreadManager | undefined,
+  threadStore: ThreadStore | undefined,
   closeHandlers: (() => Promise<void>) | undefined,
   closeMateStore: (() => void) | undefined,
   closeProjectStore: (() => void) | undefined,
@@ -2044,6 +2051,11 @@ async function closeApplicationResources(
   }
   try {
     await closeHandlers?.()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    await threadStore?.close()
   } catch (error) {
     errors.push(error)
   }

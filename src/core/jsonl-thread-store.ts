@@ -181,6 +181,9 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #staged = new Map<string, StagedThread>()
   readonly #reservations = new Map<string, ForkReservation>()
   readonly #ephemeralAssetOwners = new Set<string>()
+  #closed = false
+  #closePromise: Promise<void> | undefined
+  readonly #operations = new Set<Promise<unknown>>()
   readonly #ready: Promise<void>
   #gcReady: Promise<void> | undefined
   readonly #scheduledProjectionRepairs = new Map<
@@ -203,26 +206,126 @@ export class JsonlThreadStore implements ThreadStore {
       join(root, "thread-history.sqlite"),
     )
     this.#searchProjectionPath = join(root, "thread-search.sqlite")
-    this.#usageProjection = new SqliteThreadUsageProjection(
-      join(root, "thread-usage.sqlite"),
-    )
+    try {
+      this.#usageProjection = new SqliteThreadUsageProjection(
+        join(root, "thread-usage.sqlite"),
+      )
+    } catch (error) {
+      this.#historyProjection.close()
+      throw error
+    }
     this.#sessionSidebarPath = join(root, "session-sidebar.json")
     this.#threadsDirectory = join(root, "threads")
     this.#rolloutsDirectory = join(root, "rollouts")
     this.#writerLocksDirectory = join(root, "locks", "writers")
     this.#reservationLocksDirectory = join(root, "locks", "reservations")
     this.#coordinationLockPath = join(root, "locks", "storage.lock")
-    this.#ready = Promise.all([
+    this.#ready = settleStorageWork([
       mkdir(this.#threadsDirectory, { recursive: true }),
       mkdir(this.#rolloutsDirectory, { recursive: true }),
       mkdir(this.#writerLocksDirectory, { recursive: true }),
       mkdir(this.#reservationLocksDirectory, { recursive: true }),
-    ]).then(() => undefined)
+    ])
   }
 
-  async initialize(): Promise<void> {
-    await this.#initializeStorage()
+  #operation<Args extends unknown[], Result>(
+    method: (...args: Args) => Promise<Result>,
+  ): (...args: Args) => Promise<Result> {
+    return (...args) => this.#run(() => method.apply(this, args))
   }
+
+  #run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#closed)
+      return Promise.reject(new Error("Thread store is closed."))
+    const task = operation()
+    this.#operations.add(task)
+    const finished = () => {
+      this.#operations.delete(task)
+    }
+    void task.then(finished, finished)
+    return task
+  }
+
+  close(): Promise<void> {
+    if (this.#closePromise !== undefined) return this.#closePromise
+    this.#closed = true
+    for (const work of this.#scheduledProjectionRepairs.values())
+      work.runAgain = false
+    this.#closePromise = this.#close()
+    return this.#closePromise
+  }
+
+  async #close(): Promise<void> {
+    const errors: unknown[] = []
+    // An admitted create/resume/fork can still acquire a lock after its first await.
+    await Promise.allSettled(this.#operations)
+    for (const id of new Set([
+      ...this.#writers.keys(),
+      ...this.#staged.keys(),
+    ])) {
+      try {
+        await this.#shutdownThread(id)
+      } catch (error) {
+        errors.push(error)
+        // Normal shutdown keeps a failed flush retryable. Final close must release its lease.
+        try {
+          await this.#discardThread(id)
+        } catch (discardError) {
+          errors.push(discardError)
+        }
+      }
+    }
+    for (const reservation of this.#reservations.values()) {
+      try {
+        await this.#releasePreparedFork(reservation.prepared)
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+
+    // Startup promises are memoized. Usage retains its latest settled tail as
+    // a queue head, so verify its identity after draining the observable queues.
+    const startup = await Promise.allSettled([this.#ready, this.#gcReady])
+    for (const result of startup)
+      if (result.status === "rejected" && !errors.includes(result.reason))
+        errors.push(result.reason)
+    for (;;) {
+      const usageTail = this.#usageProjectionTail
+      const results = await Promise.allSettled([
+        ...this.#threadHistoryProjectionTails.values(),
+        ...this.#threadSearchProjectionTails.values(),
+        ...this.#searchProjectionPublications,
+        this.#searchProjectionRepair,
+        usageTail,
+      ])
+      for (const result of results)
+        if (result.status === "rejected") errors.push(result.reason)
+      if (
+        this.#threadHistoryProjectionTails.size === 0 &&
+        this.#threadSearchProjectionTails.size === 0 &&
+        this.#searchProjectionPublications.size === 0 &&
+        this.#searchProjectionRepair === undefined &&
+        this.#usageProjectionTail === usageTail
+      )
+        break
+    }
+    for (const projection of [
+      this.#historyProjection,
+      this.#searchIndex,
+      this.#usageProjection,
+    ]) {
+      try {
+        projection?.close()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1)
+      throw new AggregateError(errors, "Failed to close thread store.")
+  }
+
+  initialize = this.#operation(this.#initializeStorage)
 
   get #searchProjection(): SqliteThreadSearchProjection {
     this.#searchIndex ??= new SqliteThreadSearchProjection(
@@ -245,6 +348,7 @@ export class JsonlThreadStore implements ThreadStore {
   // without a durable thread index. A live host lease protects those files
   // from GC while the app is running.
   retainEphemeralRolloutAssets(rolloutId: string): () => void {
+    if (this.#closed) throw new Error("Thread store is closed.")
     requireThreadId(rolloutId)
     if (this.#ephemeralAssetOwners.has(rolloutId))
       throw new Error(`Ephemeral rollout ${rolloutId} already has an owner.`)
@@ -254,7 +358,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async withRolloutAssetMutation<T>(
+  withRolloutAssetMutation = this.#operation(this.#withRolloutAssetMutation)
+
+  async #withRolloutAssetMutation<T>(
     rolloutId: string,
     mutate: () => Promise<T>,
   ): Promise<T> {
@@ -317,7 +423,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
+  createThread = this.#operation(this.#createThread)
+
+  async #createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
     await this.#initializeStorage()
     requireThreadId(metadata.id)
     if (
@@ -387,7 +495,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async resumeThread(threadId: string): Promise<StoredThread | undefined> {
+  resumeThread = this.#operation(this.#resumeThread)
+
+  async #resumeThread(threadId: string): Promise<StoredThread | undefined> {
     await this.#initializeStorage()
     requireThreadId(threadId)
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
@@ -411,7 +521,7 @@ export class JsonlThreadStore implements ThreadStore {
         )
       return thread
     } catch (error) {
-      await this.discardThread(threadId)
+      await this.#discardThread(threadId)
       throw error
     }
   }
@@ -420,12 +530,19 @@ export class JsonlThreadStore implements ThreadStore {
     threadId: string,
     items: readonly RolloutItem[],
   ): Promise<RolloutAppend> {
+    return this.#run(() => this.#appendItems(threadId, items))
+  }
+
+  #appendItems(
+    threadId: string,
+    items: readonly RolloutItem[],
+  ): Promise<RolloutAppend> {
     const staged = this.#staged.get(threadId)
     if (staged !== undefined) {
       if (!staged.accepting) throw new Error(`Thread ${threadId} is closing.`)
       if (staged.materializing !== undefined) {
         return staged.materializing.then(() =>
-          this.appendItems(threadId, items),
+          this.#appendItems(threadId, items),
         )
       }
       const copied = structuredClone([...items])
@@ -440,7 +557,7 @@ export class JsonlThreadStore implements ThreadStore {
                 throughSeq: pending.throughSeq,
                 records: structuredClone(pending.records),
               }
-            : this.appendItems(threadId, items),
+            : this.#appendItems(threadId, items),
         )
       }
       const firstSeq = staged.rollout.length
@@ -492,7 +609,9 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  persistThread(threadId: string, context: PersistContext): Promise<void> {
+  persistThread = this.#operation(this.#persistThread)
+
+  #persistThread(threadId: string, context: PersistContext): Promise<void> {
     const staged = this.#staged.get(threadId)
     if (
       staged !== undefined &&
@@ -507,10 +626,12 @@ export class JsonlThreadStore implements ThreadStore {
     return context === PersistContext.TurnStart ||
       (context === PersistContext.GoalSet && !this.#writers.has(threadId))
       ? Promise.resolve()
-      : this.flushThread(threadId)
+      : this.#flushThread(threadId)
   }
 
-  flushThread(threadId: string): Promise<void> {
+  flushThread = this.#operation(this.#flushThread)
+
+  #flushThread(threadId: string): Promise<void> {
     const staged = this.#staged.get(threadId)
     if (staged !== undefined) return staged.materializing ?? Promise.resolve()
     const writer = this.#requireWriter(threadId)
@@ -521,7 +642,9 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  shutdownThread(threadId: string): Promise<void> {
+  shutdownThread = this.#operation(this.#shutdownThread)
+
+  #shutdownThread(threadId: string): Promise<void> {
     const staged = this.#staged.get(threadId)
     if (staged !== undefined) {
       if (staged.shutdownPromise !== undefined) return staged.shutdownPromise
@@ -529,7 +652,7 @@ export class JsonlThreadStore implements ThreadStore {
       staged.shutdownPromise =
         staged.materializing !== undefined
           ? staged.materializing.then(
-              () => this.shutdownThread(threadId),
+              () => this.#shutdownThread(threadId),
               (error: unknown) => {
                 staged.shutdownPromise = undefined
                 staged.accepting = true
@@ -588,12 +711,14 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async discardThread(threadId: string): Promise<void> {
+  discardThread = this.#operation(this.#discardThread)
+
+  async #discardThread(threadId: string): Promise<void> {
     const staged = this.#staged.get(threadId)
     if (staged !== undefined) {
       if (staged.materializing !== undefined) {
         await staged.materializing
-        return this.discardThread(threadId)
+        return this.#discardThread(threadId)
       }
       staged.accepting = false
       this.#staged.delete(threadId)
@@ -616,13 +741,15 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async prepareFork(input: PrepareForkInput): Promise<PreparedFork> {
+  prepareFork = this.#operation(this.#prepareFork)
+
+  async #prepareFork(input: PrepareForkInput): Promise<PreparedFork> {
     await this.#initializeStorage()
     requireThreadId(input.sourceThreadId)
     const staged = this.#staged.get(input.sourceThreadId)
     if (staged !== undefined) {
       // Explicit forks need a physical byte cutoff for inherited history.
-      await this.flushThread(input.sourceThreadId)
+      await this.#flushThread(input.sourceThreadId)
     }
     const reservationId = `fork_${globalThis.crypto.randomUUID()}`
     const localWriter = this.#writers.get(input.sourceThreadId)
@@ -693,7 +820,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async createFork(input: CreateForkInput): Promise<ThreadStoreForkResult> {
+  createFork = this.#operation(this.#createFork)
+
+  async #createFork(input: CreateForkInput): Promise<ThreadStoreForkResult> {
     await this.#ready
     const reservation = this.#reservations.get(input.prepared.reservationId)
     if (reservation?.prepared !== input.prepared) {
@@ -747,7 +876,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async releasePreparedFork(prepared: PreparedFork): Promise<void> {
+  releasePreparedFork = this.#operation(this.#releasePreparedFork)
+
+  async #releasePreparedFork(prepared: PreparedFork): Promise<void> {
     const reservation = this.#reservations.get(prepared.reservationId)
     if (reservation?.prepared === prepared) {
       await releaseOwnedLock(reservation.lock)
@@ -755,7 +886,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async revertThread(input: RevertThreadInput): Promise<RevertThreadResult> {
+  revertThread = this.#operation(this.#revertThread)
+
+  async #revertThread(input: RevertThreadInput): Promise<RevertThreadResult> {
     await this.#ready
     requireThreadId(input.threadId)
     requireThreadId(input.expectedRolloutId)
@@ -886,12 +1019,14 @@ export class JsonlThreadStore implements ThreadStore {
           await releaseOwnedLock(writerLock)
         }
       } finally {
-        await this.releasePreparedFork(prepared)
+        await this.#releasePreparedFork(prepared)
       }
     }
   }
 
-  async readThreadMetadata(
+  readThreadMetadata = this.#operation(this.#readThreadMetadata)
+
+  async #readThreadMetadata(
     threadId: string,
   ): Promise<ThreadMetadata | undefined> {
     await this.#ready
@@ -902,7 +1037,9 @@ export class JsonlThreadStore implements ThreadStore {
     return this.#readMetadata(threadId)
   }
 
-  async readThread(threadId: string): Promise<StoredThread | undefined> {
+  readThread = this.#operation(this.#readThread)
+
+  async #readThread(threadId: string): Promise<StoredThread | undefined> {
     await this.#ready
     requireThreadId(threadId)
     const staged = this.#staged.get(threadId)
@@ -932,7 +1069,9 @@ export class JsonlThreadStore implements ThreadStore {
     return this.#readRequiredThread(threadId)
   }
 
-  async readTranscriptItem(
+  readTranscriptItem = this.#operation(this.#readTranscriptItem)
+
+  async #readTranscriptItem(
     threadId: string,
     itemId: string,
     snapshot?: Readonly<{ rolloutId: string; through: number }>,
@@ -941,7 +1080,7 @@ export class JsonlThreadStore implements ThreadStore {
     requireThreadId(threadId)
     if (this.#staged.has(threadId)) return undefined
     return this.#withThreadHistoryProjection(threadId, async () => {
-      const metadata = await this.readThreadMetadata(threadId)
+      const metadata = await this.#readThreadMetadata(threadId)
       if (
         metadata === undefined ||
         (snapshot && snapshot.rolloutId !== metadata.rolloutId)
@@ -976,7 +1115,7 @@ export class JsonlThreadStore implements ThreadStore {
           "Indexed transcript item does not match its rollout record.",
         )
       if (
-        (await this.readThreadMetadata(threadId))?.rolloutId !==
+        (await this.#readThreadMetadata(threadId))?.rolloutId !==
         metadata.rolloutId
       )
         return undefined
@@ -984,8 +1123,12 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  async readThreadVersions(threadId: string): Promise<readonly StoredThread[]> {
-    const current = await this.readThread(threadId)
+  readThreadVersions = this.#operation(this.#readThreadVersions)
+
+  async #readThreadVersions(
+    threadId: string,
+  ): Promise<readonly StoredThread[]> {
+    const current = await this.#readThread(threadId)
     if (current === undefined) return []
     const versions = [current]
     const seen = new Set([current.metadata.rolloutId])
@@ -1010,20 +1153,19 @@ export class JsonlThreadStore implements ThreadStore {
     return versions
   }
 
-  async readDisplayWindow(
+  readDisplayWindow(
     threadId: string,
     beforeSeqExclusive?: number,
     transcript = false,
   ): Promise<DisplayWindowRead | undefined> {
-    return this.#readDisplayWindow(
-      threadId,
-      beforeSeqExclusive,
-      true,
-      transcript,
+    return this.#run(() =>
+      this.#readDisplayWindow(threadId, beforeSeqExclusive, true, transcript),
     )
   }
 
-  async readDisplayLocation(
+  readDisplayLocation = this.#operation(this.#readDisplayLocation)
+
+  async #readDisplayLocation(
     threadId: string,
     location: HistoryLocation,
     page: Readonly<{ before?: number; after?: number }>,
@@ -1031,7 +1173,7 @@ export class JsonlThreadStore implements ThreadStore {
     await this.#ready
     requireThreadId(threadId)
     return this.#withThreadHistoryProjection(threadId, async () => {
-      const metadata = await this.readThreadMetadata(threadId)
+      const metadata = await this.#readThreadMetadata(threadId)
       if (metadata?.rolloutId !== location.rolloutId) return undefined
       await this.#catchUpHistoryProjection(threadId)
       const window = this.#historyProjection.readDisplayLocation(
@@ -1041,7 +1183,7 @@ export class JsonlThreadStore implements ThreadStore {
       )
       if (
         window === undefined ||
-        (await this.readThreadMetadata(threadId))?.rolloutId !==
+        (await this.#readThreadMetadata(threadId))?.rolloutId !==
           metadata.rolloutId
       )
         return undefined
@@ -1135,23 +1277,27 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async readDisplayActivity(
+  readDisplayActivity = this.#operation(this.#readDisplayActivity)
+
+  async #readDisplayActivity(
     threadId: string,
     rolloutId: string,
     turnId: string,
     page: number | Readonly<{ aroundItemId: string }>,
   ): Promise<ThreadDisplayActivity | undefined> {
-    const metadata = await this.readThreadMetadata(threadId)
+    const metadata = await this.#readThreadMetadata(threadId)
     if (metadata?.rolloutId !== rolloutId) return undefined
     return this.#withThreadHistoryProjection(threadId, async () => {
       await this.#catchUpHistoryProjection(threadId)
-      if ((await this.readThreadMetadata(threadId))?.rolloutId !== rolloutId)
+      if ((await this.#readThreadMetadata(threadId))?.rolloutId !== rolloutId)
         return undefined
       return this.#historyProjection.readDisplayActivity(threadId, turnId, page)
     })
   }
 
-  async readThreadEvents(
+  readThreadEvents = this.#operation(this.#readThreadEvents)
+
+  async #readThreadEvents(
     threadId: string,
     input: Readonly<{ after: number; through?: number; limit: number }>,
   ): Promise<ThreadEventRead | undefined> {
@@ -1214,7 +1360,9 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  async readInputAdmissions(
+  readInputAdmissions = this.#operation(this.#readInputAdmissions)
+
+  async #readInputAdmissions(
     threadId: string,
     requestIds: readonly string[],
   ): Promise<ThreadInputAdmissionsRead | undefined> {
@@ -1257,7 +1405,9 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  async listThreadIds(): Promise<readonly string[]> {
+  listThreadIds = this.#operation(this.#listThreadIds)
+
+  async #listThreadIds(): Promise<readonly string[]> {
     await this.#ready
     return (await readdir(this.#threadsDirectory))
       .filter((file) => file.endsWith(".json"))
@@ -1266,14 +1416,16 @@ export class JsonlThreadStore implements ThreadStore {
       .sort()
   }
 
-  async listThreads(
+  listThreads = this.#operation(this.#listThreads)
+
+  async #listThreads(
     input: ThreadStoreListInput = {},
   ): Promise<ThreadStoreListResult> {
     await this.#ready
     const summaries = await this.#threadSummaries()
     const sidebar =
       input.view === "sessions"
-        ? await this.readSessionSidebar()
+        ? await this.#readSessionSidebar()
         : emptySessionSidebar()
     const entries =
       input.view === "sessions"
@@ -1310,7 +1462,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async readThreadSummary(
+  readThreadSummary = this.#operation(this.#readThreadSummary)
+
+  async #readThreadSummary(
     threadId: string,
   ): Promise<ThreadSummary | undefined> {
     await this.#ready
@@ -1341,7 +1495,9 @@ export class JsonlThreadStore implements ThreadStore {
         }
   }
 
-  async readModelRouting(
+  readModelRouting = this.#operation(this.#readModelRouting)
+
+  async #readModelRouting(
     threadId: string,
   ): Promise<ThreadModelRouting | undefined> {
     await this.#ready
@@ -1368,7 +1524,9 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  async readCompletedTurns(
+  readCompletedTurns = this.#operation(this.#readCompletedTurns)
+
+  async #readCompletedTurns(
     threadId: string,
     query: CompletedTurnsQuery,
   ): Promise<CompletedTurnsRead | undefined> {
@@ -1384,7 +1542,7 @@ export class JsonlThreadStore implements ThreadStore {
     }
     if (staged?.materializing !== undefined) await staged.materializing
     return this.#withThreadHistoryProjection(threadId, async () => {
-      const metadata = await this.readThreadMetadata(threadId)
+      const metadata = await this.#readThreadMetadata(threadId)
       if (
         metadata === undefined ||
         (query.rolloutId !== undefined &&
@@ -1396,7 +1554,9 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  async readProjectedThreadSummary(
+  readProjectedThreadSummary = this.#operation(this.#readProjectedThreadSummary)
+
+  async #readProjectedThreadSummary(
     threadId: string,
   ): Promise<ThreadSummary | undefined> {
     await this.#ready
@@ -1419,7 +1579,7 @@ export class JsonlThreadStore implements ThreadStore {
         .filter((file) => file.endsWith(".json"))
         .map(async (file): Promise<ThreadSummary | undefined> => {
           try {
-            return await this.readThreadSummary(basename(file, ".json"))
+            return await this.#readThreadSummary(basename(file, ".json"))
           } catch {
             // One damaged index entry cannot make every healthy Thread unlistable.
             return undefined
@@ -1454,7 +1614,9 @@ export class JsonlThreadStore implements ThreadStore {
     )
   }
 
-  async readSessionSidebar(): Promise<SessionSidebar> {
+  readSessionSidebar = this.#operation(this.#readSessionSidebar)
+
+  async #readSessionSidebar(): Promise<SessionSidebar> {
     await this.#ready
     const state = await this.#readDurableSessionSidebar()
     return {
@@ -1509,15 +1671,19 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async sessionPresentation(threadId: string): Promise<SessionPresentation> {
-    const metadata = await this.readThreadMetadata(threadId)
+  sessionPresentation = this.#operation(this.#sessionPresentation)
+
+  async #sessionPresentation(threadId: string): Promise<SessionPresentation> {
+    const metadata = await this.#readThreadMetadata(threadId)
     if (metadata === undefined || sessionEntries([metadata]).length === 0)
       return {}
-    const state = await this.readSessionSidebar()
+    const state = await this.#readSessionSidebar()
     return { ...state.entries[threadId] }
   }
 
-  async updateSessionSidebar(
+  updateSessionSidebar = this.#operation(this.#updateSessionSidebar)
+
+  async #updateSessionSidebar(
     change: SidebarChange,
     options: { onlyIfUntitled?: boolean } = {},
   ): Promise<SessionSidebar> {
@@ -1543,7 +1709,7 @@ export class JsonlThreadStore implements ThreadStore {
           .map(({ metadata }) => metadata),
       ])
       const durable = await this.#readDurableSessionSidebar()
-      const current = await this.readSessionSidebar()
+      const current = await this.#readSessionSidebar()
       if (options.onlyIfUntitled && change.type === "session") {
         const session = sessions.find((entry) => entry.id === change.sessionId)
         if (
@@ -1573,11 +1739,13 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async searchThreads(input: ThreadStoreSearchInput) {
+  searchThreads = this.#operation(this.#searchThreads)
+
+  async #searchThreads(input: ThreadStoreSearchInput) {
     await this.#ready
     const sidebar =
       input.view === "sessions"
-        ? await this.readSessionSidebar()
+        ? await this.#readSessionSidebar()
         : emptySessionSidebar()
     const entries =
       input.view === "sessions"
@@ -1632,7 +1800,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async searchThreadOccurrences(input: {
+  searchThreadOccurrences = this.#operation(this.#searchThreadOccurrences)
+
+  async #searchThreadOccurrences(input: {
     readonly threadId: string
     readonly searchTerm: string
     readonly toolActivity?: boolean
@@ -1655,14 +1825,16 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  async deleteThread(threadId: string): Promise<void> {
+  deleteThread = this.#operation(this.#deleteThread)
+
+  async #deleteThread(threadId: string): Promise<void> {
     await this.#ready
     requireThreadId(threadId)
     const staged = this.#staged.get(threadId)
     if (staged !== undefined) {
       if (staged.materializing !== undefined) await staged.materializing
       else {
-        await this.discardThread(threadId)
+        await this.#discardThread(threadId)
         return
       }
     }
@@ -2252,17 +2424,20 @@ export class JsonlThreadStore implements ThreadStore {
         .filter(isStorageKey),
     )
     for (const threadId of threadIds) {
+      if (this.#closed) throw new Error("Thread store is closed.")
       await this.#withThreadSearchProjection(threadId, async () => {
         // Catch-up records unreadable histories. Continue indexing healthy ones.
         await this.#catchUpSelectedSearchProjection(threadId).catch(() => {})
       })
     }
+    if (this.#closed) throw new Error("Thread store is closed.")
     const knownThreadIds = new Set([
       ...this.#searchProjection.indexedThreadIds(),
       ...this.#searchProjectionErrors.keys(),
     ])
     for (const threadId of knownThreadIds) {
       if (threadIds.has(threadId)) continue
+      if (this.#closed) throw new Error("Thread store is closed.")
       await this.#withThreadSearchProjection(threadId, async () => {
         // A Thread can be created after the directory snapshot above.
         if (await pathExists(this.#metadataPath(threadId))) return
@@ -2274,6 +2449,7 @@ export class JsonlThreadStore implements ThreadStore {
       const changed = [...this.#searchChangesDuringRepair]
       this.#searchChangesDuringRepair.clear()
       for (const threadId of changed) {
+        if (this.#closed) throw new Error("Thread store is closed.")
         await this.#withThreadSearchProjection(threadId, () =>
           this.#catchUpSelectedSearchProjection(threadId).catch(() => {}),
         )
@@ -2282,6 +2458,7 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   #scheduleProjectionRepair(threadId: string, afterWrite = false): void {
+    if (this.#closed) return
     const scheduled = this.#scheduledProjectionRepairs.get(threadId)
     if (scheduled !== undefined) {
       // An append can land after a repair has checked the file length but
@@ -2446,7 +2623,7 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   #noteSearchChange(threadId: string): void {
-    if (this.#searchProjectionRepair !== undefined)
+    if (!this.#closed && this.#searchProjectionRepair !== undefined)
       this.#searchChangesDuringRepair.add(threadId)
   }
 
@@ -2458,7 +2635,9 @@ export class JsonlThreadStore implements ThreadStore {
     return this.#searchProjectionRepair
   }
 
-  async readUsageSummary(): Promise<ThreadUsageSummary> {
+  readUsageSummary = this.#operation(this.#readUsageSummary)
+
+  async #readUsageSummary(): Promise<ThreadUsageSummary> {
     await this.#ready
     return this.#withUsageProjection(async () => {
       const unavailableThreads = await this.#synchronizeUsageProjection()
@@ -2679,7 +2858,7 @@ export class JsonlThreadStore implements ThreadStore {
           !retained.has(rolloutId) &&
           !this.#ephemeralAssetOwners.has(rolloutId),
       )
-    await Promise.all(
+    await settleStorageWork(
       unreferenced.map((rolloutId) =>
         rm(join(this.#rolloutsDirectory, rolloutId), {
           recursive: true,
@@ -2689,7 +2868,7 @@ export class JsonlThreadStore implements ThreadStore {
     )
     // Composer staging files belong to the running renderer. Queue and
     // accepted message attachments have already moved to requests/.
-    await Promise.all(
+    await settleStorageWork(
       [...retained]
         .filter((rolloutId) => !this.#ephemeralAssetOwners.has(rolloutId))
         .map((rolloutId) =>
@@ -3039,6 +3218,16 @@ function isMissing(error: unknown): boolean {
     "code" in error &&
     (error as Error & { readonly code?: string }).code === "ENOENT"
   )
+}
+
+async function settleStorageWork(tasks: Promise<unknown>[]): Promise<void> {
+  const results = await Promise.allSettled(tasks)
+  const errors = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  )
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1)
+    throw new AggregateError(errors, "Thread storage operations failed.")
 }
 
 function requireThreadId(threadId: string): void {

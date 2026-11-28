@@ -1,6 +1,6 @@
-import { mkdirSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import { join } from "node:path"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "./sqlite.ts"
 import { isGeneratedSessionId } from "../kernel/ids.ts"
 import type { AgentGraphStore, ThreadSpawnEdge } from "./agent-graph-store.ts"
 
@@ -20,10 +20,7 @@ export function createSqliteAgentGraphStore(
   const databasePath =
     options.databasePath ??
     join(options.rootDir ?? ".yakitori", "agent-graph.sqlite")
-  if (databasePath !== ":memory:") {
-    mkdirSync(dirname(databasePath), { recursive: true })
-  }
-  const database = new DatabaseSync(databasePath)
+  const database = openSqliteDatabase(databasePath, { profile: "durable" })
   initializeDatabase(database)
 
   return {
@@ -119,16 +116,13 @@ export function createSqliteAgentGraphStore(
     },
 
     close() {
-      if (database.isOpen) database.close()
+      closeSqliteDatabase(database)
     },
   }
 }
 
 function initializeDatabase(database: DatabaseSync): void {
   try {
-    database.exec("PRAGMA journal_mode = WAL")
-    database.exec("PRAGMA synchronous = FULL")
-    database.exec("PRAGMA busy_timeout = 5000")
     // Existing graph databases require this non-null column without a default.
     // Keep its physical shape and insert a constant; graph ownership is edge
     // existence, with no status transitions or filtering.
@@ -144,12 +138,8 @@ function initializeDatabase(database: DatabaseSync): void {
       CREATE INDEX IF NOT EXISTS thread_spawn_edges_parent_status
       ON thread_spawn_edges (parent_thread_id, status);
     `)
-    const enableDefensive = Reflect.get(database, "enableDefensive")
-    if (typeof enableDefensive === "function") {
-      Reflect.apply(enableDefensive, database, [true])
-    }
   } catch (error) {
-    if (database.isOpen) database.close()
+    closeSqliteDatabase(database)
     throw error
   }
 }
