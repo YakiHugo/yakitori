@@ -8,11 +8,11 @@ import {
   resolve,
   sep,
 } from "node:path"
+import type { DatabaseSync } from "node:sqlite"
 import packageJson from "../../package.json" with { type: "json" }
 import {
   createSqliteAgentGraphStore,
   JsonlThreadStore,
-  type SqliteAgentGraphStore,
   type StoredThread,
   ThreadManager,
   type ThreadStore,
@@ -21,6 +21,7 @@ import {
   type SessionTaskRunner,
   settleTaskResources,
 } from "../core/session-task.ts"
+import { closeSqliteDatabase } from "../core/sqlite.ts"
 import { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
 import {
@@ -28,7 +29,6 @@ import {
   createSqliteMateStore,
   type MateKernel,
   type MateProjection,
-  type SqliteMateStore,
 } from "../mates/index.ts"
 import { computerUseServerName } from "../protocol/connections.ts"
 import type { DesktopBrowser } from "../protocol/desktop-browser.ts"
@@ -86,6 +86,7 @@ import type {
 } from "../runtime/tools/types.ts"
 import { createAccountRuntime } from "./account-runtime.ts"
 import { readAccountUsage } from "./account-usage.ts"
+import { openAppStateDatabase } from "./app-state-database.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
 import {
   type AttachmentUploads,
@@ -120,6 +121,7 @@ import {
   type SessionCreateDefaults,
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
+import { InputQueue } from "./input-queue.ts"
 import { createMcpService, McpServiceError } from "./mcp-service.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
 import {
@@ -155,7 +157,6 @@ import {
 import {
   createSqliteProjectStore,
   type ProjectStore,
-  type SqliteProjectStore,
 } from "./sqlite-project-store.ts"
 import { createSubscriptionAccountStore } from "./subscription-accounts.ts"
 import {
@@ -198,6 +199,7 @@ export type YakitoriApplicationOptions = Readonly<{
   activeMateId?: string
   guiStaticDir?: string
   attachmentUploadOrigins?: readonly string[]
+  // Optional locations of pre-consolidation stores for the one-time import.
   mateDatabasePath?: string
   projectDatabasePath?: string
   rootDir?: string
@@ -225,8 +227,8 @@ export type YakitoriApplication = {
   readonly sideChats: SideChatService
   readonly handlers: ServerHandlers
   readonly mateKernel: MateKernel
-  readonly mateDatabasePath: string
-  readonly projectStore: SqliteProjectStore
+  readonly appStateDatabasePath: string
+  readonly projectStore: ProjectStore
   readonly threadManager: ThreadManager
   readonly threadStore: ThreadStore
   readonly rolloutAssets: ReturnType<typeof createRolloutAssets>
@@ -261,10 +263,6 @@ export async function createYakitoriApplication(
   const rootDir = options.rootDir ?? ".yakitori"
   const configuredSessionStoreRoot =
     options.sessionStoreRoot ?? join(rootDir, "sessions")
-  const mateDatabasePath =
-    options.mateDatabasePath ?? join(rootDir, "mates.sqlite")
-  const projectDatabasePath =
-    options.projectDatabasePath ?? join(rootDir, "projects.sqlite")
   const workspace = await resolveWorkspaceDirectory(
     options.workspace ?? process.env.YAKITORI_WORKSPACE ?? process.cwd(),
   )
@@ -281,9 +279,7 @@ export async function createYakitoriApplication(
   let threadStoreForCleanup: ThreadStore | undefined
   let threadManagerForCleanup: ThreadManager | undefined
   let agentRuntimeForCleanup: AgentRuntime | undefined
-  let agentGraphStoreForCleanup: SqliteAgentGraphStore | undefined
-  let mateStore: SqliteMateStore | undefined
-  let projectStoreForCleanup: SqliteProjectStore | undefined
+  let databaseForCleanup: DatabaseSync | undefined
   let sideChatsForCleanup: SideChatService | undefined
   let computerPreview: ComputerPreviewService | undefined
   const elicitations = createElicitationBroker()
@@ -325,29 +321,29 @@ export async function createYakitoriApplication(
     await mkdir(configuredSessionStoreRoot, { recursive: true })
     const sessionStoreRoot = await realpath(configuredSessionStoreRoot)
     runtimeLock = await acquireRuntimeLock(sessionStoreRoot)
+    const database = openAppStateDatabase({
+      rootDir,
+      sessionStoreRoot,
+      mateDatabasePath: options.mateDatabasePath,
+      projectDatabasePath: options.projectDatabasePath,
+    })
+    databaseForCleanup = database
     const engineRegistry = new EngineRegistry({
       configurations: engineConfigurations,
-      databasePath: join(rootDir, "external-sessions.sqlite"),
+      database,
       workspace,
       rolloutAssets: () => rolloutAssets,
       changed: (sessionId) =>
         broadcastNotification?.("engineSession/changed", { sessionId }),
     })
     engines = engineRegistry
-    const ownedMateStore = createSqliteMateStore({
-      databasePath: mateDatabasePath,
-    })
-    mateStore = ownedMateStore
-    const mateKernel = createMateKernel(ownedMateStore)
+    const mateKernel = createMateKernel(createSqliteMateStore(database))
     const eventHub = createSessionEventHub({
       reportOperationalFailure: reporter,
     })
     const permissionGate = createPermissionGate()
-    const ownedProjectStore = createSqliteProjectStore({
-      databasePath: projectDatabasePath,
-    })
-    projectStoreForCleanup = ownedProjectStore
-    await ensureWorkspaceProject(ownedProjectStore, workspace)
+    const projectStore = createSqliteProjectStore(database)
+    await ensureWorkspaceProject(projectStore, workspace)
     const userConfig = createUserConfigStore({
       workspaceRoot: workspace,
       ...(options.userConfigPath === undefined
@@ -376,18 +372,12 @@ export async function createYakitoriApplication(
       read: () => userConfig.read(),
       readConfiguration: async (input = {}) => {
         if (input.cwd === undefined) return userConfig.readConfiguration(input)
-        const root = await resolveProjectConfigRoot(
-          ownedProjectStore,
-          input.cwd,
-        )
+        const root = await resolveProjectConfigRoot(projectStore, input.cwd)
         return createSessionUserConfig(root).readConfiguration(input)
       },
       readSnapshot: async (input = {}) => {
         if (input.cwd === undefined) return userConfig.readSnapshot(input)
-        const root = await resolveProjectConfigRoot(
-          ownedProjectStore,
-          input.cwd,
-        )
+        const root = await resolveProjectConfigRoot(projectStore, input.cwd)
         return createSessionUserConfig(root).readSnapshot(input)
       },
       write: async (preference) => {
@@ -407,10 +397,7 @@ export async function createYakitoriApplication(
           await publishSessionConfigurations()
           return result
         }
-        const root = await resolveProjectConfigRoot(
-          ownedProjectStore,
-          input.cwd,
-        )
+        const root = await resolveProjectConfigRoot(projectStore, input.cwd)
         const result = await createSessionUserConfig(root).writeValue(input)
         await publishSessionConfigurations()
         return result
@@ -947,12 +934,9 @@ export async function createYakitoriApplication(
         : { allowedOrigins: options.attachmentUploadOrigins }),
       releaseDraftRolloutAssets,
     })
-    const agentGraphStore = createSqliteAgentGraphStore({
-      databasePath: join(sessionStoreRoot, "agent-graph.sqlite"),
-    })
-    agentGraphStoreForCleanup = agentGraphStore
+    const agentGraphStore = createSqliteAgentGraphStore(database)
     const goalRuntime = new GoalRuntime({
-      store: new SqliteGoalStore(join(sessionStoreRoot, "thread-goals.sqlite")),
+      store: new SqliteGoalStore(database),
       notify: (sessionId, goal) =>
         broadcastNotification?.(goalChangedMethod, {
           sessionId,
@@ -1030,7 +1014,7 @@ export async function createYakitoriApplication(
     ): Promise<SessionTaskRunner> => {
       const workingDirectory = stored.metadata.workingDirectory ?? workspace
       const configRoot = await resolveProjectConfigRoot(
-        ownedProjectStore,
+        projectStore,
         workingDirectory,
         stored.metadata.projectId,
       )
@@ -1489,7 +1473,7 @@ export async function createYakitoriApplication(
         for (const id of descendants) goalRuntime.clear(id)
       },
       store: threadStore,
-      inputQueueDatabasePath: join(sessionStoreRoot, "input-queue.sqlite"),
+      inputQueue: new InputQueue(database),
       eventHub,
       sessionDefaults,
       onRootTurnCompleted: (event) =>
@@ -1500,7 +1484,7 @@ export async function createYakitoriApplication(
         broadcastNotification?.(sessionHistoryResetMethod, { sessionId }),
       notifyQueueChanged: (sessionId) =>
         broadcastNotification?.(sessionQueueChangedMethod, { sessionId }),
-      projectStore: ownedProjectStore,
+      projectStore,
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: modelRouter.namespaces,
@@ -1513,7 +1497,7 @@ export async function createYakitoriApplication(
         // Resolve the config root the same way the turn-processor path does:
         // with the session's project, not a roots-only scan.
         const root = await resolveProjectConfigRoot(
-          ownedProjectStore,
+          projectStore,
           workingDirectory,
           projectId,
         )
@@ -1557,7 +1541,7 @@ export async function createYakitoriApplication(
           throw new McpServiceError("Session not found.")
         const cwd = stored?.metadata.workingDirectory ?? workspace
         const root = await resolveProjectConfigRoot(
-          ownedProjectStore,
+          projectStore,
           cwd,
           stored?.metadata.projectId,
         )
@@ -1611,8 +1595,8 @@ export async function createYakitoriApplication(
       sideChats,
       handlers,
       mateKernel,
-      mateDatabasePath,
-      projectStore: ownedProjectStore,
+      appStateDatabasePath: join(sessionStoreRoot, "app-state.sqlite"),
+      projectStore,
       threadManager,
       threadStore,
       rolloutAssets,
@@ -1633,7 +1617,7 @@ export async function createYakitoriApplication(
           sideChats,
           eventHub,
           handlers,
-          projectStore: ownedProjectStore,
+          projectStore,
           providers,
           previewModel: async ({ selection, requirements, sessionId }) => {
             const live =
@@ -1735,10 +1719,8 @@ export async function createYakitoriApplication(
           threadManager,
           threadStore,
           handlers.close,
-          ownedMateStore.close,
-          ownedProjectStore.close,
+          database,
           agentRuntime.close,
-          agentGraphStore.close,
           runtimeLock,
           sideChats,
           closeExtensions,
@@ -1757,10 +1739,8 @@ export async function createYakitoriApplication(
         threadManagerForCleanup,
         threadStoreForCleanup,
         closeHandlersForCleanup,
-        mateStore?.close,
-        projectStoreForCleanup?.close,
+        databaseForCleanup,
         agentRuntimeForCleanup?.close,
-        agentGraphStoreForCleanup?.close,
         runtimeLock,
         sideChatsForCleanup,
         closeExtensions,
@@ -2007,10 +1987,8 @@ async function closeApplicationResources(
   threadManager: ThreadManager | undefined,
   threadStore: ThreadStore | undefined,
   closeHandlers: (() => Promise<void>) | undefined,
-  closeMateStore: (() => void) | undefined,
-  closeProjectStore: (() => void) | undefined,
+  database: DatabaseSync | undefined,
   closeAgentRuntime: (() => Promise<void>) | undefined,
-  closeAgentGraphStore: (() => void) | undefined,
   runtimeLock: RuntimeLock | undefined,
   sideChats?: SideChatService,
   closeExtensions?: () => Promise<void>,
@@ -2060,22 +2038,12 @@ async function closeApplicationResources(
     errors.push(error)
   }
   try {
-    closeMateStore?.()
-  } catch (error) {
-    errors.push(error)
-  }
-  try {
-    closeProjectStore?.()
-  } catch (error) {
-    errors.push(error)
-  }
-  try {
-    closeAgentGraphStore?.()
-  } catch (error) {
-    errors.push(error)
-  }
-  try {
     goals?.close()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    if (database) closeSqliteDatabase(database)
   } catch (error) {
     errors.push(error)
   }
@@ -2094,7 +2062,7 @@ async function closeApplicationResources(
 // root membership; no idempotency key, because a user-deleted workspace
 // project is recreated on the next start rather than reported as deleted.
 async function ensureWorkspaceProject(
-  store: SqliteProjectStore,
+  store: ProjectStore,
   workspace: string,
 ): Promise<void> {
   let cursor: string | undefined

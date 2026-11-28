@@ -52,3 +52,20 @@ function openDatabase(
 export function closeSqliteDatabase(database: DatabaseSync): void {
   if (database.isOpen) database.close()
 }
+
+// Standalone stores own the connection they open. The application supplies
+// one connection whose schema and lifetime are owned by its startup boundary.
+export function connectStateStore(
+  source: string | DatabaseSync,
+  initialize: (database: DatabaseSync) => void,
+): { database: DatabaseSync; close(): void } {
+  if (typeof source !== "string") return { database: source, close() {} }
+  const database = openSqliteDatabase(source, { profile: "durable" })
+  try {
+    initialize(database)
+    return { database, close: () => closeSqliteDatabase(database) }
+  } catch (error) {
+    closeSqliteDatabase(database)
+    throw error
+  }
+}

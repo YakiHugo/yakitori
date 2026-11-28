@@ -12,7 +12,7 @@ import {
 } from "../../src/server/sqlite-project-store.ts"
 
 function memoryStore(): SqliteProjectStore {
-  return createSqliteProjectStore({ databasePath: ":memory:" })
+  return createSqliteProjectStore(":memory:")
 }
 
 describe("sqlite project store", () => {
@@ -186,7 +186,7 @@ describe("sqlite project store", () => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-projects-"))
     try {
       const databasePath = join(rootDir, "projects.sqlite")
-      const store = createSqliteProjectStore({ databasePath })
+      const store = createSqliteProjectStore(databasePath)
       const created = await store.createProject({
         name: "alpha",
         roots: ["/p/a", "/p/b"],

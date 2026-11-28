@@ -1,3 +1,4 @@
+import { openReadOnlySqliteDatabase } from "../../src/core/sqlite.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -92,7 +93,7 @@ describe("external app session persistence", () => {
     const first = testEngine()
     let service = createExternalSessionService({
       engine: first.engine,
-      databasePath: path,
+      database: path,
     })
     const session = await service.create({
       cwd: "/project",
@@ -114,7 +115,7 @@ describe("external app session persistence", () => {
     const second = testEngine()
     service = createExternalSessionService({
       engine: second.engine,
-      databasePath: path,
+      database: path,
     })
     try {
       expect(service.read(session.id)).toMatchObject({
@@ -148,7 +149,8 @@ describe("external app session persistence", () => {
       expect(
         service.read(session.id)?.events.map((event) => event.seq),
       ).toEqual([1, 2, 3, 4])
-      expect(listStoredExternalEngineIds(path)).toEqual(["test-external"])
+      using reader = openReadOnlySqliteDatabase(path)
+      expect(listStoredExternalEngineIds(reader)).toEqual(["test-external"])
     } finally {
       await service.close()
     }
@@ -158,7 +160,7 @@ describe("external app session persistence", () => {
     const external = testEngine()
     const service = createExternalSessionService({
       engine: external.engine,
-      databasePath: ":memory:",
+      database: ":memory:",
     })
     try {
       const session = await service.create({ cwd: "/project" })
@@ -184,7 +186,7 @@ describe("external app session persistence", () => {
     const notifications: string[] = []
     const service = createExternalSessionService({
       engine: external.engine,
-      databasePath: ":memory:",
+      database: ":memory:",
       changed: (id) => notifications.push(id),
     })
     try {
@@ -248,11 +250,11 @@ describe("external app session persistence", () => {
     const path = await databasePath()
     const first = createExternalSessionService({
       engine: testEngine("one").engine,
-      databasePath: path,
+      database: path,
     })
     const second = createExternalSessionService({
       engine: testEngine("two").engine,
-      databasePath: path,
+      database: path,
     })
     try {
       const session = await first.create({ cwd: "/project" })
@@ -261,7 +263,8 @@ describe("external app session persistence", () => {
       await expect(
         second.send(session.id, { requestId: "x", text: "wrong engine" }),
       ).rejects.toThrow("not found")
-      expect(listStoredExternalEngineIds(path)).toEqual(["one"])
+      using reader = openReadOnlySqliteDatabase(path)
+      expect(listStoredExternalEngineIds(reader)).toEqual(["one"])
     } finally {
       await first.close()
       await second.close()
@@ -274,7 +277,7 @@ describe("external app session persistence", () => {
     }
     const service = createExternalSessionService({
       engine: external.engine,
-      databasePath: await databasePath(),
+      database: await databasePath(),
     })
     await service.create({ cwd: "/project" })
     await expect(service.close()).rejects.toThrow("Shutdown failed")
@@ -303,7 +306,7 @@ describe("external app session persistence", () => {
     })
     const service = createExternalSessionService({
       engine,
-      databasePath: ":memory:",
+      database: ":memory:",
     })
     try {
       const session = await service.create({ cwd: "/tmp" })
@@ -356,7 +359,7 @@ describe("external app session persistence", () => {
     }
     const service = createExternalSessionService({
       engine: external.engine,
-      databasePath: ":memory:",
+      database: ":memory:",
     })
     const creating = service.create({ cwd: "/project" })
     const rejected = expect(creating).rejects.toThrow("closed")

@@ -14,7 +14,7 @@ const input = workerData as WorkerInput
 if (!parentPort) throw new Error("Expected a parent worker port.")
 const port = parentPort
 
-const store = createSqliteMateStore({ databasePath: input.databasePath })
+const store = createSqliteMateStore(input.databasePath)
 port.postMessage({ type: "ready" })
 Atomics.wait(new Int32Array(input.startGate), 0, 0)
 try {

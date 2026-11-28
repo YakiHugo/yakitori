@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -2701,7 +2702,7 @@ describe("application composition", () => {
     })
   })
 
-  it("releases the Session lock when Mate storage construction fails", async () => {
+  it("releases the Session lock when legacy state import fails", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const invalidDatabasePath = join(rootDir, "mate-database-directory")
       await mkdir(invalidDatabasePath)
@@ -2720,6 +2721,40 @@ describe("application composition", () => {
     })
   })
 
+  it("keeps business state in one database and opens the separate search projection on demand", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const app = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      try {
+        const sqliteFiles = async () =>
+          (await readdir(app.sessionStoreRoot))
+            .filter((file) => file.endsWith(".sqlite"))
+            .sort()
+        expect(
+          (await readdir(rootDir)).filter((file) => file.endsWith(".sqlite")),
+        ).toEqual([])
+        expect(await sqliteFiles()).toEqual([
+          "app-state.sqlite",
+          "thread-history.sqlite",
+          "thread-usage.sqlite",
+        ])
+        await app.threadStore.searchThreads({ searchTerm: "hello", limit: 1 })
+        expect(await sqliteFiles()).toEqual([
+          "app-state.sqlite",
+          "thread-history.sqlite",
+          "thread-search.sqlite",
+          "thread-usage.sqlite",
+        ])
+      } finally {
+        await app.close()
+      }
+      expect(await readdir(app.sessionStoreRoot)).not.toContain(
+        "app-state.sqlite-wal",
+      )
+    })
+  })
+
   it("creates one default Mate only once across restarts", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const first = await createYakitoriApplication(
@@ -2730,7 +2765,9 @@ describe("application composition", () => {
       expect(first.sessionStoreRoot).toBe(
         await realpath(join(rootDir, "sessions")),
       )
-      expect(first.mateDatabasePath).toBe(join(rootDir, "mates.sqlite"))
+      expect(first.appStateDatabasePath).toBe(
+        join(first.sessionStoreRoot, "app-state.sqlite"),
+      )
       await Promise.all([first.close(), first.close()])
 
       const second = await createYakitoriApplication(
@@ -2752,7 +2789,7 @@ describe("application composition", () => {
   it("does not treat events.sqlite as the Mate database", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const legacyPath = join(rootDir, "events.sqlite")
-      const mateStore = createSqliteMateStore({ databasePath: legacyPath })
+      const mateStore = createSqliteMateStore(legacyPath)
       const legacyMate = await createMateKernel(mateStore).createMate({
         instructions: "Old development data.",
         name: "Legacy",
@@ -2764,7 +2801,9 @@ describe("application composition", () => {
         testApplicationOptions({ rootDir, workspace }),
       )
       try {
-        expect(application.mateDatabasePath).toBe(join(rootDir, "mates.sqlite"))
+        expect(application.appStateDatabasePath).toBe(
+          join(application.sessionStoreRoot, "app-state.sqlite"),
+        )
         expect(application.activeMate.mateId).not.toBe(legacyMate.mate.id)
         expect((await application.mateKernel.listMates()).mates).toHaveLength(1)
       } finally {
@@ -2775,9 +2814,7 @@ describe("application composition", () => {
 
   it("selects an explicitly configured active Mate and pins its revision", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
-      const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "mates.sqlite"),
-      })
+      const mateStore = createSqliteMateStore(join(rootDir, "mates.sqlite"))
       const mateKernel = createMateKernel(mateStore)
       const created = await mateKernel.createMate({
         instructions: "Prefer explicit tests.",
@@ -2833,9 +2870,7 @@ describe("application composition", () => {
 
   it("fails startup when multiple Mates exist without an explicit selection", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
-      const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "mates.sqlite"),
-      })
+      const mateStore = createSqliteMateStore(join(rootDir, "mates.sqlite"))
       const mateKernel = createMateKernel(mateStore)
       await mateKernel.createMate({
         instructions: "one",

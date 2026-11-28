@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite"
 import type { RolloutAssets } from "../core/rollout-assets.ts"
 import type { UserAttachment } from "../protocol/asset-types.ts"
 import type {
@@ -44,7 +45,7 @@ export class EngineRegistry {
 
   constructor(options: {
     configurations: readonly AcpEngineConfiguration[]
-    databasePath: string
+    database: DatabaseSync
     workspace: string
     changed: (sessionId: string) => void
     rolloutAssets?: () => RolloutAssets
@@ -67,7 +68,7 @@ export class EngineRegistry {
           available: true,
           service: createExternalSessionService({
             engine: adapter,
-            databasePath: options.databasePath,
+            database: options.database,
             changed: options.changed,
             ...(assets === undefined
               ? {}
@@ -81,7 +82,7 @@ export class EngineRegistry {
           }),
         })
       }
-      for (const id of listStoredExternalEngineIds(options.databasePath)) {
+      for (const id of listStoredExternalEngineIds(options.database)) {
         if (this.#entries.has(id)) continue
         const unavailable = async (): Promise<never> => {
           throw new EngineRegistryError(
@@ -105,7 +106,7 @@ export class EngineRegistry {
           available: false,
           service: createExternalSessionService({
             engine: adapter,
-            databasePath: options.databasePath,
+            database: options.database,
             changed: options.changed,
           }),
         })

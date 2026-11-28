@@ -459,7 +459,7 @@ it.each([
   // Read the persisted observations rather than reopening the admission gate
   // or mocking a handler. Closing the service here could mask a failed cancel.
   const database = new DatabaseSync(
-    join(root as string, "external-sessions.sqlite"),
+    join(root as string, "sessions", "app-state.sqlite"),
     { readOnly: true },
   )
   try {

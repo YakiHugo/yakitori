@@ -316,7 +316,7 @@ describe("goal handlers", () => {
     expect(await application.threadStore.readThread(deletedId)).toBeUndefined()
     await close(application)
     const persisted = new SqliteGoalStore(
-      join(rootDir, "sessions", "thread-goals.sqlite"),
+      join(rootDir, "sessions", "app-state.sqlite"),
     )
     try {
       expect(persisted.read(clearedId)).toBeUndefined()

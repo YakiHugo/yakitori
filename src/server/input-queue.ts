@@ -3,7 +3,7 @@ import type { QueuedInput } from "../protocol/input-queue.ts"
 export type { QueuedInput } from "../protocol/input-queue.ts"
 
 import type { DatabaseSync } from "node:sqlite"
-import { closeSqliteDatabase, openSqliteDatabase } from "../core/sqlite.ts"
+import { connectStateStore } from "../core/sqlite.ts"
 import type { TurnInput } from "../core/session-io.ts"
 import { readStoredInputContent } from "../core/user-input.ts"
 import { createInputId } from "../kernel/ids.ts"
@@ -26,54 +26,18 @@ type QueueRow = Readonly<{
 // The queue is an editable resource. A queued message has not entered the
 // conversation rollout; the rollout records it only when a Turn starts.
 export class InputQueue {
+  readonly #closeDatabase: () => void
   readonly #database: DatabaseSync
   readonly sharedAcrossConnections: boolean
 
-  constructor(databasePath = ":memory:") {
-    this.sharedAcrossConnections = databasePath !== ":memory:"
-    this.#database = openSqliteDatabase(databasePath, { profile: "durable" })
-    try {
-      this.#database.exec(`
-      CREATE TABLE IF NOT EXISTS input_queue (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        request_id TEXT NOT NULL,
-        input_json TEXT NOT NULL,
-        queue_order INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        UNIQUE(session_id, request_id)
-      );
-      CREATE INDEX IF NOT EXISTS input_queue_order
-        ON input_queue(session_id, queue_order);
-      CREATE TABLE IF NOT EXISTS input_queue_revisions (
-        revision INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL UNIQUE
-      );
-      INSERT OR IGNORE INTO input_queue_revisions (session_id)
-        SELECT DISTINCT session_id FROM input_queue ORDER BY session_id;
-      CREATE TRIGGER IF NOT EXISTS input_queue_revision_after_insert
-      AFTER INSERT ON input_queue BEGIN
-        INSERT INTO input_queue_revisions (session_id) VALUES (NEW.session_id)
-        ON CONFLICT(session_id) DO UPDATE SET revision =
-          (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
-      END;
-      CREATE TRIGGER IF NOT EXISTS input_queue_revision_after_update
-      AFTER UPDATE ON input_queue BEGIN
-        INSERT INTO input_queue_revisions (session_id) VALUES (NEW.session_id)
-        ON CONFLICT(session_id) DO UPDATE SET revision =
-          (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
-      END;
-      CREATE TRIGGER IF NOT EXISTS input_queue_revision_after_delete
-      AFTER DELETE ON input_queue BEGIN
-        INSERT INTO input_queue_revisions (session_id) VALUES (OLD.session_id)
-        ON CONFLICT(session_id) DO UPDATE SET revision =
-          (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
-      END;
-    `)
-    } catch (error) {
-      closeSqliteDatabase(this.#database)
-      throw error
-    }
+  constructor(source: DatabaseSync | string = ":memory:") {
+    const { database, close } = connectStateStore(source, (db) => {
+      initializeInputQueueTables(db)
+      initializeInputQueueRevisions(db)
+    })
+    this.#database = database
+    this.#closeDatabase = close
+    this.sharedAcrossConnections = database.location() !== null
   }
 
   changeVersion(): number {
@@ -214,7 +178,7 @@ export class InputQueue {
   }
 
   close(): void {
-    closeSqliteDatabase(this.#database)
+    this.#closeDatabase()
   }
 }
 
@@ -226,4 +190,51 @@ function fromRow(row: QueueRow): QueuedInput {
     input: { ...input, content: readStoredInputContent(input.content) },
     createdAt: row.created_at,
   }
+}
+
+export function initializeInputQueueTables(database: DatabaseSync): void {
+  database.exec(`
+      CREATE TABLE IF NOT EXISTS input_queue (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        queue_order INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(session_id, request_id)
+      );
+      CREATE INDEX IF NOT EXISTS input_queue_order
+        ON input_queue(session_id, queue_order);
+      CREATE TABLE IF NOT EXISTS input_queue_revisions (
+        revision INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL UNIQUE
+      );
+    `)
+}
+
+export function initializeInputQueueRevisions(database: DatabaseSync): void {
+  database.exec(`
+      INSERT OR IGNORE INTO input_queue_revisions (session_id)
+        SELECT DISTINCT session_id FROM input_queue
+        WHERE session_id NOT IN (SELECT session_id FROM input_queue_revisions)
+        ORDER BY session_id;
+      CREATE TRIGGER IF NOT EXISTS input_queue_revision_after_insert
+      AFTER INSERT ON input_queue BEGIN
+        INSERT INTO input_queue_revisions (session_id) VALUES (NEW.session_id)
+        ON CONFLICT(session_id) DO UPDATE SET revision =
+          (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
+      END;
+      CREATE TRIGGER IF NOT EXISTS input_queue_revision_after_update
+      AFTER UPDATE ON input_queue BEGIN
+        INSERT INTO input_queue_revisions (session_id) VALUES (NEW.session_id)
+        ON CONFLICT(session_id) DO UPDATE SET revision =
+          (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
+      END;
+      CREATE TRIGGER IF NOT EXISTS input_queue_revision_after_delete
+      AFTER DELETE ON input_queue BEGIN
+        INSERT INTO input_queue_revisions (session_id) VALUES (OLD.session_id)
+        ON CONFLICT(session_id) DO UPDATE SET revision =
+          (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
+      END;
+    `)
 }

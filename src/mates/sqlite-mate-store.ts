@@ -1,6 +1,5 @@
-import { join } from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { closeSqliteDatabase, openSqliteDatabase } from "../core/sqlite.ts"
+import { connectStateStore } from "../core/sqlite.ts"
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import {
   createMateEventEnvelope,
@@ -24,11 +23,6 @@ export type SqliteMateStore = MateStore & {
   close(): void
 }
 
-export type SqliteMateStoreOptions = {
-  readonly databasePath?: string
-  readonly rootDir?: string
-}
-
 type EventRow = { readonly envelope_json: string }
 type MateIdRow = { readonly mate_id: string }
 type SequenceRow = { readonly seq: number }
@@ -38,13 +32,9 @@ type SummaryRow = {
 }
 
 export function createSqliteMateStore(
-  options: SqliteMateStoreOptions = {},
+  source: string | DatabaseSync,
 ): SqliteMateStore {
-  const databasePath =
-    options.databasePath ?? join(options.rootDir ?? ".yakitori", "mates.sqlite")
-
-  const database = openSqliteDatabase(databasePath, { profile: "durable" })
-  initializeDatabase(database)
+  const { database, close } = connectStateStore(source, initializeMateTables)
 
   return {
     async appendEvent(mateId, event, options = {}) {
@@ -82,15 +72,12 @@ export function createSqliteMateStore(
       return readEvents(database, mateId)
     },
 
-    close() {
-      closeSqliteDatabase(database)
-    },
+    close,
   }
 }
 
-function initializeDatabase(database: DatabaseSync): void {
-  try {
-    database.exec(`
+export function initializeMateTables(database: DatabaseSync): void {
+  database.exec(`
       CREATE TABLE IF NOT EXISTS mate_events (
         mate_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -104,10 +91,6 @@ function initializeDatabase(database: DatabaseSync): void {
         summary_json TEXT NOT NULL
       ) STRICT;
     `)
-  } catch (error) {
-    closeSqliteDatabase(database)
-    throw error
-  }
 }
 
 function listMates(

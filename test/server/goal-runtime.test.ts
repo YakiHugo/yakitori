@@ -484,13 +484,11 @@ describe("goal runtime", () => {
     // Recreate the durable crash checkpoint: the user Turn has completed with
     // an active goal, but its accepted queue row has not yet been removed.
     const goals = new SqliteGoalStore(
-      join(rootDir, "sessions", "thread-goals.sqlite"),
+      join(rootDir, "sessions", "app-state.sqlite"),
     )
     goals.save({ ...goal, status: "active" })
     goals.close()
-    const queue = new InputQueue(
-      join(rootDir, "sessions", "input-queue.sqlite"),
-    )
+    const queue = new InputQueue(join(rootDir, "sessions", "app-state.sqlite"))
     queue.enqueue(sessionId, input)
     queue.close()
 
