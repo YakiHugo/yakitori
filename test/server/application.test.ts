@@ -2674,6 +2674,33 @@ describe("application composition", () => {
     })
   })
 
+  it("holds the runtime lock until thread storage finishes closing", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const options = testApplicationOptions({ rootDir, workspace })
+      const app = await createYakitoriApplication(options)
+      const started = deferred<void>()
+      const release = deferred<void>()
+      const close = app.threadStore.close.bind(app.threadStore)
+      vi.spyOn(app.threadStore, "close").mockImplementation(async () => {
+        started.resolve()
+        await release.promise
+        await close()
+      })
+      const closing = app.close()
+      try {
+        await started.promise
+        await expect(createYakitoriApplication(options)).rejects.toThrow(
+          "Runtime lock is held",
+        )
+      } finally {
+        release.resolve()
+        await closing
+      }
+      const reopened = await createYakitoriApplication(options)
+      await reopened.close()
+    })
+  })
+
   it("releases the Session lock when Mate storage construction fails", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const invalidDatabasePath = join(rootDir, "mate-database-directory")

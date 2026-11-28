@@ -54,6 +54,7 @@ type Writer = {
 }
 
 export class MemoryThreadStore implements ThreadStore {
+  async close(): Promise<void> {}
   #sidebar = emptySessionSidebar()
   async readSessionSidebar() {
     return structuredClone(this.#sidebar)

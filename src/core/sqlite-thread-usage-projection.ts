@@ -6,9 +6,8 @@ export type {
   UsageTokenTotals,
 } from "../protocol/usage.ts"
 
-import { mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "./sqlite.ts"
 import type { StoredThread } from "./rollout.ts"
 import type { RolloutProjectionStamp } from "./sqlite-rollout-projection.ts"
 import type { UsageHistory } from "./usage-history.ts"
@@ -30,14 +29,17 @@ export class SqliteThreadUsageProjection {
   readonly #database: DatabaseSync
 
   constructor(databasePath: string) {
-    if (databasePath !== ":memory:") {
-      mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 })
+    this.#database = openSqliteDatabase(databasePath, { profile: "projection" })
+    try {
+      initializeDatabase(this.#database)
+    } catch (error) {
+      closeSqliteDatabase(this.#database)
+      throw error
     }
-    this.#database = new DatabaseSync(databasePath, {
-      timeout: 5_000,
-      enableDoubleQuotedStringLiterals: false,
-    })
-    initializeDatabase(this.#database)
+  }
+
+  close(): void {
+    closeSqliteDatabase(this.#database)
   }
 
   indexedThreadIds(): readonly string[] {
@@ -285,9 +287,6 @@ function totalsFromRow(row: TotalsRow) {
 }
 
 function initializeDatabase(database: DatabaseSync): void {
-  database.exec("PRAGMA journal_mode = WAL")
-  database.exec("PRAGMA synchronous = FULL")
-  database.exec("PRAGMA foreign_keys = ON")
   const version = database.prepare("PRAGMA user_version").get() as
     | Readonly<{ user_version: number }>
     | undefined

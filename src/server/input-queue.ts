@@ -2,9 +2,8 @@ import type { QueuedInput } from "../protocol/input-queue.ts"
 
 export type { QueuedInput } from "../protocol/input-queue.ts"
 
-import { mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "../core/sqlite.ts"
 import type { TurnInput } from "../core/session-io.ts"
 import { readStoredInputContent } from "../core/user-input.ts"
 import { createInputId } from "../kernel/ids.ts"
@@ -32,13 +31,9 @@ export class InputQueue {
 
   constructor(databasePath = ":memory:") {
     this.sharedAcrossConnections = databasePath !== ":memory:"
-    if (databasePath !== ":memory:")
-      mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 })
-    this.#database = new DatabaseSync(databasePath, {
-      timeout: 5_000,
-      enableDoubleQuotedStringLiterals: false,
-    })
-    this.#database.exec(`
+    this.#database = openSqliteDatabase(databasePath, { profile: "durable" })
+    try {
+      this.#database.exec(`
       CREATE TABLE IF NOT EXISTS input_queue (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -75,6 +70,10 @@ export class InputQueue {
           (SELECT COALESCE(MAX(revision), 0) + 1 FROM input_queue_revisions);
       END;
     `)
+    } catch (error) {
+      closeSqliteDatabase(this.#database)
+      throw error
+    }
   }
 
   changeVersion(): number {
@@ -215,7 +214,7 @@ export class InputQueue {
   }
 
   close(): void {
-    this.#database.close()
+    closeSqliteDatabase(this.#database)
   }
 }
 

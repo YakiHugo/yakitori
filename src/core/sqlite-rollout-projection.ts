@@ -1,6 +1,5 @@
-import { mkdirSync } from "node:fs"
-import { dirname } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "./sqlite.ts"
 import type { RolloutRecordLocation } from "./display-window.ts"
 import type {
   StoredRolloutItem,
@@ -94,29 +93,20 @@ export abstract class SqliteRolloutProjection {
     dropDerivedTables: (database: DatabaseSync) => void,
     createDerivedTables: (database: DatabaseSync) => void,
   ) {
-    if (databasePath !== ":memory:")
-      mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 })
-    this.database = new DatabaseSync(databasePath, {
-      timeout: 5_000,
-      enableDoubleQuotedStringLiterals: false,
-    })
-    this.database.exec("PRAGMA journal_mode = WAL")
-    this.database.exec("PRAGMA synchronous = NORMAL")
-    this.database.exec("PRAGMA checkpoint_fullfsync = ON")
-    this.database.exec("PRAGMA journal_size_limit = 134217728")
-    this.database.exec("PRAGMA foreign_keys = ON")
-    this.#transaction(() => {
-      const { user_version: version } = this.database
-        .prepare("PRAGMA user_version")
-        .get() as { user_version: number }
-      if (version !== schemaVersion) {
-        dropDerivedTables(this.database)
-        this.database.exec(`
+    this.database = openSqliteDatabase(databasePath, { profile: "projection" })
+    try {
+      this.#transaction(() => {
+        const { user_version: version } = this.database
+          .prepare("PRAGMA user_version")
+          .get() as { user_version: number }
+        if (version !== schemaVersion) {
+          dropDerivedTables(this.database)
+          this.database.exec(`
           DROP TABLE IF EXISTS rollout_checkpoints;
           DROP TABLE IF EXISTS projection_threads;
         `)
-      }
-      this.database.exec(`
+        }
+        this.database.exec(`
     CREATE TABLE IF NOT EXISTS projection_threads (
       thread_id TEXT PRIMARY KEY,
       metadata_json TEXT NOT NULL,
@@ -138,8 +128,16 @@ export abstract class SqliteRolloutProjection {
     ) STRICT;
         PRAGMA user_version = ${schemaVersion};
       `)
-      createDerivedTables(this.database)
-    })
+        createDerivedTables(this.database)
+      })
+    } catch (error) {
+      closeSqliteDatabase(this.database)
+      throw error
+    }
+  }
+
+  close(): void {
+    closeSqliteDatabase(this.database)
   }
 
   protected abstract applyEntries(

@@ -47,6 +47,43 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("seals new work and releases active writers, staged threads and fork reservations", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_close"
+    await createPersistentThread(store, metadata(id))
+    await store.appendItems(id, [response("turn_close", "saved")])
+    await store.prepareFork({
+      sourceThreadId: id,
+      boundary: { type: "latest" },
+    })
+    const staged = store.createThread(metadata("staged_close"))
+    const usage = store.readUsageSummary()
+    const closing = store.close()
+    expect(store.close()).toBe(closing)
+    await expect(store.appendItems(id, [])).rejects.toThrow(
+      "Thread store is closed",
+    )
+    await Promise.all([staged, usage, closing])
+    await expect(
+      store.searchThreads({ searchTerm: "saved", limit: 1 }),
+    ).rejects.toThrow("Thread store is closed")
+    expect(await readdir(join(root, "locks", "reservations"))).toEqual([])
+    const files = await readdir(root)
+    expect(files).not.toContain("thread-search.sqlite")
+    expect(
+      files.filter((file) => file.endsWith("-wal") || file.endsWith("-shm")),
+    ).toEqual([])
+    const reopened = new JsonlThreadStore({ root })
+    try {
+      expect(
+        (await reopened.resumeThread(id))?.rollout.at(-1)?.item,
+      ).toMatchObject({ type: "response_item" })
+      await reopened.createThread(metadata("staged_close"))
+    } finally {
+      await reopened.close()
+    }
+  })
+
   it("reads the latest user prompt without the earlier prompt", async () => {
     const { store } = await createStore()
     const id = "thread_display_window"

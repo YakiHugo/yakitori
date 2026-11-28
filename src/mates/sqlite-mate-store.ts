@@ -1,6 +1,6 @@
-import { mkdirSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import { join } from "node:path"
+import type { DatabaseSync } from "node:sqlite"
+import { closeSqliteDatabase, openSqliteDatabase } from "../core/sqlite.ts"
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import {
   createMateEventEnvelope,
@@ -42,11 +42,8 @@ export function createSqliteMateStore(
 ): SqliteMateStore {
   const databasePath =
     options.databasePath ?? join(options.rootDir ?? ".yakitori", "mates.sqlite")
-  if (databasePath !== ":memory:") {
-    mkdirSync(dirname(databasePath), { recursive: true })
-  }
 
-  const database = new DatabaseSync(databasePath)
+  const database = openSqliteDatabase(databasePath, { profile: "durable" })
   initializeDatabase(database)
 
   return {
@@ -86,16 +83,13 @@ export function createSqliteMateStore(
     },
 
     close() {
-      if (database.isOpen) database.close()
+      closeSqliteDatabase(database)
     },
   }
 }
 
 function initializeDatabase(database: DatabaseSync): void {
   try {
-    database.exec("PRAGMA journal_mode = WAL")
-    database.exec("PRAGMA synchronous = FULL")
-    database.exec("PRAGMA busy_timeout = 5000")
     database.exec(`
       CREATE TABLE IF NOT EXISTS mate_events (
         mate_id TEXT NOT NULL,
@@ -110,12 +104,8 @@ function initializeDatabase(database: DatabaseSync): void {
         summary_json TEXT NOT NULL
       ) STRICT;
     `)
-    const enableDefensive = Reflect.get(database, "enableDefensive")
-    if (typeof enableDefensive === "function") {
-      Reflect.apply(enableDefensive, database, [true])
-    }
   } catch (error) {
-    if (database.isOpen) database.close()
+    closeSqliteDatabase(database)
     throw error
   }
 }
